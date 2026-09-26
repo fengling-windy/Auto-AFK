@@ -1,0 +1,90 @@
+event:
+  host: 127.0.0.1
+
+heartbeat_sec: 20
+hang_timeout_sec: 1800
+report_dedupe_hours: 20
+
+housekeeping:
+  enabled: true
+  log_days: 14
+  report_days: 30
+  events_max_mb: 50
+
+repair:
+  enabled: true
+  max_rounds: 2
+  auto_unsafe: false
+  retry_delay_sec: 5
+
+notifications:
+  enabled: false
+  provider: serverchan
+  params: {}
+  toast: true
+  dedupe_sec: 30
+
+post_actions:
+  after_all: none
+  delay_sec: 60
+
+doctor:
+  emulator_processes:
+    - mumuplayer
+    - nemuplayer
+    - dnplayer
+    - lmdplayer
+    - MuMuNxDevice
+  game_processes:
+    - endfield
+    - starrail
+    - bluearchive
+    - arknights
+  emulator_exe: ""
+  game_exe: ""
+
+gui:
+  minimize_to_tray: false
+  autostart_chain_on_launch: false
+  project_colors:
+    March7thAssistant: "#4fc3f7"
+    BAAH: "#81c784"
+    MaaEnd: "#ffb74d"
+    ZenlessZoneZero-OneDragon: "#b388ff"
+    BetterGI: "#ffd54f"
+    core: "#ce93d8"
+    emulator: "#4db6ac"
+    update: "#90a4ae"
+
+schedule:
+  enabled: false
+  time: "04:00"
+  days: [mon, tue, wed, thu, fri, sat, sun]
+
+pre_run:
+  enabled: true
+  update_projects: true
+  update_emulator: true
+  emulator:
+    enabled: true
+    manage: true
+    main_exe: E:\MuMuPlayer\nx_main\MuMuNxMain.exe
+    device_exe: E:\MuMuPlayer\nx_device\15.0\shell\MuMuNxDevice.exe
+    manager_exe: E:\MuMuPlayer\nx_main\MuMuManager.exe
+    vmindex: 0
+    adb_port: 16384
+    ready_timeout_sec: 240
+    close_after_run: true
+    minimize_window: true
+    show_before_minimize: true
+    show_before_minimize_sec: 3
+    minimize_retries: 10
+    minimize_interval_sec: 1.0
+    minimize_watchdog_sec: 90
+    suppress_prompt: false
+    updater_config: E:\MuMuPlayer\configs\main\nx_updater_config.json
+    updater_exe: E:\MuMuPlayer\nx_main\MuMuNxUpdater.exe
+    updater_mode: gui
+    always_open: false
+    close_main_after_update: true
+    timeout_sec: 600

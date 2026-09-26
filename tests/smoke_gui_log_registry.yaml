@@ -1,0 +1,21 @@
+groups: []
+
+projects:
+  GuiProject:
+    display_name: Gui Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_gui.py, logs\projects\gui_smoke.log]
+    retry: 0
+    hang_timeout: 120
+    require_finish: true
+    min_runtime_sec: 1
+    stop_on_finish: true
+    config_dir: configs\core
+    log_files:
+      - logs\projects\gui_smoke*.log
+    success_patterns: [一条龙和配置组任务结束]
+    error_patterns: ['UnHandle Exception \[FATAL\]']
+    finish_patterns: [一条龙和配置组任务结束]

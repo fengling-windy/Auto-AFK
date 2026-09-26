@@ -1,0 +1,18 @@
+groups: []
+
+projects:
+  RemoteStop:
+    display_name: Remote Stop
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_hang.py]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    min_runtime_sec: 0
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: []
+    finish_patterns: []

@@ -1,0 +1,84 @@
+rules:
+  - id: hang-detected
+    description: 项目长时间无输出（卡任务），进程已被清理，自动重试一次
+    match: "(hang detected|no activity for [0-9]+s)"
+    actions:
+      - type: rerun
+        safe: true
+    max_attempts: 2
+
+  - id: missing-module
+    description: Python 模块缺失，自动补装到对应项目 venv
+    match: "ModuleNotFoundError: No module named '([A-Za-z0-9_\\.\\-]+)'"
+    actions:
+      - type: pip_install
+        package: "$1"
+        safe: true
+    max_attempts: 2
+
+  - id: import-error
+    description: ImportError，自动按包名补装
+    match: "ImportError: cannot import name '[^']+' from '([A-Za-z0-9_\\.\\-]+)'"
+    actions:
+      - type: pip_install
+        package: "$1"
+        safe: true
+    max_attempts: 1
+
+  - id: missing-submodule-assets
+    description: 子模块资源缺失，更新子模块
+    match: "(model|assets|3rdparty|resource)[^\\n]*not found|No such file or directory: '([^']*(model|assets|3rdparty)[^']*)'"
+    actions:
+      - type: submodule_update
+        safe: true
+    max_attempts: 1
+
+  - id: adb-offline
+    description: ADB 连接异常，重启 adb server
+    match: "(device offline|device not found|no devices/emulators found|could not detect device|未检测到设备连接)"
+    actions:
+      - type: adb_restart
+        safe: true
+    max_attempts: 2
+
+  - id: onnxruntime-dll
+    description: onnxruntime DLL 加载失败，尝试重装 CPU/DirectML 版本
+    match: "(DLL load failed[^\\n]*onnxruntime|onnxruntime[^\\n]*DLL)"
+    actions:
+      - type: pip_install
+        package: "onnxruntime-directml==1.24.4"
+        safe: true
+    max_attempts: 1
+
+  - id: config-parse-error
+    description: 配置文件损坏，从配置中心还原
+    match: "(yaml.parser|yaml.scanner|JSONDecodeError|Expecting value|配置文件.*(错误|损坏))"
+    actions:
+      - type: restore_config
+        safe: true
+    max_attempts: 1
+
+  - id: maaend-agent-panic
+    description: MaaEnd go-service 崩溃，重建 agent
+    match: "(go-service panicked|agent crashed)"
+    actions:
+      - type: run_script
+        value: "E:\\GameAFK\\Auto-AFK\\setup\\32_build_maaend.ps1"
+        safe: false
+    max_attempts: 1
+
+  - id: network-timeout
+    description: 网络超时，等待后由 supervisors 重试
+    match: "(Read timed out|Connection aborted|Max retries exceeded|SSLError|Temporary failure in name resolution)"
+    actions:
+      - type: rerun
+        safe: true
+    max_attempts: 2
+
+  - id: port-in-use
+    description: 端口被占用
+    match: "(Address already in use|WinError 10048|端口被占用)"
+    actions:
+      - type: rerun
+        safe: true
+    max_attempts: 1

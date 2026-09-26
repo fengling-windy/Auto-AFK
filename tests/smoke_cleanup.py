@@ -1,0 +1,44 @@
+import re
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from afk_core import config
+
+config.PROJECTS_YAML = ROOT / "tests" / "smoke_spawn_registry.yaml"
+
+from afk_core.events import EventBus
+from afk_core.repair import RepairEngine
+from afk_core.supervisor import Supervisor
+
+
+def main():
+    import psutil
+
+    bus = EventBus()
+    bus.start_server()
+    supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
+    run = supervisor.start_project("SpawnProject")
+    run.finished_event.wait(timeout=120)
+    time.sleep(2.0)
+    text = ""
+    try:
+        text = Path(run.out_log).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+    match = re.search(r"child pid (\d+)", text)
+    child_pid = int(match.group(1)) if match else None
+    alive = psutil.pid_exists(child_pid) if child_pid else None
+    print("run status:", run.status, "child pid:", child_pid, "alive after run:", alive)
+    ok = run.status == "success" and child_pid is not None and not alive
+    print("CLEANUP", "PASS" if ok else "FAIL")
+    bus.stop_server()
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

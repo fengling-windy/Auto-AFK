@@ -1,0 +1,18 @@
+groups: []
+
+projects:
+  SpawnProject:
+    display_name: Spawn Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_spawn.py]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    min_runtime_sec: 0
+    config_dir: configs\core
+    success_patterns: ['child pid']
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: []

@@ -1,0 +1,48 @@
+groups: []
+
+projects:
+  OkProject:
+    display_name: Ok Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_finish.py]
+    retry: 0
+    hang_timeout: 120
+    require_finish: true
+    min_runtime_sec: 1
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: [完成]
+  FastProject:
+    display_name: Fast Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_fast.py]
+    retry: 0
+    hang_timeout: 120
+    require_finish: true
+    min_runtime_sec: 5
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: [完成]
+  ErrProject:
+    display_name: Err Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_err.py]
+    retry: 0
+    hang_timeout: 120
+    require_finish: true
+    min_runtime_sec: 1
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: [运行出错]
+    finish_patterns: [完成]

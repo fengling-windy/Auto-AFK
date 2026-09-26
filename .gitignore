@@ -1,0 +1,27 @@
+# virtualenv / caches
+.venv/
+__pycache__/
+*.pyc
+
+# runtime data
+logs/
+
+# machine-specific shortcuts
+*.lnk
+
+# generated icon (setup/create_shortcuts.py)
+gui/afk.ico
+
+# nested project sources (managed by setup scripts)
+March7thAssistant/
+BAAH/
+MaaEnd/
+BetterGI/
+
+# per-machine user configs
+configs/BAAH/
+configs/BetterGI/
+configs/MaaEnd/
+configs/March7thAssistant/
+configs/core/backups/
+configs/core/github_token.txt

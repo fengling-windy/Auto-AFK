@@ -1,0 +1,35 @@
+groups:
+  - id: seq_group
+    label: sequential group
+    parallel: false
+    members:
+      - SeqA
+      - SeqB
+
+projects:
+  SeqA:
+    display_name: Seq A
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, A, "2"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: []
+  SeqB:
+    display_name: Seq B
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, B, "2"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: []

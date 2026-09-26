@@ -1,0 +1,53 @@
+groups:
+  - id: group_a
+    label: parallel group
+    parallel: true
+    members:
+      - SmokeA
+      - SmokeB
+  - id: group_b
+    label: exclusive group
+    parallel: false
+    members:
+      - SmokeC
+
+projects:
+  SmokeA:
+    display_name: Smoke A
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, A, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  SmokeB:
+    display_name: Smoke B
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, B, "4"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  SmokeC:
+    display_name: Smoke C
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, C, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []

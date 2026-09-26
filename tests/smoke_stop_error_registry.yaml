@@ -1,0 +1,20 @@
+groups: []
+
+projects:
+  StopErrorProject:
+    display_name: Stop Error Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_error_linger.py]
+    retry: 0
+    hang_timeout: 900
+    require_finish: false
+    min_runtime_sec: 0
+    stop_on_error: true
+    stop_on_error_delay_sec: 1
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: ['运行出错']
+    finish_patterns: []

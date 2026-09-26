@@ -1,0 +1,18 @@
+groups: []
+
+projects:
+  HungProject:
+    display_name: Hung Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_hang.py]
+    retry: 1
+    hang_timeout: 15
+    require_finish: false
+    min_runtime_sec: 0
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns: ['Traceback \(most recent call last\)']
+    finish_patterns: []

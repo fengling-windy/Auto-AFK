@@ -1,0 +1,246 @@
+groups:
+  - id: cloud_and_emulator
+    label: 并行组：云游戏 + 模拟器（不抢输入）
+    parallel: true
+    members:
+      - March7thAssistant
+      - BAAH
+  - id: exclusive_foreground
+    label: 独占前台：MaaEnd
+    parallel: false
+    members:
+      - MaaEnd
+  - id: zzz_one_dragon
+    label: 绝区零一条龙（MaaEnd 之后）
+    parallel: false
+    members:
+      - ZenlessZoneZero-OneDragon
+
+reserved:
+  - id: example
+    label: 预留新项目（在 GUI 中点击“添加挂机项目”生成配置）
+    hint: 复制下面任一项目结构，修改 path/args/patterns 即可
+
+projects:
+  March7thAssistant:
+    display_name: 三月七小助手（崩坏：星穹铁道 / 云游戏）
+    enabled: true
+    launch_type: python
+    path: March7thAssistant
+    python: .venv\Scripts\python.exe
+    args:
+      - main.py
+    retry: 1
+    hang_timeout: 900
+    require_admin: true
+    require_finish: true
+    min_runtime_sec: 120
+    config_dir: configs\March7thAssistant
+    links:
+      - link: config
+        store: config
+      - link: settings
+        store: settings
+    sync_files:
+      - path: config.yaml
+        store: config.yaml
+    success_patterns:
+      - 停止运行
+    error_patterns:
+      - 发生错误
+      - 'Traceback \(most recent call last\)'
+      - 首次使用请先打开图形界面
+      - 未知任务
+    finish_patterns:
+      - 停止运行
+    update_hooks:
+      - type: command
+        label: uv sync
+        when: changed
+        match_files: [requirements.txt, pyproject.toml, uv.lock]
+        cmd: [uv, sync, --python, 3.12]
+        timeout_sec: 1800
+
+  BAAH:
+    display_name: BAAH（蔚蓝档案 / MuMu 模拟器 ADB）
+    enabled: true
+    launch_type: python
+    path: BAAH
+    python: .venv\Scripts\python.exe
+    args:
+      - jsoneditor.py
+      - "{config_name}"
+    config_name: 国际服挂机.json
+    retry: 1
+    hang_timeout: 900
+    require_admin: true
+    require_finish: true
+    min_runtime_sec: 60
+    manage_emulator: true
+    config_dir: configs\BAAH
+    links:
+      - link: BAAH_CONFIGS
+        store: .
+      - link: LOG
+        store: LOG
+    sync_files: []
+    success_patterns:
+      - 所有任务结束
+    error_patterns:
+      - 运行出错
+      - 错误报告生成完成
+      - 'Traceback \(most recent call last\)'
+      - 输入的配置文件名不在可用配置文件列表中
+      - 可能是没有以管理员模式运行
+    finish_patterns:
+      - 所有任务结束
+    update_hooks:
+      - type: copy_tree
+        label: ensure tools (adb/aria2)
+        when: always
+        src: E:\GameAFK\BAAH\tools
+        dst: '{project}\tools'
+        only_if_missing: true
+      - type: baah_deps
+        label: reinstall core deps
+        when: changed
+        match_files: [requirements.txt]
+
+  MaaEnd:
+    display_name: MaaEnd（明日方舟：终末地 / 独占前台）
+    enabled: true
+    launch_type: exe
+    path: MaaEnd
+    exe: install\mxu.exe
+    args:
+      - "--autostart"
+      - "-i"
+      - "{instance}"
+      - "--quit-after-run"
+    instance: 全套日常
+    retry: 1
+    hang_timeout: 900
+    require_finish: true
+    min_runtime_sec: 60
+    stop_on_error: true
+    stop_on_error_delay_sec: 15
+    report_on_warn: true
+    config_dir: configs\MaaEnd
+    links:
+      - link: install\config
+        store: mxu\config
+      - link: install\debug
+        store: mxu\debug
+      - link: install\cache
+        store: mxu\cache
+    sync_files: []
+    log_files:
+      - install\debug\maafw.log
+    success_patterns: []
+    error_patterns:
+      - go-service panicked
+      - 'FATAL:'
+      - 'resolution check failed'
+      - '分辨率不符合要求'
+      - '任务已强制停止'
+    warn_patterns:
+      - 'Tasker\.Task\.Failed'
+    finish_patterns:
+      - 'Tasker::run_task\] \| leave'
+    update_hooks:
+      - type: command
+        label: setup-workspace
+        when: changed
+        match_files: [tools/setup/, pyproject.toml, uv.lock]
+        cmd: [uv, run, setup-workspace]
+        timeout_sec: 3600
+      - type: command
+        label: pnpm install
+        when: changed
+        match_files: [package.json, pnpm-lock.yaml]
+        cmd: [pnpm.cmd, install]
+        timeout_sec: 1800
+      - type: command
+        label: build-and-install
+        when: changed
+        match_files: [agent/, tools/setup/, pyproject.toml, uv.lock]
+        cmd: [uv, run, build-and-install]
+        timeout_sec: 3600
+
+  ZenlessZoneZero-OneDragon:
+    display_name: 绝区零一条龙（PC 客户端）
+    enabled: true
+    launch_type: python
+    path: E:\GameAFK\ZenlessZoneZero-OneDragon
+    python: .venv\Scripts\python.exe
+    args:
+      - src\zzz_od\application\zzz_application_launcher.py
+      - "--close-game"
+    extra_pythonpath:
+      - src
+    retry: 1
+    hang_timeout: 900
+    require_finish: true
+    min_runtime_sec: 120
+    config_dir: E:\GameAFK\ZenlessZoneZero-OneDragon\config
+    sync_files: []
+    success_patterns:
+      - 'one dragon finished success=True'
+    error_patterns:
+      - 'Traceback \(most recent call last\)'
+      - '运行应用 .* 失败'
+      - '初始化超时'
+      - '未注册'
+      - '运行失败'
+      - '启动失败'
+    finish_patterns:
+      - 'one dragon finished success='
+    update_hooks:
+      - type: command
+        label: uv sync
+        when: changed
+        match_files: [pyproject.toml, uv.lock]
+        cmd: [uv, sync]
+        timeout_sec: 1800
+  BetterGI:
+    display_name: BetterGI（原神 / 更好的原神）
+    enabled: true
+    launch_type: exe
+    path: BetterGI
+    exe: publish\BetterGI.exe
+    args:
+      - startOneDragon
+    retry: 1
+    hang_timeout: 900
+    require_finish: true
+    min_runtime_sec: 120
+    stop_on_finish: true
+    report_on_warn: true
+    require_admin: true
+    config_dir: configs\BetterGI
+    links:
+      - link: publish\User
+        store: User
+      - link: publish\log
+        store: log
+    sync_files: []
+    log_files:
+      - publish\log\better-genshin-impact*.log
+    success_patterns:
+      - 一条龙和配置组任务结束
+    error_patterns:
+      - 'UnHandle Exception \[FATAL\]'
+      - '\[FTL\]'
+      - 一条龙任务将被取消
+      - '没有配置,退出执行'
+    warn_patterns:
+      - '\[ERR\]'
+    finish_patterns:
+      - 一条龙和配置组任务结束
+    update_submodules: false
+    update_hooks:
+      - type: command
+        label: dotnet publish
+        when: changed
+        cmd: [dotnet, publish, BetterGenshinImpact\BetterGenshinImpact.csproj, -c, Release, -r, win-x64, --self-contained, 'false', -o, publish]
+        timeout_sec: 3600
