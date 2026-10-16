@@ -1,0 +1,461 @@
+"""设置页：静默启动 / 运行顺序 / 运行结束后操作 / 空闲自动挂机 / 开机自启 / 桌面小组件。
+
+所有修改即时写回 settings.yaml 并通过 changed 信号通知（刷新 supervisor.settings）。
+"""
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from afk_core import autostart, config
+from gui.modern import AnimatedButton, enable_smooth_scroll
+
+POST_ACTION_LABELS = [
+    ("none", "无操作"),
+    ("shutdown", "关机"),
+    ("exit", "关闭程序"),
+]
+
+AUTOSTART_MODES = [
+    (autostart.MODE_TRAY, autostart.MODE_LABELS[autostart.MODE_TRAY]),
+    (autostart.MODE_ADMIN, autostart.MODE_LABELS[autostart.MODE_ADMIN]),
+]
+
+
+class _SectionCard(QFrame):
+    def __init__(self, title, hint="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(8)
+        cap = QLabel(title)
+        cap.setObjectName("sectionTitleCard")
+        outer.addWidget(cap)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("hintLabel")
+            hint_label.setWordWrap(True)
+            outer.addWidget(hint_label)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(6)
+        outer.addLayout(self.body)
+
+
+class SettingsPage(QWidget):
+    changed = Signal()
+
+    def __init__(self, log_fn=None, registry=None, parent=None):
+        super().__init__(parent)
+        self._log = log_fn or (lambda *a, **k: None)
+        self._registry = registry if registry is not None else config.registry()
+        self._loading = True
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(10)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        enable_smooth_scroll(scroll)
+        inner = QWidget()
+        inner.setObjectName("central")
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(4, 2, 8, 8)
+        layout.setSpacing(10)
+
+        # -- 1. 启动时静默打开项目界面 -----------------------------------------
+        self.silent_card = _SectionCard(
+            "启动时后台打开项目界面",
+            "勾选后，Auto-AFK 启动时会自动拉起对应项目的配置界面并隐藏到后台；点击左侧导航进入该页时再嵌入显示。",
+        )
+        self.silent_checks = {}
+        gui_cfg = config.settings().get("gui") or {}
+        silent_set = {str(k) for k in (gui_cfg.get("silent_open_projects") or [])}
+        for key, spec in self._projects_with_gui().items():
+            check = QCheckBox(str(spec.get("display_name", key)).split("（")[0])
+            check.setChecked(key in silent_set)
+            check.toggled.connect(lambda checked, k=key: self._toggle_silent(k, checked))
+            self.silent_checks[key] = check
+            self.silent_card.body.addWidget(check)
+        if not self.silent_checks:
+            self.silent_card.body.addWidget(QLabel("（当前没有配置 gui 入口的项目）"))
+        layout.addWidget(self.silent_card)
+
+        # -- 2. 运行顺序 ---------------------------------------------------------
+        self.order_card = _SectionCard(
+            "项目运行顺序",
+            "「一键挂机」组内按此顺序启动（并行组同时运行，仅影响启动先后）；未列出的项目按注册表原顺序垫底。",
+        )
+        order_row = QHBoxLayout()
+        order_row.setSpacing(8)
+        self.order_list = QListWidget()
+        self.order_list.setObjectName("orderList")
+        self.order_list.setDragDropMode(QListWidget.InternalMove)
+        self.order_list.setFixedHeight(168)
+        enable_smooth_scroll(self.order_list)
+        for key in self._ordered_project_keys():
+            spec = self._registry["projects"][key]
+            item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
+            item.setData(Qt.UserRole, key)
+            self.order_list.addItem(item)
+        self.order_list.model().rowsMoved.connect(self._save_order)
+        order_row.addWidget(self.order_list, 1)
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(6)
+        up_btn = AnimatedButton("上移")
+        down_btn = AnimatedButton("下移")
+        up_btn.clicked.connect(lambda: self._move_selected(-1))
+        down_btn.clicked.connect(lambda: self._move_selected(1))
+        btn_col.addWidget(up_btn)
+        btn_col.addWidget(down_btn)
+        btn_col.addStretch(1)
+        order_row.addLayout(btn_col)
+        self.order_card.body.addLayout(order_row)
+        layout.addWidget(self.order_card)
+
+        # -- 3. 运行结束后的操作 -------------------------------------------------
+        self.post_card = _SectionCard(
+            "所有运行结束后的操作",
+            "「一键挂机」全部成功结束并经过延迟后执行；手动停止不会触发。",
+        )
+        post_row = QHBoxLayout()
+        post_row.setSpacing(8)
+        self.post_combo = QComboBox()
+        for value, label in POST_ACTION_LABELS:
+            self.post_combo.addItem(label, value)
+        post_cfg = config.settings().get("post_actions") or {}
+        idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
+        self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.post_combo.currentIndexChanged.connect(self._save_post_action)
+        self.post_delay = QSpinBox()
+        self.post_delay.setRange(0, 86400)
+        self.post_delay.setSuffix(" 秒后执行")
+        self.post_delay.setValue(int(post_cfg.get("delay_sec", 60)))
+        self.post_delay.valueChanged.connect(self._save_post_action)
+        post_row.addWidget(QLabel("操作:"))
+        post_row.addWidget(self.post_combo)
+        post_row.addSpacing(12)
+        post_row.addWidget(self.post_delay)
+        post_row.addStretch(1)
+        self.post_card.body.addLayout(post_row)
+        layout.addWidget(self.post_card)
+
+        # -- 4. 空闲自动挂机 -----------------------------------------------------
+        self.idle_card = _SectionCard(
+            "空闲自动挂机",
+            "电脑连续无鼠标/键盘输入达到设定分钟数后，弹出提示框（停止 / 立刻开始 / 仅运行不占用鼠标任务）；"
+            "倒计时结束仍未选择则自动运行全部任务。触发一次后解除监听，用户回来再离开会重新监听。",
+        )
+        idle_cfg = config.settings().get("idle") or {}
+        idle_row = QHBoxLayout()
+        idle_row.setSpacing(8)
+        self.idle_check = QCheckBox("启用")
+        self.idle_check.setChecked(bool(idle_cfg.get("enabled", False)))
+        self.idle_check.toggled.connect(self._save_idle)
+        self.idle_minutes = QSpinBox()
+        self.idle_minutes.setRange(1, 1440)
+        self.idle_minutes.setSuffix(" 分钟无操作后提示")
+        self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
+        self.idle_minutes.valueChanged.connect(self._save_idle)
+        self.idle_prompt = QSpinBox()
+        self.idle_prompt.setRange(5, 600)
+        self.idle_prompt.setSuffix(" 秒后自动执行")
+        self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
+        self.idle_prompt.valueChanged.connect(self._save_idle)
+        idle_row.addWidget(self.idle_check)
+        idle_row.addWidget(self.idle_minutes)
+        idle_row.addWidget(self.idle_prompt)
+        idle_row.addStretch(1)
+        self.idle_card.body.addLayout(idle_row)
+
+        # 今日已正常完成就不重复挂机
+        self.idle_skip_check = QCheckBox("今天已正常完成则不再自动执行")
+        self.idle_skip_check.setChecked(bool(idle_cfg.get("skip_if_completed_today", True)))
+        self.idle_skip_check.toggled.connect(self._save_idle)
+        self.idle_card.body.addWidget(self.idle_skip_check)
+
+        self.idle_hint = QLabel("")
+        self.idle_hint.setObjectName("hintLabel")
+        self.idle_hint.setWordWrap(True)
+        self.idle_card.body.addWidget(self.idle_hint)
+
+        # 「今天已完成」状态 + 手动恢复自动挂机
+        done_row = QHBoxLayout()
+        done_row.setSpacing(8)
+        self.completion_label = QLabel("")
+        self.completion_label.setObjectName("hintLabel")
+        self.clear_completion_btn = AnimatedButton("今天还没完成（恢复自动挂机）", variant="mini")
+        self.clear_completion_btn.clicked.connect(self._clear_completion)
+        done_row.addWidget(self.completion_label, 1)
+        done_row.addWidget(self.clear_completion_btn)
+        self.idle_card.body.addLayout(done_row)
+        layout.addWidget(self.idle_card)
+
+        # -- 5. 开机自启 ---------------------------------------------------------
+        self.autostart_card = _SectionCard(
+            "开机启动",
+            "写当前用户注册表 Run 键（HKCU），不需要管理员权限；关闭开关即删除该项。",
+        )
+        auto_row = QHBoxLayout()
+        auto_row.setSpacing(8)
+        self.autostart_check = QCheckBox("开机启动")
+        self.autostart_check.setChecked(bool(autostart.status().get("enabled")))
+        self.autostart_check.toggled.connect(self._save_autostart)
+        self.autostart_mode = QComboBox()
+        for value, label in AUTOSTART_MODES:
+            self.autostart_mode.addItem(label, value)
+        mode = str(autostart.status().get("mode") or autostart.MODE_TRAY)
+        mode_idx = self.autostart_mode.findData(mode)
+        self.autostart_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
+        self.autostart_mode.currentIndexChanged.connect(self._save_autostart)
+        auto_row.addWidget(self.autostart_check)
+        auto_row.addWidget(self.autostart_mode)
+        auto_row.addStretch(1)
+        self.autostart_card.body.addLayout(auto_row)
+        self.autostart_hint = QLabel("")
+        self.autostart_hint.setObjectName("hintLabel")
+        self.autostart_hint.setWordWrap(True)
+        self.autostart_card.body.addWidget(self.autostart_hint)
+        layout.addWidget(self.autostart_card)
+
+        # -- 6. 桌面小组件 -------------------------------------------------------
+        self.widget_card = _SectionCard(
+            "桌面小组件",
+            "屏幕上的常驻小面板：显示运行状态与空闲倒计时，提供「一键挂机 / 全部停止 / 显示主窗口」，可拖动与折叠。",
+        )
+        self.widget_check = QCheckBox("显示桌面小组件")
+        self.widget_check.setChecked(bool(gui_cfg.get("widget_enabled", False)))
+        self.widget_check.toggled.connect(self._save_widget)
+        self.widget_card.body.addWidget(self.widget_check)
+        layout.addWidget(self.widget_card)
+
+        layout.addStretch(1)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+
+        self._refresh_idle_hint()
+        self._refresh_autostart_hint()
+        self._refresh_completion_label()
+        self._loading = False
+
+    # -- 数据 ------------------------------------------------------------------
+    def _projects_with_gui(self):
+        projects = self._registry.get("projects", {}) or {}
+        return {k: s for k, s in projects.items() if s.get("gui")}
+
+    def _ordered_project_keys(self):
+        settings = config.settings()
+        order = [str(k) for k in ((settings.get("chain") or {}).get("order") or [])]
+        keys = [k for k in order if k in (self._registry.get("projects", {}) or {})]
+        for key in (self._registry.get("projects", {}) or {}):
+            if key not in keys:
+                keys.append(key)
+        return keys
+
+    # -- 保存 ------------------------------------------------------------------
+    def _mutate_settings(self, mutate):
+        settings = config.settings()
+        mutate(settings)
+        config.save_yaml(config.SETTINGS_YAML, settings)
+        self.changed.emit()
+        return settings
+
+    def _toggle_silent(self, key, checked):
+        if self._loading:
+            return
+
+        def mutate(settings):
+            gui_cfg = settings.setdefault("gui", {})
+            current = [str(k) for k in (gui_cfg.get("silent_open_projects") or [])]
+            if checked and key not in current:
+                current.append(key)
+            elif not checked and key in current:
+                current.remove(key)
+            gui_cfg["silent_open_projects"] = current
+
+        self._mutate_settings(mutate)
+        self._log("core", "info", "静默启动界面 {0}: {1}".format(key, "开" if checked else "关"))
+
+    def _save_order(self, *_):
+        if self._loading:
+            return
+        keys = []
+        for row in range(self.order_list.count()):
+            key = self.order_list.item(row).data(Qt.UserRole)
+            if key:
+                keys.append(str(key))
+
+        def mutate(settings):
+            settings.setdefault("chain", {})["order"] = keys
+
+        self._mutate_settings(mutate)
+        self._log("core", "info", "运行顺序已保存: {0}".format(" → ".join(keys)))
+
+    def _move_selected(self, delta):
+        row = self.order_list.currentRow()
+        if row < 0:
+            return
+        target = row + delta
+        if not (0 <= target < self.order_list.count()):
+            return
+        item = self.order_list.takeItem(row)
+        self.order_list.insertItem(target, item)
+        self.order_list.setCurrentRow(target)
+        self._save_order()
+
+    def _save_post_action(self, *_):
+        if self._loading:
+            return
+        action = self.post_combo.currentData() or "none"
+        delay = int(self.post_delay.value())
+
+        def mutate(settings):
+            post = settings.setdefault("post_actions", {})
+            post["after_all"] = action
+            post["delay_sec"] = delay
+
+        self._mutate_settings(mutate)
+        self._log("core", "info", "结束后操作: {0}（延迟 {1} 秒）".format(action, delay))
+
+    def _save_idle(self, *_):
+        if self._loading:
+            return
+        enabled = bool(self.idle_check.isChecked())
+        minutes = int(self.idle_minutes.value())
+        prompt_sec = int(self.idle_prompt.value())
+        skip_done = bool(self.idle_skip_check.isChecked())
+
+        def mutate(settings):
+            idle_cfg = settings.setdefault("idle", {})
+            idle_cfg["enabled"] = enabled
+            idle_cfg["minutes"] = minutes
+            idle_cfg["prompt_sec"] = prompt_sec
+            idle_cfg["skip_if_completed_today"] = skip_done
+
+        self._mutate_settings(mutate)
+        self._refresh_idle_hint()
+        self._log(
+            "core",
+            "info",
+            "空闲自动挂机 {0}：{1} 分钟无操作，提示 {2} 秒，今日完成跳过={3}".format(
+                "开" if enabled else "关", minutes, prompt_sec, "开" if skip_done else "关"
+            ),
+        )
+
+    def _refresh_completion_label(self):
+        try:
+            from afk_core import completion
+
+            info = completion.completion_info()
+            if info.get("completed_today"):
+                self.completion_label.setText("今日状态：已完成（空闲时不再自动执行）")
+                self.clear_completion_btn.setEnabled(True)
+            else:
+                self.completion_label.setText("今日状态：未完成")
+                self.clear_completion_btn.setEnabled(False)
+        except Exception as exc:
+            self.completion_label.setText("今日状态：读取失败 {0}".format(exc))
+
+    def _clear_completion(self):
+        try:
+            from afk_core import completion
+
+            completion.clear()
+            self._log("core", "info", "已清除今日完成标记，空闲时会再次自动挂机")
+        except Exception as exc:
+            self._log("core", "error", "清除今日完成标记失败: {0}".format(exc))
+        self._refresh_completion_label()
+
+    def _save_autostart(self, *_):
+        if self._loading:
+            return
+        enabled = bool(self.autostart_check.isChecked())
+        mode = str(self.autostart_mode.currentData() or autostart.MODE_TRAY)
+        result = autostart.apply(enabled, mode)
+        if not result.get("ok"):
+            self._log("core", "error", "开机启动设置失败: {0}".format(result.get("error", "")))
+        else:
+            self._log(
+                "core",
+                "info",
+                "开机启动 {0}（{1}）".format(
+                    "已启用" if enabled else "已关闭", autostart.MODE_LABELS.get(mode, mode)
+                ),
+            )
+        def mutate(settings):
+            idle_cfg = settings.setdefault("idle", {})
+            idle_cfg["autostart"] = enabled
+            idle_cfg["autostart_mode"] = mode
+
+        self._mutate_settings(mutate)
+        self._refresh_autostart_hint()
+
+    def _save_widget(self, checked):
+        if self._loading:
+            return
+
+        def mutate(settings):
+            settings.setdefault("gui", {})["widget_enabled"] = bool(checked)
+
+        self._mutate_settings(mutate)
+        self._log("core", "info", "桌面小组件 {0}".format("开" if checked else "关"))
+
+    def _refresh_idle_hint(self):
+        try:
+            from afk_core import idle as idle_mod
+
+            support = "支持" if idle_mod.supported() else "当前系统不支持空闲检测"
+            self.idle_hint.setText(
+                "空闲检测：{0}；阈值最小 60 秒。保存后立即生效，无需重启。".format(support)
+            )
+        except Exception as exc:
+            self.idle_hint.setText("空闲检测不可用: {0}".format(exc))
+
+    def _refresh_autostart_hint(self):
+        info = autostart.status()
+        if not info.get("supported"):
+            self.autostart_hint.setText("当前系统不支持写入注册表自启项。")
+            return
+        if info.get("enabled"):
+            self.autostart_hint.setText(
+                "已注册：{0}\n{1}".format(info.get("command", ""), info.get("run_key", ""))
+            )
+        else:
+            self.autostart_hint.setText("当前未注册开机启动（{0}）。".format(info.get("run_key", "")))
+
+    def reload_from_disk(self):
+        """重新读取 settings.yaml 刷新界面（外部改配置后调用）。"""
+        self._loading = True
+        try:
+            settings = config.settings()
+            silent_set = {str(k) for k in ((settings.get("gui") or {}).get("silent_open_projects") or [])}
+            for key, check in self.silent_checks.items():
+                check.setChecked(key in silent_set)
+            post_cfg = settings.get("post_actions") or {}
+            idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
+            self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.post_delay.setValue(int(post_cfg.get("delay_sec", 60)))
+            idle_cfg = settings.get("idle") or {}
+            self.idle_check.setChecked(bool(idle_cfg.get("enabled", False)))
+            self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
+            self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
+            self.idle_skip_check.setChecked(bool(idle_cfg.get("skip_if_completed_today", True)))
+            self.widget_check.setChecked(bool((settings.get("gui") or {}).get("widget_enabled", False)))
+            self._refresh_idle_hint()
+            self._refresh_autostart_hint()
+            self._refresh_completion_label()
+        finally:
+            self._loading = False
