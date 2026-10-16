@@ -331,6 +331,7 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 & .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/嵌入页）
 & .venv\Scripts\python.exe tests\smoke_modern_ui.py  # 主题与动效组件（按钮/滚动/Tab/状态点/胶囊）
 & .venv\Scripts\python.exe tests\smoke_real_launch.py # 真实 fork GUI 进程（入口/事件管道/CLI 远程/空闲初始化）
+& .venv\Scripts\python.exe tests\smoke_gui_log_events.py # GUI 动作进事件流 + 渲染不回声
 ```
 
 > `smoke_real_launch.py` 用 `AFK_ROOT` 把整个根目录重定向到临时「影子根」，
