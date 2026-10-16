@@ -58,8 +58,10 @@ from gui.modern import (
 from gui.idle_prompt import (
     DECISION_ALL,
     DECISION_BACKGROUND,
+    DECISION_NONE,
     DECISION_STOP,
     IdlePromptDialog,
+    decide_on_timeout,
 )
 from gui.nav_rail import NavRail
 from gui.project_page import ProjectPage
@@ -1027,6 +1029,11 @@ class MainWindow(QMainWindow):
         self._show_main_window()
         dialog.exec()
         decision = dialog.decision
+        if decision == DECISION_NONE:
+            # 兜底：exec() 若异常返回（窗口被系统强制关闭、Qt 异常等），
+            # decision 会停在 NONE。这里明确按「倒计时结束」的语义处理，
+            # 而不是让 NONE 隐式落进「全部任务」分支——行为一致但意图清晰。
+            decision = decide_on_timeout()
         self._idle_dialog = None
         self._handle_idle_decision(decision)
 
