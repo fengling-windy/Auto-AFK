@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
         index = sum(ord(ch) for ch in str(project)) % len(DEFAULT_PALETTE)
         return DEFAULT_PALETTE[index]
 
-    def _append_log(self, project, level, message, autoscroll=True):
+    def _append_log(self, project, level, message, autoscroll=True, emit_event=True):
         ts = time.strftime("%H:%M:%S")
         project_color = self._project_color(project)
         if level == "error":
@@ -815,6 +815,22 @@ class MainWindow(QMainWindow):
         self._log_line_count += 1
         if autoscroll and self.autoscroll_check.isChecked():
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        # 让 GUI 自身的动作也进入事件流（events.jsonl / 报告 / 远程订阅都能看到）。
+        # 否则用户开关设置、空闲决策、手动更新等关键动作只留在界面里，
+        # 排查问题时「日志里什么都没发生」——这正是之前空闲故障最难看的地方。
+        # 渲染来自事件流的事件时用 emit_event=False，避免把收到的再发一遍造成回声。
+        if emit_event:
+            try:
+                self.bus.emit(
+                    {
+                        "project": str(project),
+                        "kind": "gui",
+                        "level": str(level),
+                        "message": str(message),
+                    }
+                )
+            except Exception:
+                pass
 
     def _matches_filter(self, event, filter_project):
         if not filter_project:
@@ -826,7 +842,8 @@ class MainWindow(QMainWindow):
         filter_project = self.filter_combo.currentData() or ""
         for event in self.event_buffer:
             if self._matches_filter(event, filter_project):
-                self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False)
+                self._append_log(event.get("project", "core"), event.get("level", "info"),
+                                 event.get("message", ""), autoscroll=False, emit_event=False)
         self._log_line_count = len(self.event_buffer)
         if self.autoscroll_check.isChecked():
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
@@ -846,7 +863,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(800, self._quit)
                 continue
             if self._matches_filter(event, filter_project):
-                self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False)
+                self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False, emit_event=False)
         if drained and self.autoscroll_check.isChecked():
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
         snapshot = self.supervisor.status_snapshot()
