@@ -330,7 +330,12 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 & .venv\Scripts\python.exe tests\smoke_thread_qt.py  # 后台线程经 Signal 投递到 GUI 线程，不直接碰控件
 & .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/嵌入页）
 & .venv\Scripts\python.exe tests\smoke_modern_ui.py  # 主题与动效组件（按钮/滚动/Tab/状态点/胶囊）
+& .venv\Scripts\python.exe tests\smoke_real_launch.py # 真实 fork GUI 进程（入口/事件管道/CLI 远程/空闲初始化）
 ```
+
+> `smoke_real_launch.py` 用 `AFK_ROOT` 把整个根目录重定向到临时「影子根」，
+> 因此对真实配置与日志零影响（测试结束会断言真实 logs 未被写入）；
+> 它验证的是只有真实启动阶段才会暴露的问题，与离屏构造 MainWindow 的测试互补。
 
 其余可运行的冒烟测试（用中心 venv 直接跑）：
 
