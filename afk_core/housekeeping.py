@@ -76,6 +76,19 @@ def cleanup_logs(bus=None, settings=None):
     except OSError:
         pass
 
+    durations_max = int(float(cfg.get("durations_max_mb", 1)) * 1024 * 1024)
+    try:
+        durations = config.DURATIONS_FILE
+        if durations.exists() and durations.stat().st_size > durations_max:
+            tail = durations.read_bytes()[-durations_max // 2:]
+            newline = tail.find(b"\n")
+            if newline >= 0:
+                tail = tail[newline + 1:]
+            durations.write_bytes(tail)
+            _emit(bus, "durations.jsonl truncated")
+    except OSError:
+        pass
+
     if config.REPORTS_DIR.exists():
         for path in config.REPORTS_DIR.iterdir():
             if path.is_dir() and _older_than(path, report_cutoff):

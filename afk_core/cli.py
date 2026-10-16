@@ -71,7 +71,10 @@ def _print_event(event):
 def cmd_run(args):
     bus, supervisor, _ = build_runtime()
     q = bus.subscribe()
-    supervisor.run_chain(args.groups or None)
+    if getattr(args, "background", False):
+        supervisor.start_chain(background_only=True)
+    else:
+        supervisor.run_chain(args.groups or None)
     while True:
         try:
             _print_event(q.get(timeout=1.0))
@@ -105,6 +108,44 @@ def cmd_stop(args):
     ok = supervisor.stop_project(args.project)
     print("stopped" if ok else "not running")
     return 0
+
+
+def cmd_stop_chain(args):
+    remote = _remote_post("/command", {"action": "soft_stop"})
+    if remote is None:
+        print("no running Auto-AFK instance found")
+        return 1
+    print("soft stop requested: running projects will finish, no new groups will start")
+    return 0
+
+
+def cmd_stats(args):
+    stats = report.duration_stats(limit=args.limit)
+    if args.json:
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return 0
+    if not stats:
+        print("no duration records yet (logs\\durations.jsonl)")
+        return 0
+    print("{0:<28} {1:>6} {2:>10} {3:>10} {4:>10} {5:<12}".format(
+        "project", "runs", "avg(s)", "max(s)", "last(s)", "last_status"))
+    for key, item in sorted(stats.items()):
+        print("{0:<28} {1:>6} {2:>10.1f} {3:>10.1f} {4:>10.1f} {5:<12}".format(
+            key, item["runs"], item["avg_sec"], item["max_sec"], item["last_sec"],
+            str(item.get("last_status") or "")))
+    return 0
+
+
+def cmd_gui(args):
+    remote = _remote_post("/command", {"action": "open_gui", "project": args.project})
+    if remote is not None:
+        ok = bool(remote.get("ok"))
+        print("GUI opened" if ok else "failed ({0})".format(remote.get("error", "remote")))
+        return 0 if ok else 1
+    bus, supervisor, _ = build_runtime()
+    ok = supervisor.open_project_gui(args.project)
+    print("GUI opened" if ok else "failed")
+    return 0 if ok else 1
 
 
 def cmd_status(args):
@@ -169,6 +210,66 @@ def cmd_update(args):
     return 0
 
 
+def cmd_idle(args):
+    from . import completion
+    from . import idle as idle_mod
+
+    if getattr(args, "clear_completion", False):
+        completion.clear()
+        print("daily completion marker cleared")
+    if args.on or args.off:
+        settings = config.settings()
+        idle_cfg = settings.setdefault("idle", {})
+        idle_cfg["enabled"] = bool(args.on)
+        config.save_yaml(config.SETTINGS_YAML, settings)
+    watcher = idle_mod.IdleWatcher(config.settings, lambda sec: None)
+    snapshot = watcher.status()
+    snapshot["completion"] = completion.completion_info()
+    snapshot["skip_if_completed_today"] = bool(
+        (config.settings().get("idle") or {}).get("skip_if_completed_today", True)
+    )
+    if args.json:
+        print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+        return 0
+    print("idle detection : {0}".format("supported" if snapshot["supported"] else "unsupported"))
+    print("enabled        : {0}".format(snapshot["enabled"]))
+    print("idle now       : {0}".format(snapshot["idle_text"]))
+    print("threshold      : {0}".format(idle_mod.format_idle(snapshot["threshold_sec"])))
+    print("armed          : {0}".format(snapshot["armed"]))
+    print("completed today: {0} (skip={1})".format(
+        snapshot["completion"]["completed_today"], snapshot["skip_if_completed_today"]))
+    if snapshot.get("last_skip_reason"):
+        print("last skip      : {0}".format(snapshot["last_skip_reason"]))
+    if snapshot.get("last_error"):
+        print("last error     : {0}".format(snapshot["last_error"]))
+    return 0
+
+
+def cmd_autostart(args):
+    from . import autostart
+
+    if args.action == "on":
+        result = autostart.apply(True, args.mode or autostart.MODE_TRAY)
+    elif args.action == "off":
+        result = autostart.apply(False, args.mode or autostart.MODE_TRAY)
+    else:
+        result = autostart.status()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok", True) else 1
+    if not result.get("supported", True):
+        print("autostart is only supported on Windows")
+        return 1
+    print("enabled : {0}".format(result.get("enabled")))
+    print("mode    : {0}".format(result.get("mode_label", result.get("mode", ""))))
+    print("command : {0}".format(result.get("command", "")))
+    print("key     : {0}".format(result.get("run_key", "")))
+    if not result.get("ok", True):
+        print("error   : {0}".format(result.get("error", "")))
+        return 1
+    return 0
+
+
 def cmd_patch(args):
     import importlib.util
 
@@ -191,6 +292,11 @@ def main(argv=None):
 
     p_run = sub.add_parser("run", help="run the full chain")
     p_run.add_argument("--groups", nargs="*", help="specific group ids")
+    p_run.add_argument(
+        "--background",
+        action="store_true",
+        help="only run the groups marked background: true (tasks that do not grab the mouse)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_start = sub.add_parser("start", help="start a single project")
@@ -200,6 +306,21 @@ def main(argv=None):
     p_stop = sub.add_parser("stop", help="stop a single project")
     p_stop.add_argument("project")
     p_stop.set_defaults(func=cmd_stop)
+
+    p_gui = sub.add_parser("gui", help="open a project's own config GUI")
+    p_gui.add_argument("project")
+    p_gui.set_defaults(func=cmd_gui)
+
+    p_stop_chain = sub.add_parser(
+        "stop-chain",
+        help="soft stop: running projects finish, no new groups start",
+    )
+    p_stop_chain.set_defaults(func=cmd_stop_chain)
+
+    p_stats = sub.add_parser("stats", help="per-project run duration stats")
+    p_stats.add_argument("--limit", type=int, default=500)
+    p_stats.add_argument("--json", action="store_true")
+    p_stats.set_defaults(func=cmd_stats)
 
     p_status = sub.add_parser("status", help="show status")
     p_status.add_argument("--json", action="store_true")
@@ -228,8 +349,55 @@ def main(argv=None):
     p_patch.add_argument("--json", action="store_true")
     p_patch.set_defaults(func=cmd_patch)
 
+    p_idle = sub.add_parser("idle", help="idle-triggered auto run (status / on / off)")
+    p_idle.add_argument("--on", action="store_true", help="enable idle auto start")
+    p_idle.add_argument("--off", action="store_true", help="disable idle auto start")
+    p_idle.add_argument(
+        "--clear-completion",
+        action="store_true",
+        help="clear today's completion marker so idle auto-run happens again today",
+    )
+    p_idle.add_argument("--json", action="store_true")
+    p_idle.set_defaults(func=cmd_idle)
+
+    p_auto = sub.add_parser("autostart", help="boot autostart entry (HKCU Run key)")
+    p_auto.add_argument("action", nargs="?", default="status", choices=["on", "off", "status"])
+    p_auto.add_argument(
+        "--mode",
+        choices=["tray", "admin"],
+        default=None,
+        help="tray: silent, no UAC; admin: elevated (one UAC prompt at boot)",
+    )
+    p_auto.add_argument("--json", action="store_true")
+    p_auto.set_defaults(func=cmd_autostart)
+
     args = parser.parse_args(argv)
+    _housekeeping_once()
     return args.func(args)
+
+
+# 只在会「真正产生新日志」的命令前做维护；纯查询命令不触发（避免拖慢 status 之类）
+_HOUSEKEEPING_COMMANDS = {"run", "start", "update"}
+
+
+def _housekeeping_once():
+    """CLI 启动时做一次日志维护（截断过大的 events.jsonl / durations.jsonl 等）。
+
+    背景：过去只有 GUI 启动时才调用 cleanup_logs，导致长期只用 CLI 时
+    events.jsonl 会无限增长（实测已达 25 MB，且 events_max_mb=50 的截断永不生效）。
+    """
+    import sys as _sys
+
+    argv = _sys.argv[1:]
+    command = argv[0] if argv and not argv[0].startswith("-") else ""
+    if command not in _HOUSEKEEPING_COMMANDS:
+        return
+    try:
+        from .housekeeping import cleanup_logs
+
+        cleanup_logs(None, config.settings())
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

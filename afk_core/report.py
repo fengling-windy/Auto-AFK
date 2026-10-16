@@ -181,3 +181,40 @@ def list_reports(limit=100):
         if len(items) >= limit:
             break
     return items
+
+
+def duration_stats(limit=500):
+    """Per-project run duration stats from logs/durations.jsonl.
+
+    Borrowed from YukinoChan: recorded durations help tune hang_timeout values
+    instead of guessing them.
+    """
+    entries = []
+    try:
+        if config.DURATIONS_FILE.exists():
+            with open(config.DURATIONS_FILE, "r", encoding="utf-8") as f:
+                for line in f.readlines()[-max(1, int(limit)):]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        continue
+    except OSError:
+        return {}
+    by_project = {}
+    for entry in entries:
+        by_project.setdefault(str(entry.get("project")), []).append(entry)
+    result = {}
+    for project, items in by_project.items():
+        durs = [float(i.get("runtime_sec") or 0) for i in items]
+        result[project] = {
+            "runs": len(durs),
+            "avg_sec": round(sum(durs) / len(durs), 1),
+            "max_sec": round(max(durs), 1),
+            "last_sec": durs[-1],
+            "last_status": items[-1].get("status"),
+            "last_ts": items[-1].get("ts"),
+        }
+    return result

@@ -2,7 +2,9 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import config
@@ -199,16 +201,75 @@ class Updater:
         return result
 
     def update_all_projects(self, should_stop=None):
-        results = []
-        for key, spec in (config.registry().get("projects", {}) or {}).items():
+        """并行更新所有启用的项目（不再逐个等待）。
+
+        为什么要并行：每个项目的更新包含 git pull（可能要等远端）、子模块拉取、
+        以及可能的构建钩子（MaaEnd 的 build-and-install 动辄数分钟）。串行执行时
+        总耗时是所有项目之和；这些项目各自有独立的 git 工作树、独立的
+        `.afk_monitor_manifest.json`，互相不写对方的文件，因此可以安全并行，
+        总耗时降到最慢的那个项目。
+
+        并发度由 `pre_run.update_concurrency` 控制：
+          * 0（默认）= 不限，一次全部放出去；
+          * N>0       = 最多同时 N 个（对磁盘/网络敏感的场景可调小）。
+
+        返回值按注册表顺序排列，保证调用方看到的顺序与过去一致。
+        """
+        projects = [
+            (key, spec)
+            for key, spec in (config.registry().get("projects", {}) or {}).items()
+            if spec.get("enabled", True)
+        ]
+        if not projects:
+            return []
+
+        workers = self._concurrency(len(projects))
+        self._emit(
+            "core",
+            "update: updating {0} project(s) in parallel (concurrency={1})".format(
+                len(projects), "unlimited" if workers >= len(projects) else workers
+            ),
+        )
+
+        results = {}
+        stopped = threading.Event()
+
+        def _stop_requested():
             if should_stop is not None and should_stop():
-                self._emit("core", "pre-run update stopped by user", level="warn")
-                break
-            if not spec.get("enabled", True):
-                continue
+                if not stopped.is_set():
+                    stopped.set()
+                    self._emit("core", "pre-run update stopped by user", level="warn")
+                return True
+            return False
+
+        def _work(item):
+            key, spec = item
+            if stopped.is_set() or _stop_requested():
+                # 返回 None 表示「本轮没有真正处理这个项目」：与旧的串行实现
+                # （should_stop 后直接 break）保持一致——结果里不应出现未处理的项目。
+                return key, None
             try:
-                results.append(self.update_project(key, spec))
+                return key, self.update_project(key, spec)
             except Exception as exc:
                 self._emit(key, "update crashed: {0}".format(exc), level="error")
-                results.append({"project": key, "updated": False, "steps": [str(exc)]})
-        return results
+                return key, {"project": key, "updated": False, "steps": [str(exc)]}
+
+        # 先全部提交，再收集：这样即使某个项目很慢，其它项目也已经在同时跑
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="afk-update") as pool:
+            futures = {pool.submit(_work, item): item[0] for item in projects}
+            for future in as_completed(futures):
+                key, result = future.result()
+                if result is not None:
+                    results[key] = result
+
+        return [results[key] for key, _spec in projects if key in results]
+
+    def _concurrency(self, total):
+        """并发度：0 或非法值 -> 全部并行；否则限制在 1..total。"""
+        try:
+            value = int((self.settings.get("pre_run") or {}).get("update_concurrency", 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            return max(1, total)
+        return max(1, min(value, total))

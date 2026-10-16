@@ -25,6 +25,11 @@ def is_admin():
         return False
 
 
+# cap per-cycle tail reads so a log burst cannot balloon memory; the rest is
+# picked up on the next cycle (partial lines stay buffered)
+MAX_TAIL_CHUNK = 1 * 1024 * 1024
+
+
 class FileTailer:
     def __init__(self, path, start_at_end=True):
         self.path = Path(path)
@@ -51,7 +56,7 @@ class FileTailer:
         try:
             with open(self.path, "rb") as f:
                 f.seek(self.pos)
-                raw = f.read()
+                raw = f.read(MAX_TAIL_CHUNK)
                 self.pos = f.tell()
         except OSError:
             return []
@@ -87,6 +92,7 @@ class ProjectRun:
         self.managed_emulator = False
         self.managed_main = False
         self.finished_by_pattern = False
+        self.window_seen = False
         self.finished_event = threading.Event()
         self.out_log = config.PROJECT_LOGS / "{0}_{1}.out.log".format(key, self.run_id)
         self.err_log = config.PROJECT_LOGS / "{0}_{1}.err.log".format(key, self.run_id)
@@ -114,8 +120,15 @@ class ProjectRun:
             "report_dir": self.report_dir,
             "managed_emulator": self.managed_emulator,
             "managed_main": self.managed_main,
+            "window_seen": self.window_seen,
             "pid": self.process.pid if self.process else None,
         }
+
+
+def apply_chain_order(members, order):
+    """按 chain.order 给组内成员排序；未列出的项目保持原相对顺序垫底。"""
+    rank = {str(k): i for i, k in enumerate(order or [])}
+    return sorted(members, key=lambda m: rank.get(m, len(rank)))
 
 
 class Supervisor:
@@ -130,8 +143,16 @@ class Supervisor:
         self.chain_status = "idle"
         self._chain_thread = None
         self._chain_stop = threading.Event()
+        self._chain_soft = threading.Event()
+        self.startup_update_started = False
+        self.startup_update_done = threading.Event()
         self._post_action_timer = None
         self._orphan_runs = {}
+        # per-project launch counter for the current chain: a failed project is
+        # retried at the end of the chain, but never more than the configured
+        # cap in total (see settings.chain.max_attempts_per_project).
+        self._chain_attempts = {}
+        self._chain_max_attempts = 3
         self._lock = threading.RLock()
         self.bus.status_provider = self.status_snapshot
         self.bus.command_handler = self._handle_command
@@ -143,6 +164,25 @@ class Supervisor:
 
     def _groups(self):
         return self.registry.get("groups", [])
+
+    def background_group_ids(self):
+        """标记 background: true 的组（不占用鼠标的任务，如云游戏/模拟器组）。
+
+        空闲自动挂机的「仅运行不占用鼠标任务」只跑这些组。"""
+        ids = []
+        for group in self._groups():
+            if group.get("background") and group.get("id"):
+                ids.append(str(group["id"]))
+        return ids
+
+    def chain_running(self):
+        """链是否正在跑；也把「手动单独启动的项目仍在运行」算作忙。"""
+        if self.chain_status == "running":
+            return True
+        thread = self._chain_thread
+        if thread is not None and thread.is_alive():
+            return True
+        return any(run.alive for run in self.runs.values())
 
     def _emit(self, project, kind, message, level="info", data=None):
         self.bus.emit(
@@ -179,7 +219,38 @@ class Supervisor:
         if action == "stop_all":
             self.stop_all()
             return {"ok": True}
+        if action == "soft_stop":
+            self.stop_chain_soon()
+            return {"ok": True}
+        if action == "open_gui":
+            key = payload.get("project")
+            if not key:
+                return {"ok": False, "error": "project required"}
+            return {"ok": bool(self.open_project_gui(key))}
+        if action in ("chain", "run_chain"):
+            # 空闲提示框的「立刻开始」/「仅后台任务」也走这里，方便命令行远程控制
+            background = bool(payload.get("background"))
+            return {"ok": bool(self.start_chain(background_only=background))}
+        if action == "status":
+            return {"ok": True, "status": self.status_snapshot()}
         return {"ok": False, "error": "unknown action"}
+
+    def start_chain(self, background_only=False, on_finish=None):
+        """按组启动任务链；background_only=True 时只跑标记 background 的组。"""
+        self.settings = config.settings()
+        self.registry = config.registry()
+        group_ids = None
+        if background_only:
+            group_ids = self.background_group_ids()
+            if not group_ids:
+                self._emit(
+                    "core",
+                    "chain",
+                    "no background group configured (set background: true on a group)",
+                    level="warn",
+                )
+                return False
+        return self.run_chain(group_ids=group_ids, on_finish=on_finish)
 
     def _drain_spools(self, keys=None):
         try:
@@ -267,6 +338,115 @@ class Supervisor:
                 args.append(str(item))
         return args, project
 
+    def _build_gui_command(self, key, spec):
+        """GUI-mode command from the spec's `gui` block: {"args": [...]} uses the
+        project venv python, {"exe": ...} runs an exe directly."""
+        gui = spec.get("gui")
+        if not gui:
+            return None, config.project_dir(spec)
+        project = config.project_dir(spec)
+        fmt = dict(spec)
+        if gui.get("exe"):
+            exe = project / gui["exe"]
+        else:
+            exe = project / gui.get("python", spec.get("python", ".venv\\Scripts\\python.exe"))
+        args = [str(exe)]
+        for item in gui.get("args", []) or []:
+            try:
+                args.append(str(item).format(**fmt))
+            except Exception:
+                args.append(str(item))
+        return args, project
+
+    def _build_gui_env(self, key, spec, project):
+        """Environment for GUI mode: no AFK monitor injection, and no UTF-8
+        mode override — project GUIs are designed for the default locale.
+
+        PYTHONUTF8 MUST NOT be set: it flips locale.getpreferredencoding(False)
+        from cp936 to utf-8, and a child's ``subprocess.run(..., text=True)``
+        then decodes the launcher exe's GBK output as UTF-8, raising
+        UnicodeDecodeError inside ``_readerthread`` -> empty version ->
+        ZZZ shows "原始启动器 未安装". PYTHONIOENCODING is unrelated to that
+        path (it only sets sys.std* encoding), so it is safe to pin to utf-8."""
+        env = os.environ.copy()
+        for name in list(env):
+            if name.startswith("AFK_"):
+                env.pop(name, None)
+        for name in ("PYTHONUTF8", "PYTHONIOENCODING"):
+            env.pop(name, None)
+        pythonpath = []
+        for extra in (spec.get("extra_pythonpath", []) or []):
+            p = Path(str(extra))
+            if not p.is_absolute():
+                p = project / extra
+            pythonpath.append(str(p))
+        existing = env.get("PYTHONPATH")
+        if existing:
+            pythonpath.append(existing)
+        if pythonpath:
+            env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        # Do NOT set PYTHONUTF8 here: UTF-8 mode rewrites
+        # locale.getpreferredencoding(False) to utf-8, so the project's own
+        # ``subprocess.run(..., text=True)`` calls decode GBK children (e.g.
+        # OneDragon-Launcher.exe --version) as UTF-8 and blow up inside
+        # _readerthread. The traceback is captured by the monitor hook and
+        # reported as an error event, which makes every ZZZ run fail even when
+        # the one-dragon exits 0. PYTHONIOENCODING is the correct knob: it pins
+        # our own stdout/stderr to utf-8 for the tailer without touching the
+        # locale, so GBK children keep decoding as cp936.
+        for k, v in (spec.get("env", {}) or {}).items():
+            env[str(k)] = str(v)
+        return env
+
+    def spawn_project_gui(self, key, extra_args=None, report_port=None):
+        """Spawn a project's own configuration GUI (not a supervised task run)
+        and return the Popen handle so the caller can locate/embed its window.
+
+        report_port 传入时（仅 python 入口），用 gui/gui_bootstrap.py 包裹启动：
+        引导脚本在项目进程内运行入口并把主窗口 HWND 上报给 Auto-AFK，
+        窗口定位零搜索、不会误抓其他窗口。
+        The spawned process is detached: it outlives Auto-AFK and is neither
+        monitored nor cleaned up. Returns None on failure."""
+        spec = self._projects().get(key)
+        if spec is None:
+            self._emit("core", "error", "unknown project: {0}".format(key), level="error")
+            return None
+        cmd, project = self._build_gui_command(key, spec)
+        if cmd is None:
+            self._emit(key, "gui", "no gui entry configured for this project", level="warn")
+            return None
+        if extra_args:
+            cmd.extend(str(a) for a in extra_args)
+        if report_port is not None and spec.get("launch_type", "python") == "python" and not (spec.get("gui") or {}).get("exe"):
+            bootstrap = config.ROOT / "gui" / "gui_bootstrap.py"
+            if bootstrap.exists():
+                # [python, 引导脚本, 上报端口, 原脚本, 原参数...]
+                cmd = [cmd[0], str(bootstrap), str(int(report_port))] + cmd[1:]
+        env = self._build_gui_env(key, spec, project)
+        # CREATE_NO_WINDOW hides the venv launcher's console; unlike
+        # STARTF_USESHOWWINDOW SW_HIDE it does not hide the app's Qt window
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            proc = proc_popen(
+                cmd,
+                cwd=str(project),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+        except Exception as exc:
+            self._emit(key, "error", "failed to open GUI: {0}".format(exc), level="error")
+            return None
+        self._emit(key, "gui", "project GUI opened")
+        return proc
+
+    def open_project_gui(self, key):
+        return self.spawn_project_gui(key) is not None
+
     def _build_env(self, key, run, project):
         env = os.environ.copy()
         env["AFK_MONITOR"] = "1"
@@ -277,7 +457,7 @@ class Supervisor:
         env["AFK_HEARTBEAT_SEC"] = str(self.settings.get("heartbeat_sec", 20))
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
+        env.pop("PYTHONUTF8", None)
         pythonpath = [str(config.MONITOR_KIT), str(project)]
         for extra in (run.spec.get("extra_pythonpath", []) or []):
             extra_path = Path(str(extra))
@@ -428,8 +608,85 @@ class Supervisor:
                     "tailer": FileTailer(resolved, start_at_end=True) if resolved else None,
                 }
             )
+        window_keywords = [str(k) for k in (spec.get("window_keywords") or []) if str(k).strip()]
+        try:
+            window_absent_sec = max(1.0, float(spec.get("window_absent_sec", 15)))
+        except (TypeError, ValueError):
+            window_absent_sec = 15.0
+        window_finish = bool(spec.get("window_finish", False))
+        window_absent_since = None
+        hang_warned = False
         q = self.bus.subscribe()
         iterations = 0
+
+        def drain(count_activity=True, create_from_start=False):
+            for line in stdout_tailer.read_new():
+                watcher.feed_text(line, count_activity=count_activity)
+                self.bus.emit(
+                    {
+                        "project": key,
+                        "run_id": run.run_id,
+                        "kind": "log",
+                        "level": self._level_for_line(line),
+                        "message": line[:2000],
+                        "data": {"source": "stdout"},
+                    }
+                )
+            for line in stderr_tailer.read_new():
+                watcher.feed_text(line, count_activity=count_activity)
+                self.bus.emit(
+                    {
+                        "project": key,
+                        "run_id": run.run_id,
+                        "kind": "log",
+                        "level": self._level_for_line(line),
+                        "message": line[:2000],
+                        "data": {"source": "stderr"},
+                    }
+                )
+            for entry in extra_tailers:
+                resolved = self._resolve_log_path(project_dir, entry["pattern"])
+                if resolved != entry["resolved"]:
+                    entry["resolved"] = resolved
+                    # after the process exited, a freshly appeared log file is
+                    # read from its beginning (it may only be written at exit)
+                    entry["tailer"] = FileTailer(resolved, start_at_end=not create_from_start) if resolved else None
+                if entry["tailer"] is not None:
+                    new_lines = entry["tailer"].read_new()
+                    if new_lines:
+                        watcher.feed_text("\n".join(new_lines), count_activity=count_activity)
+
+        def window_seen_now():
+            return bool(window_keywords) and self._window_titles_contain(window_keywords)
+
+        def check_window_absent():
+            # YukinoChan-style debounce: the game window appeared once during this
+            # run and has now been continuously absent for window_absent_sec.
+            nonlocal window_absent_since
+            if not window_keywords:
+                return False
+            if window_seen_now():
+                run.window_seen = True
+                window_absent_since = None
+                return False
+            if not run.window_seen:
+                return False
+            if window_absent_since is None:
+                window_absent_since = time.time()
+                return False
+            return time.time() - window_absent_since >= window_absent_sec
+
+        def grace_then_kill(seconds, message, level="warn"):
+            # wait before killing but keep draining logs/events so the GUI stays live
+            if seconds > 0:
+                self._emit(key, "status", message, level=level)
+                deadline = time.time() + seconds
+                while run.alive and time.time() < deadline:
+                    time.sleep(0.5)
+                    drain()
+            if run.alive:
+                self.kill_tree(run.process)
+
         try:
             while run.alive:
                 drained = 0
@@ -446,67 +703,53 @@ class Supervisor:
                     except queue.Empty:
                         break
                 iterations += 1
-                for line in stdout_tailer.read_new():
-                    watcher.feed_text(line, count_activity=True)
-                    self.bus.emit(
-                        {
-                            "project": key,
-                            "run_id": run.run_id,
-                            "kind": "log",
-                            "level": self._level_for_line(line),
-                            "message": line[:2000],
-                            "data": {"source": "stdout"},
-                        }
-                    )
-                for line in stderr_tailer.read_new():
-                    watcher.feed_text(line, count_activity=True)
-                    self.bus.emit(
-                        {
-                            "project": key,
-                            "run_id": run.run_id,
-                            "kind": "log",
-                            "level": self._level_for_line(line),
-                            "message": line[:2000],
-                            "data": {"source": "stderr"},
-                        }
-                    )
-                for entry in extra_tailers:
-                    resolved = self._resolve_log_path(project_dir, entry["pattern"])
-                    if resolved != entry["resolved"]:
-                        entry["resolved"] = resolved
-                        entry["tailer"] = FileTailer(resolved, start_at_end=True) if resolved else None
-                    if entry["tailer"] is not None:
-                        new_lines = entry["tailer"].read_new()
-                        if new_lines:
-                            watcher.feed_text("\n".join(new_lines), count_activity=True)
+                drain()
                 if iterations <= 30 or iterations % 5 == 0:
                     self._track_children(run)
+
+                if window_finish and check_window_absent():
+                    run.finished_by_pattern = True
+                    watcher.finish_hit = True
+                    self._emit(
+                        key,
+                        "status",
+                        "game window gone for {0:.0f}s, treating run as finished".format(window_absent_sec),
+                    )
+                    grace_then_kill(
+                        float(spec.get("stop_on_finish_delay_sec", 5)),
+                        "waiting {0:.0f}s before stopping (window finished)",
+                    )
+                    break
                 if spec.get("stop_on_error") and watcher.error_messages and run.alive:
                     delay = float(spec.get("stop_on_error_delay_sec", 10))
-                    if delay > 0:
-                        self._emit(key, "status", "error pattern detected, waiting {0:.0f}s before stopping".format(delay), level="warn")
-                        deadline = time.time() + delay
-                        while run.alive and time.time() < deadline:
-                            time.sleep(0.5)
-                    if run.alive:
-                        self._emit(key, "status", "stopping process after error pattern", level="warn")
-                        self.kill_tree(run.process)
+                    grace_then_kill(delay, "error pattern detected, waiting {0:.0f}s before stopping".format(delay))
                     break
                 if spec.get("stop_on_finish") and watcher.finish_hit and run.alive:
-                    delay = float(spec.get("stop_on_finish_delay_sec", 5))
-                    if delay > 0:
-                        self._emit(key, "status", "finish marker detected, waiting {0:.0f}s before stopping".format(delay))
-                        deadline = time.time() + delay
-                        while run.alive and time.time() < deadline:
-                            time.sleep(0.5)
                     run.finished_by_pattern = True
-                    if run.alive:
-                        self._emit(key, "status", "stopping process after finish")
-                        self.kill_tree(run.process)
+                    delay = float(spec.get("stop_on_finish_delay_sec", 5))
+                    grace_then_kill(delay, "finish marker detected, waiting {0:.0f}s before stopping".format(delay))
                     break
-                if watcher.hang_seconds() > hang_timeout:
+                hang_seconds = watcher.hang_seconds()
+                if (
+                    not hang_warned
+                    and run.alive
+                    and hang_timeout > 0
+                    and hang_seconds >= hang_timeout * 5.0 / 6.0
+                    and hang_seconds < hang_timeout
+                ):
+                    hang_warned = True
+                    self._emit(
+                        key,
+                        "hang",
+                        "no activity for {0:.0f}s (warning threshold {1:.0f}s), capturing screenshot".format(
+                            hang_seconds, hang_timeout * 5.0 / 6.0
+                        ),
+                        level="warn",
+                    )
+                    report.take_screenshot(config.PROJECT_LOGS / "{0}_{1}_hangwarn.png".format(key, run.run_id))
+                if hang_seconds > hang_timeout:
                     run.hanging = True
-                    self._emit(key, "hang", "no activity for {0}s, killing process tree".format(int(watcher.hang_seconds())), level="error")
+                    self._emit(key, "hang", "no activity for {0}s, killing process tree".format(int(hang_seconds)), level="error")
                     report.take_screenshot(config.PROJECT_LOGS / "{0}_{1}_hang.png".format(key, run.run_id))
                     self.kill_tree(run.process)
                     break
@@ -523,19 +766,39 @@ class Supervisor:
         time.sleep(0.5)
         for event in self.bus.project_events(key, run.run_id):
             watcher.feed(event)
-        for line in stdout_tailer.read_new():
-            watcher.feed_text(line)
-        for line in stderr_tailer.read_new():
-            watcher.feed_text(line)
-        for entry in extra_tailers:
-            if entry["tailer"] is None:
-                resolved = self._resolve_log_path(project_dir, entry["pattern"])
-                if resolved:
-                    entry["tailer"] = FileTailer(resolved, start_at_end=False)
-            if entry["tailer"] is not None:
-                new_lines = entry["tailer"].read_new()
-                if new_lines:
-                    watcher.feed_text("\n".join(new_lines))
+        drain(count_activity=False, create_from_start=True)
+
+        # launcher fast-exit protection (YukinoChan): the process exited but the
+        # game window it launched is still up -> wait for the window to close
+        # before judging the result, so a fast-exiting launcher is not a failure.
+        if (
+            window_keywords
+            and run.window_seen
+            and not run.stopped
+            and not run.hanging
+            and window_seen_now()
+        ):
+            self._emit(key, "status", "process exited but game window is still up, waiting for it to close", level="warn")
+            try:
+                wait_deadline = time.time() + float(spec.get("window_exit_wait_sec", hang_timeout or 1800))
+            except (TypeError, ValueError):
+                wait_deadline = time.time() + 1800
+            absent_since = None
+            while time.time() < wait_deadline:
+                time.sleep(1.0)
+                drain(count_activity=False)
+                if window_seen_now():
+                    absent_since = None
+                    continue
+                if absent_since is None:
+                    absent_since = time.time()
+                elif time.time() - absent_since >= window_absent_sec:
+                    watcher.finish_hit = True
+                    if window_finish:
+                        run.finished_by_pattern = True
+                    self._emit(key, "status", "game window closed, resuming result judgment")
+                    break
+            drain(count_activity=False, create_from_start=True)
 
         run.finished_at = time.time()
         runtime = (run.finished_at - run.started_at) if run.started_at else None
@@ -563,6 +826,7 @@ class Supervisor:
                 "warn_count": watcher.warn_count(),
             },
         )
+        self._record_duration(key, run, runtime)
         self._cleanup_processes(run)
         emu_cfg = ((self.settings.get("pre_run") or {}).get("emulator") or {})
         if run.managed_emulator and emu_cfg.get("close_after_run", True):
@@ -602,7 +866,13 @@ class Supervisor:
             except Exception as exc:
                 outcome = {"fixed": False, "attempts": [], "reason": "repair engine error: {0}".format(exc)}
             max_retry = int(spec.get("retry", 0))
-            if outcome.get("fixed") and run.attempt <= max_retry:
+            in_chain = self.chain_status == "running"
+            chain_budget = (not in_chain) or self._chain_attempts.get(key, 0) < self._chain_max_attempts
+            if outcome.get("fixed") and run.attempt <= max_retry and chain_budget:
+                # the in-process retry also spends the chain-wide launch budget,
+                # so max_attempts_per_project holds no matter which layer retries
+                if in_chain:
+                    self._chain_attempts[key] = self._chain_attempts.get(key, 0) + 1
                 self._emit(key, "repair", "repair reported success, retrying ({0}/{1})".format(run.attempt, max_retry))
                 self._persist()
                 time.sleep(float(self.settings.get("repair", {}).get("retry_delay_sec", 5)))
@@ -714,6 +984,75 @@ class Supervisor:
             except Exception:
                 pass
 
+    def _window_titles_contain(self, keywords):
+        """Match visible top-level window titles against keywords (case-insensitive).
+
+        Borrowed from YukinoChan: the game window is the closest signal to the
+        player-visible task state, so title keywords drive completion tracking.
+        """
+        if not keywords or os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return False
+        needles = [str(k).lower() for k in keywords if str(k).strip()]
+        if not needles:
+            return False
+        user32 = ctypes.windll.user32
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        hits = []
+
+        def _callback(hwnd, lparam):
+            try:
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buf, length + 1)
+                        title = (buf.value or "").lower()
+                        if any(needle in title for needle in needles):
+                            hits.append(title)
+            except Exception:
+                pass
+            return True
+
+        try:
+            user32.EnumWindows(enum_proc(_callback), 0)
+        except Exception:
+            return False
+        return bool(hits)
+
+    def _record_duration(self, key, run, runtime):
+        if runtime is None or runtime <= 0:
+            return
+        try:
+            entry = {
+                "ts": time.time(),
+                "project": key,
+                "run_id": run.run_id,
+                "attempt": run.attempt,
+                "status": run.status,
+                "runtime_sec": round(float(runtime), 1),
+            }
+            config.DURATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(config.DURATIONS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def stop_chain_soon(self):
+        """Soft stop (YukinoChan-style): running projects finish on their own,
+        no new groups are started. Contrast with stop_all which kills everything."""
+        self._chain_soft.set()
+        self._emit(
+            "core",
+            "chain",
+            "soft stop requested: running projects will finish, no new groups will start",
+            level="warn",
+        )
+
     def stop_project(self, key):
         with self._lock:
             run = self.runs.get(key)
@@ -732,6 +1071,38 @@ class Supervisor:
             self.stop_project(key)
         self._persist()
 
+    def run_startup_updates(self):
+        """Update all projects once, right after Auto-AFK starts
+        (pre_run.enabled + pre_run.at_startup + pre_run.update_projects).
+        The chain's own pre-run skips project updates when this has run."""
+        pre_run = self.settings.get("pre_run") or {}
+        if not pre_run.get("enabled", True):
+            return False
+        if not pre_run.get("at_startup", True):
+            return False
+        if not pre_run.get("update_projects", True):
+            return False
+        if self.startup_update_started:
+            return True
+        self.startup_update_started = True
+
+        def _worker():
+            try:
+                from .updater import Updater
+
+                self._emit("core", "chain", "startup updates: updating all projects")
+                Updater(self.bus, self.settings).update_all_projects(
+                    should_stop=self._chain_stop.is_set
+                )
+                self._emit("core", "chain", "startup updates finished")
+            except Exception as exc:
+                self._emit("core", "chain", "startup updates failed: {0}".format(exc), level="error")
+            finally:
+                self.startup_update_done.set()
+
+        threading.Thread(target=_worker, daemon=True, name="afk-startup-update").start()
+        return True
+
     def run_chain(self, group_ids=None, on_finish=None):
         if self._chain_thread is not None and self._chain_thread.is_alive():
             self._emit("core", "status", "chain already running", level="warn")
@@ -740,11 +1111,65 @@ class Supervisor:
             self._emit("core", "chain", "dry run: chain start skipped (AFK_DRY_RUN=1)", level="warn")
             return True
         self._chain_stop.clear()
+        self._chain_soft.clear()
         self._chain_thread = threading.Thread(
             target=self._chain_worker, args=(group_ids, on_finish), daemon=True, name="afk-chain"
         )
         self._chain_thread.start()
         return True
+
+    def _chain_plan(self, groups, chain_order, only_keys=None):
+        """Build the [(group, members)] plan for one round.
+
+        only_keys=None -> every enabled member (first round); otherwise only the
+        listed keys, so a retry round touches exactly the projects that failed.
+        """
+        plan = []
+        for group in groups:
+            members = [
+                m
+                for m in group.get("members", [])
+                if self._projects().get(m, {}).get("enabled", True) and (only_keys is None or m in only_keys)
+            ]
+            if not members:
+                continue
+            if chain_order:
+                members = apply_chain_order(members, chain_order)
+            plan.append((group, members))
+        return plan
+
+    def _launch_and_wait(self, members, parallel):
+        """Launch the members and block until they settle (or the chain stops)."""
+        for member in members:
+            self._chain_attempts[member] = self._chain_attempts.get(member, 0) + 1
+        # pass the chain-wide attempt number so ProjectRun.attempt reflects how
+        # many times the project has really been launched in this chain (a retry
+        # round is attempt 2, 3, ...), which is what the report and the repair
+        # budget read
+        if parallel:
+            for member in members:
+                self.start_project(member, attempt=self._chain_attempts.get(member, 1))
+            while True:
+                if self._chain_stop.is_set():
+                    return
+                runs = [self.runs.get(m) for m in members]
+                # a member that never started (unknown key) counts as done so
+                # the wait loop cannot spin forever on None
+                if all(r is None or r.terminal for r in runs):
+                    return
+                time.sleep(1.0)
+        else:
+            for member in members:
+                if self._chain_stop.is_set() or self._chain_soft.is_set():
+                    return
+                self.start_project(member, attempt=self._chain_attempts.get(member, 1))
+                while True:
+                    if self._chain_stop.is_set():
+                        return
+                    current = self.runs.get(member)
+                    if current is None or current.terminal:
+                        break
+                    time.sleep(1.0)
 
     def _chain_worker(self, group_ids, on_finish):
         groups = self._groups()
@@ -767,7 +1192,14 @@ class Supervisor:
                 from .emulator import MuMuController
 
                 MuMuController(self.bus, self.settings).update_check()
-            if pre_run.get("update_projects", True) and not self._chain_stop.is_set():
+            if self.startup_update_started and pre_run.get("at_startup", True):
+                # projects were already updated right after startup; just wait
+                # for that run to finish instead of updating everything again
+                self._emit("core", "chain", "projects updated at startup, waiting for it to finish")
+                while not self.startup_update_done.wait(timeout=2.0):
+                    if self._chain_stop.is_set():
+                        break
+            elif pre_run.get("update_projects", True) and not self._chain_stop.is_set():
                 updater.update_all_projects(should_stop=self._chain_stop.is_set)
             self._emit("core", "chain", "pre-run updates finished")
             if self._chain_stop.is_set():
@@ -779,50 +1211,126 @@ class Supervisor:
                     except Exception:
                         pass
                 return
+        chain_cfg = self.settings.get("chain") or {}
+        chain_order = [str(k) for k in (chain_cfg.get("order") or [])]
+        # A failing project no longer aborts the whole chain: it is skipped so the
+        # remaining projects still run, and retried once every project has had its
+        # turn. Each project is launched at most max_attempts_per_project times in
+        # total across all rounds (the accounting is on launches, not on the
+        # in-process retry counter, which stays independent).
+        continue_on_failure = bool(chain_cfg.get("continue_on_failure", True))
+        retry_failed_at_end = bool(chain_cfg.get("retry_failed_at_end", True))
+        try:
+            cap = int(chain_cfg.get("max_attempts_per_project", 3))
+        except (TypeError, ValueError):
+            cap = 3
+        cap = max(1, cap)
+        self._chain_attempts = {}
+        self._chain_max_attempts = cap
+
         overall_ok = True
-        for group in groups:
-            if self._chain_stop.is_set():
+        aborted = False
+        failed_keys = []
+        for round_index in range(1, cap + 1):
+            if self._chain_stop.is_set() or self._chain_soft.is_set():
                 break
-            members = [m for m in group.get("members", []) if self._projects().get(m, {}).get("enabled", True)]
-            if not members:
-                continue
-            parallel = bool(group.get("parallel", True))
-            self._emit("core", "chain", "group {0} started: {1} (parallel={2})".format(group.get("id"), members, parallel))
-            if parallel:
-                for member in members:
-                    self.start_project(member)
-                while True:
-                    if self._chain_stop.is_set():
-                        break
-                    runs = [self.runs.get(m) for m in members]
-                    if all(r is not None and r.terminal for r in runs):
-                        break
-                    time.sleep(1.0)
+            if round_index == 1:
+                plan = self._chain_plan(groups, chain_order, None)
             else:
-                for member in members:
-                    if self._chain_stop.is_set():
-                        break
-                    self.start_project(member)
-                    while True:
-                        if self._chain_stop.is_set():
-                            break
-                        current = self.runs.get(member)
-                        if current is not None and current.terminal:
-                            break
-                        time.sleep(1.0)
-            if self._chain_stop.is_set():
-                break
-            failed = [m for m in members if (self.runs.get(m) is None or self.runs[m].status not in ("success", "success_unverified", "stopped"))]
-            if failed:
-                overall_ok = False
-                self._emit("core", "chain", "group {0} finished with failures: {1}".format(group.get("id"), failed), level="error")
-                if not group.get("continue_on_failure", False):
+                if not retry_failed_at_end:
                     break
-            self._emit("core", "chain", "group {0} finished ok".format(group.get("id")))
-        if self._chain_stop.is_set():
-            self.chain_status = "stopped"
+                plan = self._chain_plan(groups, chain_order, failed_keys)
+                if not plan:
+                    break
+                self._emit(
+                    "core",
+                    "chain",
+                    "retry round {0}/{1}: re-running the project(s) that failed: {2}".format(
+                        round_index - 1, cap - 1, failed_keys
+                    ),
+                )
+            if not plan:
+                break
+            round_failed = []
+            for group, members in plan:
+                if self._chain_stop.is_set() or self._chain_soft.is_set() or aborted:
+                    break
+                runnable = [m for m in members if self._chain_attempts.get(m, 0) < cap]
+                capped = [m for m in members if m not in runnable]
+                if capped:
+                    self._emit(
+                        "core",
+                        "chain",
+                        "attempt cap reached ({0} run(s) each), not retrying: {1}".format(cap, capped),
+                        level="warn",
+                    )
+                if not runnable:
+                    continue
+                parallel = bool(group.get("parallel", True))
+                self._emit("core", "chain", "group {0} started: {1} (parallel={2})".format(group.get("id"), runnable, parallel))
+                self._launch_and_wait(runnable, parallel)
+                if self._chain_stop.is_set():
+                    break
+                failed = [
+                    m
+                    for m in runnable
+                    if (self.runs.get(m) is None or self.runs[m].status not in ("success", "success_unverified", "stopped"))
+                ]
+                if failed:
+                    round_failed.extend(failed)
+                    self._emit("core", "chain", "group {0} finished with failures: {1}".format(group.get("id"), failed), level="error")
+                    if not continue_on_failure and not group.get("continue_on_failure", False):
+                        self._emit(
+                            "core",
+                            "chain",
+                            "chain aborted: group {0} failed and continue_on_failure is off".format(group.get("id")),
+                            level="warn",
+                        )
+                        aborted = True
+                        break
+                else:
+                    self._emit("core", "chain", "group {0} finished ok".format(group.get("id")))
+            failed_keys = round_failed
+            if self._chain_stop.is_set() or self._chain_soft.is_set() or aborted:
+                break
+            if not failed_keys:
+                break
         else:
-            self.chain_status = "success" if overall_ok else "failed"
+            if failed_keys:
+                self._emit(
+                    "core",
+                    "chain",
+                    "giving up on {0}: attempt cap of {1} run(s) each was reached".format(failed_keys, cap),
+                    level="error",
+                )
+        stopped = self._chain_stop.is_set() or self._chain_soft.is_set()
+        # 先算出结果，但**暂不公布** chain_status：它在本次收尾（写完成标记、持久化、
+        # 后置动作、on_finish）全部做完后才赋值，作为「整条链彻底结束」的唯一信号。
+        # 否则任何「看到终态就去读完成标记 / 切换数据目录」的代码都会踩到中间窗口
+        # （实测：测试在此时 restore() 隔离目录，会让完成标记写进用户真实 logs）。
+        if stopped or aborted:
+            final_status = "stopped" if stopped else "failed"
+            overall_ok = False
+        else:
+            overall_ok = not failed_keys
+            final_status = "success" if overall_ok else "failed"
+        if final_status == "success":
+            try:
+                from . import completion
+
+                completion.mark_chain_success(
+                    projects=[key for key, run in self.runs.items() if run.status == "success"]
+                )
+            except Exception as exc:
+                self._emit(
+                    "core",
+                    "idle",
+                    "failed to record daily completion: {0}".format(exc),
+                    level="warn",
+                )
+            else:
+                self._emit("core", "idle", "today's chain completed; idle auto-run will skip")
+        self.chain_status = final_status
         self._emit(
             "core",
             "chain",
@@ -830,7 +1338,7 @@ class Supervisor:
             level="info" if overall_ok else "error",
         )
         self._persist()
-        if overall_ok and not self._chain_stop.is_set():
+        if overall_ok and not self._chain_stop.is_set() and not self._chain_soft.is_set():
             self._schedule_post_action()
         if on_finish:
             try:
@@ -862,6 +1370,10 @@ class Supervisor:
                 proc_run(["powershell", "-NoProfile", "-Command", "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"], capture_output=True)
             elif action == "hibernate":
                 proc_run(["shutdown", "/h"], capture_output=True)
+            elif action == "exit":
+                # 关闭 Auto-AFK 本身：GUI 侧监听该事件后退出
+                self._emit("core", "post_action", "post action executed: exit", data={"action": "exit"})
+                return
             self._emit("core", "post_action", "post action executed: {0}".format(action))
         except Exception as exc:
             self._emit("core", "post_action", "post action failed: {0}".format(exc), level="error")

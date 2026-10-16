@@ -20,6 +20,8 @@ class EventBus:
         self._server = None
         self._port = 0
         self._token = ""
+        self._jsonl_fh = None
+        self._project_fhs = {}
         self.status_provider = None
         self.command_handler = None
         config.PROJECT_LOGS.mkdir(parents=True, exist_ok=True)
@@ -50,12 +52,7 @@ class EventBus:
             event.setdefault("ts", time.time())
             self._events.append(event)
             subs = list(self._subs)
-        try:
-            with open(self._jsonl, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        self._write_project_log(event)
+            self._persist_event(event)
         for q in subs:
             try:
                 q.put_nowait(event)
@@ -63,22 +60,54 @@ class EventBus:
                 pass
         return event
 
-    def _write_project_log(self, event):
+    def _persist_event(self, event):
+        # persistent line-buffered handles: one write per event instead of an
+        # open/close pair, with the same flush-per-line durability
+        try:
+            if self._jsonl_fh is None:
+                self._jsonl_fh = open(self._jsonl, "a", encoding="utf-8", buffering=1)
+            self._jsonl_fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception:
+            self._close_jsonl()
         project = event.get("project")
         if not project or event.get("kind") == "heartbeat":
             return
         try:
+            fh = self._project_fhs.get(project)
+            if fh is None:
+                fh = open(config.PROJECT_LOGS / "{0}.log".format(project), "a", encoding="utf-8", buffering=1)
+                self._project_fhs[project] = fh
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(event.get("ts", time.time())))
-            line = "[{0}] [{1}] [{2}] {3}\n".format(
+            fh.write("[{0}] [{1}] [{2}] {3}\n".format(
                 ts,
                 str(event.get("level", "info")).upper(),
                 event.get("kind", "log"),
                 event.get("message", ""),
-            )
-            with open(config.PROJECT_LOGS / "{0}.log".format(project), "a", encoding="utf-8") as f:
-                f.write(line)
+            ))
+        except Exception:
+            self._close_project_log(project)
+
+    def _close_jsonl(self):
+        try:
+            if self._jsonl_fh is not None:
+                self._jsonl_fh.close()
         except Exception:
             pass
+        self._jsonl_fh = None
+
+    def _close_project_log(self, project):
+        fh = self._project_fhs.pop(project, None)
+        try:
+            if fh is not None:
+                fh.close()
+        except Exception:
+            pass
+
+    def close_handles(self):
+        with self._lock:
+            self._close_jsonl()
+            for project in list(self._project_fhs):
+                self._close_project_log(project)
 
     def subscribe(self):
         q = queue.Queue(maxsize=5000)
@@ -224,6 +253,7 @@ class EventBus:
                 self._server.shutdown()
             except Exception:
                 pass
+        self.close_handles()
         try:
             self._server_info_path().unlink(missing_ok=True)
         except Exception:
