@@ -50,7 +50,8 @@ def pump(app, ms):
         time.sleep(0.01)
 
 
-def build_window(app):
+def build_window(app, show=True, tray_mode=False):
+    """构造 MainWindow；tray_mode=True 时模拟 --tray 启动（不 show 主窗口）。"""
     tmp_logs = _TMP / "logs"
     config.LOGS_DIR = tmp_logs
     config.PROJECT_LOGS = tmp_logs / "projects"
@@ -62,8 +63,15 @@ def build_window(app):
     settings["housekeeping"] = {"enabled": False}
     settings.setdefault("idle", {}).update({"enabled": True, "minutes": 30, "prompt_sec": 30})
     config.save_yaml(config.SETTINGS_YAML, settings)
-    window = gm.MainWindow()
-    window.show()
+    saved_argv = list(sys.argv)
+    if tray_mode:
+        sys.argv = ["main.py", "--tray"]
+    try:
+        window = gm.MainWindow()
+    finally:
+        sys.argv = saved_argv
+    if show:
+        window.show()
     pump(app, 150)
     return window
 
@@ -195,12 +203,65 @@ def test_trigger_failure_is_visible():
     check("失败被写入事件流（不再是静默）", len(seen) >= 1)
 
 
+def test_tray_mode_idle_prompt(app):
+    """用户真实场景：开机自启 --tray 模式 + 空闲自动挂机 -> 提示框必须能显示。
+
+    托盘模式下主窗口从不 show()，若空闲提示框依赖窗口可见，用户就永远不会
+    看到提示、空闲挂机形同虚设。这里走真实 _prompt_idle（只把 dialog.exec
+    打桩避免阻塞）验证窗口会被显示出来。
+    """
+    import gui.idle_prompt as ip
+
+    window = build_window(app, show=False, tray_mode=True)
+    check("--tray 启动时主窗口不显示", window.isVisible() is False)
+    check("缓存了 start_in_tray 标记", window.start_in_tray is True)
+
+    def bg_trigger():
+        window._on_idle_trigger(1805.0)
+
+    seen = {}
+    captured = {}
+    orig_exec = ip.IdlePromptDialog.exec
+
+    def spy_exec(self):
+        # 在真正的 exec 位置捕捉提示框状态：此时 dialog 已构造且窗口已显示，
+        # 正是「用户能看到提示框」的那一刻（exec 返回后 _idle_dialog 会被置 None）。
+        captured["idle_text"] = self._idle_text
+        captured["remaining"] = getattr(self, "_remaining", None)
+        captured["window_visible"] = window.isVisible()
+        return 0
+
+    ip.IdlePromptDialog.exec = spy_exec
+    try:
+        t = threading.Thread(target=bg_trigger, name="fake-idle", daemon=True)
+        t.start()
+        t.join(timeout=5)
+        pump(app, 400)
+        seen["visible_after"] = window.isVisible()
+        seen["dialog_created"] = "idle_text" in captured
+    finally:
+        ip.IdlePromptDialog.exec = orig_exec
+
+    print("   触发后窗口可见 =", seen.get("visible_after"),
+          "| 弹窗时窗口可见 =", captured.get("window_visible"),
+          "| 提示文案 =", repr(captured.get("idle_text")))
+    check("空闲触发后主窗口被显示（提示框可见的前提）", seen.get("visible_after") is True)
+    check("提示框确实被创建并进入弹窗流程", seen.get("dialog_created") is True)
+    check("弹窗那一刻窗口已可见（用户能真正看到）", captured.get("window_visible") is True)
+    check("提示框携带了空闲时长文案", "30 分" in str(captured.get("idle_text") or "")
+          or "空闲" in str(captured.get("idle_text") or ""))
+    check("托盘图标可用（用户可据此找回窗口）", window.tray is not None and window.tray.isVisible())
+    window.hide()
+    window._quit()
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     try:
         test_background_thread_delivery(app)
         test_real_watcher_triggers_end_to_end(app)
+        test_tray_mode_idle_prompt(app)
         test_trigger_failure_is_visible()
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS
