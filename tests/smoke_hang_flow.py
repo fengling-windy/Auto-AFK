@@ -28,10 +28,18 @@ def main():
     deadline = time.time() + 300
     reports = []
     current = run
+    # 等待条件必须包含 attempt >= 2：第一次 hang 时 run 已 terminal，
+    # 但 repair 的重试（attempt=2）还在异步进行，过早跳出会读到 attempt=1。
     while time.time() < deadline:
         reports = list((ROOT / "logs" / "reports").glob("*_HungProject"))
         current = supervisor.runs.get("HungProject")
-        if reports and current is not None and current.terminal and not current.alive:
+        if (
+            reports
+            and current is not None
+            and current.terminal
+            and not current.alive
+            and current.attempt >= 2
+        ):
             break
         time.sleep(2)
     pid = run.process.pid if run.process else None

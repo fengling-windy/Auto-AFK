@@ -84,22 +84,21 @@ def create_shortcuts(icon_path):
         "  Write-Host ('created: ' + $path)",
         "}",
     ]
-    gui_vbs = ROOT / "tools" / "launch_gui.vbs"
     admin_vbs = ROOT / "tools" / "launch_admin.vbs"
+    admin_autorun_vbs = ROOT / "tools" / "launch_admin_autorun.vbs"
     icon = icon_path or ""
+    # 两个快捷方式均为管理员模式：一个只开界面，一个开了自动挂机
     targets = [
-        ("{0}\\Auto-AFK 自动挂机.lnk".format(ROOT), gui_vbs, "Auto-AFK 自动挂机", True),
-        ("{0}\\Auto-AFK 自动挂机(管理员).lnk".format(ROOT), admin_vbs, "Auto-AFK 自动挂机(管理员)", True),
+        ("{0}\\Auto-AFK(管理员).lnk".format(ROOT), admin_vbs, "Auto-AFK 打开界面（管理员，不自动运行任务）"),
+        ("{0}\\Auto-AFK 自动挂机(管理员).lnk".format(ROOT), admin_autorun_vbs, "Auto-AFK 自动挂机（管理员，自动开始任务）"),
     ]
     if desktop and os.path.isdir(desktop):
         targets += [
-            ("{0}\\Auto-AFK 自动挂机.lnk".format(desktop), gui_vbs, "Auto-AFK 自动挂机", True),
-            ("{0}\\Auto-AFK 自动挂机(管理员).lnk".format(desktop), admin_vbs, "Auto-AFK 自动挂机(管理员)", True),
+            ("{0}\\Auto-AFK(管理员).lnk".format(desktop), admin_vbs, "Auto-AFK 打开界面（管理员，不自动运行任务）"),
+            ("{0}\\Auto-AFK 自动挂机(管理员).lnk".format(desktop), admin_autorun_vbs, "Auto-AFK 自动挂机（管理员，自动开始任务）"),
         ]
-    for path, vbs, desc, autorun in targets:
+    for path, vbs, desc in targets:
         args = '"{0}"'.format(vbs)
-        if autorun and vbs == gui_vbs:
-            args += " --autorun"
         args = args.replace("'", "''")
         lines.append("New-AfkShortcut '{}' '{}' '{}' '{}'".format(path.replace("'", "''"), args, desc, icon))
     run_ps("\r\n".join(lines))

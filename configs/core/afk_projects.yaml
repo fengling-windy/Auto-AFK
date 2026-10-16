@@ -1,18 +1,23 @@
+# background: true 的组属于「不占用鼠标」的任务，空闲自动挂机提示框里的
+# 「仅运行不占用鼠标任务」只跑这些组；一键挂机则按下面顺序跑全部组。
 groups:
   - id: cloud_and_emulator
     label: 并行组：云游戏 + 模拟器（不抢输入）
     parallel: true
+    background: true
     members:
       - March7thAssistant
       - BAAH
   - id: exclusive_foreground
     label: 独占前台：MaaEnd
     parallel: false
+    background: false
     members:
       - MaaEnd
   - id: zzz_one_dragon
     label: 绝区零一条龙（MaaEnd 之后）
     parallel: false
+    background: false
     members:
       - ZenlessZoneZero-OneDragon
 
@@ -30,6 +35,11 @@ projects:
     python: .venv\Scripts\python.exe
     args:
       - main.py
+    # 打开配置界面（app.py = 三月七小助手图形启动器；不带任务参数）
+    gui:
+      args: [app.py]
+      # 单实例应用：若 GUI 已在运行，新进程会退出，用窗口标题兜底定位
+      gui_window_keywords: ["March7th Assistant"]
     retry: 1
     hang_timeout: 900
     require_admin: true
@@ -70,6 +80,11 @@ projects:
     args:
       - jsoneditor.py
       - "{config_name}"
+    # 打开配置编辑器（不带配置名 = 自由选择配置，不自动运行）
+    # NiceGUI 网页 GUI：web:true = 内嵌 QWebEngineView 显示（--no-show 不开浏览器）
+    gui:
+      args: [jsoneditor.py]
+      web: true
     config_name: 国际服挂机.json
     retry: 1
     hang_timeout: 900
@@ -117,6 +132,9 @@ projects:
       - "-i"
       - "{instance}"
       - "--quit-after-run"
+    # 打开 MXU 图形界面（不带任务参数，可手动配置/运行实例）
+    gui:
+      exe: install\mxu.exe
     instance: 全套日常
     retry: 1
     hang_timeout: 900
@@ -125,6 +143,10 @@ projects:
     stop_on_error: true
     stop_on_error_delay_sec: 15
     report_on_warn: true
+    # 窗口关键词：跟踪游戏窗口出现/消失（借鉴 YukinoChan）；
+    # 只做“启动器秒退保护”（进程退出但游戏窗口仍在时继续等待），不作为完成判定
+    window_keywords: [终末地, Endfield]
+    window_absent_sec: 20
     config_dir: configs\MaaEnd
     links:
       - link: install\config
@@ -176,6 +198,11 @@ projects:
     args:
       - src\zzz_od\application\zzz_application_launcher.py
       - "--close-game"
+    # 打开一条龙图形配置界面（extra_pythonpath 由打开逻辑自动带上）
+    gui:
+      args: [src\zzz_od\gui\app.py]
+      # 单实例应用：用窗口标题兜底定位（"一条龙"避免误匹配"绝区零"游戏窗口）
+      gui_window_keywords: ["一条龙"]
     extra_pythonpath:
       - src
     retry: 1
@@ -210,6 +237,9 @@ projects:
     exe: publish\BetterGI.exe
     args:
       - startOneDragon
+    # 打开 BetterGI 图形界面（手动配置队伍/秘境/一条龙任务）
+    gui:
+      exe: publish\BetterGI.exe
     retry: 1
     hang_timeout: 900
     require_finish: true
@@ -217,6 +247,11 @@ projects:
     stop_on_finish: true
     report_on_warn: true
     require_admin: true
+    # 窗口关键词 + window_finish: 游戏窗口持续消失 20 秒即判定完成
+    #（借鉴 YukinoChan 的 15 秒去抖；finish_patterns 仍是主判定，窗口兜底）
+    window_keywords: [原神, Genshin Impact, GenshinImpact, YuanShen]
+    window_finish: true
+    window_absent_sec: 20
     config_dir: configs\BetterGI
     links:
       - link: publish\User

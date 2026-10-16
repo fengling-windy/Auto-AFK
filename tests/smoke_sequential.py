@@ -16,6 +16,18 @@ from afk_core.supervisor import Supervisor
 
 
 def main():
+    # 隔离运行数据：链成功会写 logs/last_chain_success.json（今日已完成），
+    # 写进真实目录会导致用户当天空闲自动挂机被误跳过。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_seq_")
+    try:
+        return _run()
+    finally:
+        guard.restore()
+
+
+def _run():
     bus = EventBus()
     bus.start_server()
     settings = config.settings()
@@ -32,6 +44,12 @@ def main():
         if supervisor.chain_status in ("success", "failed", "stopped") and not any(r.alive for r in supervisor.runs.values()):
             break
         time.sleep(0.5)
+    # 关键：chain_status 变终态时链线程可能仍在收尾（写完成标记）。
+    # 必须等线程真正退出，否则 restore() 会把隔离目录换回真实目录，
+    # 链线程随后把「今日已完成」写进用户真实 logs（实测会出现）。
+    from tests import smoke_isolation
+
+    smoke_isolation.wait_chain_idle(supervisor, timeout=60)
     a = supervisor.runs.get("SeqA")
     b = supervisor.runs.get("SeqB")
     if a is None or b is None:

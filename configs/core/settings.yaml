@@ -1,70 +1,87 @@
 event:
   host: 127.0.0.1
-
 heartbeat_sec: 20
 hang_timeout_sec: 1800
 report_dedupe_hours: 20
-
 housekeeping:
   enabled: true
   log_days: 14
   report_days: 30
   events_max_mb: 50
-
+chain:
+  order: []
+  continue_on_failure: true
+  retry_failed_at_end: true
+  max_attempts_per_project: 3
+idle:
+  enabled: true
+  minutes: 30
+  prompt_sec: 30
+  cooldown_min: 30
+  # 今天已成功完成过一轮链时不自动执行（日常已经做完了，避免重复挂机）。
+  # 只有「整链成功」才算完成；单个项目手动跑成功不算。
+  skip_if_completed_today: true
+  autostart: false
+  autostart_mode: admin
 repair:
   enabled: true
   max_rounds: 2
   auto_unsafe: false
   retry_delay_sec: 5
-
 notifications:
   enabled: false
   provider: serverchan
   params: {}
   toast: true
   dedupe_sec: 30
-
 post_actions:
   after_all: none
   delay_sec: 60
-
 doctor:
   emulator_processes:
-    - mumuplayer
-    - nemuplayer
-    - dnplayer
-    - lmdplayer
-    - MuMuNxDevice
+  - mumuplayer
+  - nemuplayer
+  - dnplayer
+  - lmdplayer
+  - MuMuNxDevice
   game_processes:
-    - endfield
-    - starrail
-    - bluearchive
-    - arknights
-  emulator_exe: ""
-  game_exe: ""
-
+  - endfield
+  - starrail
+  - bluearchive
+  - arknights
+  emulator_exe: ''
+  game_exe: ''
 gui:
   minimize_to_tray: false
   autostart_chain_on_launch: false
+  widget_enabled: false
+  widget_pos: []
   project_colors:
-    March7thAssistant: "#4fc3f7"
-    BAAH: "#81c784"
-    MaaEnd: "#ffb74d"
-    ZenlessZoneZero-OneDragon: "#b388ff"
-    BetterGI: "#ffd54f"
-    core: "#ce93d8"
-    emulator: "#4db6ac"
-    update: "#90a4ae"
-
+    March7thAssistant: '#4fc3f7'
+    BAAH: '#81c784'
+    MaaEnd: '#ffb74d'
+    ZenlessZoneZero-OneDragon: '#b388ff'
+    BetterGI: '#ffd54f'
+    core: '#ce93d8'
+    emulator: '#4db6ac'
+    update: '#90a4ae'
 schedule:
   enabled: false
-  time: "04:00"
-  days: [mon, tue, wed, thu, fri, sat, sun]
-
+  time: 04:00
+  days:
+  - mon
+  - tue
+  - wed
+  - thu
+  - fri
+  - sat
+  - sun
 pre_run:
   enabled: true
+  at_startup: true
   update_projects: true
   update_emulator: true
+  update_concurrency: 0
   emulator:
     enabled: true
     manage: true

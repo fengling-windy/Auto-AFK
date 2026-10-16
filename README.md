@@ -54,25 +54,37 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 - 图形界面：双击 `Auto-AFK.bat`（打开界面，不自动开跑）或 `一键挂机.bat`（打开界面并自动一键挂机）。
   **关闭窗口即直接退出**（同时停止正在运行的项目）；
   如需恢复"最小化到托盘"，把 `configs\core\settings.yaml` 的 `gui.minimize_to_tray` 改为 `true`。
+  - **项目卡片「界面」按钮**：每个挂机项目卡片上点「界面」可打开该项目自己的图形界面
+    （三月七小助手=app.py 启动器、BAAH=配置编辑器、MaaEnd=MXU、绝区零=一条龙配置界面、BetterGI=主界面），
+    仅打开窗口、**不运行任务也不受监管**，进程独立于 Auto-AFK（关掉 Auto-AFK 后仍保留）；
+    也可用 `Auto-AFK-CLI.bat gui <项目名>` 打开。GUI 入口在各项目的 `gui:` 配置块中定义，新增项目照抄即可。
   - **现代化深色界面**：圆角卡片 + 项目色条、状态圆点与状态胶囊、主/次按钮层级、标签页下划线指示、
     深色等宽日志区；实时日志按**对象着色**（每个项目一种颜色，error 红、warn 橙保持不变），
     颜色可在 `configs\core\settings.yaml` 的 `gui.project_colors` 中自定义。
-- **一键自动挂机快捷方式（推荐）**：`Auto-AFK 自动挂机.lnk`（根目录与桌面各一份，另有"(管理员)"版本），
-  点击后无任何 cmd 窗口，直接启动 GUI 并**自动开始一键挂机**（`--autorun`）；管理员版会弹一次 UAC。
+- **快捷方式（均为管理员模式，推荐）**：
+  - `Auto-AFK(管理员).lnk`（根目录与桌面各一份）——管理员身份打开界面，**不自动运行任务**；
+  - `Auto-AFK 自动挂机(管理员).lnk`（根目录与桌面各一份）——管理员身份打开界面并**自动开始一键挂机**（`--autorun`）；
+  - 两者都会弹一次 UAC（M7A/BAAH 控制游戏需要管理员权限）。
   - 重新生成：`.venv\Scripts\python.exe setup\create_shortcuts.py`（会同时生成 `gui\afk.ico` 图标）
   - 可选参数：`--tray` 启动即最小化到托盘；`--autorun` 自动开跑
-    （`tools\launch_gui.vbs` 会原样转发附加参数；自动挂机快捷方式已带 `--autorun`，`Auto-AFK.bat` 不带参数打开纯界面）
+    （`tools\launch_gui.vbs` 会原样转发附加参数；`Auto-AFK.bat` 不带参数打开纯界面，
+    `一键挂机.bat` / `Auto-AFK-CLI.bat run` 为非提权自动开跑入口）
   - 演练模式：`AFK_DRY_RUN=1` 时"一键挂机"只记录日志不真正启动项目
 - **管理员模式（推荐，M7A/BAAH 控制游戏需要）**：使用桌面的 `Auto-AFK 自动挂机(管理员).lnk`，或双击 `Auto-AFK-Admin.bat`。
   未提权时监管器会直接拒绝启动 `require_admin` 的项目并给出提示，避免 M7A 自我提权导致监管失联。
 - **无 cmd 窗口**：启动器走 `tools\launch_gui.vbs`（wscript 静默）；监管器、更新器、MuMu 管理、doctor、
   修复动作等所有子进程都加了隐藏窗口标志（`afk_core/proc.py`），运行过程中不会闪出控制台。
-  只有 `Auto-AFK-CLI.bat` 保留控制台（命令行交互需要）。
+  管理员快捷方式经 `tools\hidden_run.vbs` 隐藏中转（提权后子进程控制台一律以 SW_HIDE 创建，不弹黑窗），
+  GUI 启动时会显式 `ShowWindow` 强制显示主窗口（规避 `nCmdShow=SW_HIDE` 沿 wscript/venv 启动器链传播把窗口藏起）。
+  启动脚本带错误捕获并把每个环节写入 `logs\launch_trace.log`（runas 提权为异步请求，
+  wscript 必须存活到请求完成，否则提权会被静默丢弃）。只有 `Auto-AFK-CLI.bat` 保留控制台（命令行交互需要）。
 - 命令行：
   - `Auto-AFK-CLI.bat run`：一键挂机（先并行 M7A+BAAH，完成后自动跑 MaaEnd）
   - `Auto-AFK-CLI.bat start March7thAssistant`
   - `Auto-AFK-CLI.bat stop BAAH`
+  - `Auto-AFK-CLI.bat stop-chain`：**软停止**——正在运行的项目跑完后停止任务链，不再启动后续组（不杀进程，适合"这轮跑完就停"）
   - `Auto-AFK-CLI.bat status --json`
+  - `Auto-AFK-CLI.bat stats`：各项目历史运行耗时统计（次数/平均/最长/最近，来自 `logs\durations.jsonl`，用于调 `hang_timeout`）
   - `Auto-AFK-CLI.bat doctor`
   - `Auto-AFK-CLI.bat reports`
   - `Auto-AFK-CLI.bat patch apply|verify|revert`
@@ -84,7 +96,61 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 `cloud_and_emulator`（M7A 云游戏 + BAAH 走 ADB，互不抢输入，并行）→ `exclusive_foreground`（MaaEnd 独占前台）
 → `zzz_one_dragon`（绝区零一条龙，MaaEnd 之后独占前台）。
 组内 `parallel: false` 时成员按顺序串行执行（前一个结束后才启动下一个），`true` 时并行启动并等待全部完成。
-组内任一项目失败默认终止整个链条；在组上设置 `continue_on_failure: true` 可跳过失败组继续执行后续组。
+组内任一项目失败/卡死**默认不中断整条链**：该项目被跳过，后续组照常执行；等所有组跑完一轮后，
+在末尾自动重跑本轮失败的项目（`chain.retry_failed_at_end`，默认 `true`）；
+同一个项目在一次一键挂机中最多被启动 `chain.max_attempts_per_project` 次（默认 3，已含进程内重试），
+达到上限仍失败则链条结果为 `failed` 并保留报告。要恢复"失败即终止"的老行为，
+在 `configs\core\settings.yaml` 的 `chain` 段设 `continue_on_failure: false`（或在某个组上单独设 `continue_on_failure: false`）。
+
+### 空闲自动挂机 / 桌面小组件 / 开机启动
+
+- **空闲自动挂机**（`configs\core\settings.yaml` 的 `idle` 段，默认**关闭**）：
+  电脑连续无鼠标/键盘输入达到 `idle.minutes`（默认 30）分钟后，弹出**三选一提示框**：
+  - **停止** —— 本次不挂机（用户回来后再离开会重新提醒）；
+  - **立刻开始** —— 跑全部组；
+  - **仅运行不占用鼠标任务** —— 只跑注册表里标记 `background: true` 的组（默认是云游戏 + 模拟器组），
+    不抢前台输入，适合你在电脑前做别的事。
+
+  `idle.prompt_sec`（默认 30）秒内未选择则**自动运行全部任务**；`Esc` 或关闭窗口等同「停止」，
+  快捷键 `S` 停止 / `A` 立刻开始 / `B` 仅后台任务。
+  **同一次离开只提醒一次**：触发后解除监听，只有你回来（输入恢复）再离开才会重新提醒；
+  `idle.cooldown_min`（默认 30）为额外冷却；任务链正在跑时不会弹窗。
+
+  **今天已正常完成就不再自动执行**（`idle.skip_if_completed_today`，默认开）：
+  当天成功跑完过**一整条链**后，空闲到点也不再弹窗/自动挂机（当天成功时写
+  `logs\last_chain_success.json`，只比对当天日期，**跨天自动失效**，无需清理）。
+  只有「整链成功」才算完成——手动单独跑某个项目成功不算。
+  GUI 设置页「空闲自动挂机」卡片会显示「今日状态：已完成/未完成」，并可点
+  「今天还没完成（恢复自动挂机）」清除标记；CLI 同样可查/清除：
+
+  ```powershell
+  Auto-AFK-CLI.bat idle                    # 查看空闲状态 + completed today + 上次跳过原因
+  Auto-AFK-CLI.bat idle --on               # 打开
+  Auto-AFK-CLI.bat idle --off              # 关闭
+  Auto-AFK-CLI.bat idle --clear-completion # 清除「今日已完成」标记，今天仍会再自动挂机
+  Auto-AFK-CLI.bat run --background        # 手动只跑 background 组（等价于「仅运行不占用鼠标任务」）
+  ```
+
+- **桌面小组件**（`gui.widget_enabled`，默认**关闭**）：屏幕上的常驻小浮窗，显示任务链状态胶囊、
+  正在运行的项目、以及「空闲多少 / 再多久自动开始」的倒计时；带「一键挂机 / 全部停止 / 显示主窗口」
+  三个按钮，可拖动（位置记在 `gui.widget_pos`）、可折叠。托盘菜单「桌面小组件」或设置页可开关。
+  主窗口加 `--no-widget` 参数启动则不创建小组件。
+
+- **开机启动**：写当前用户注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的
+  `Auto-AFK` 值（**不需要管理员权限**，关闭开关即删除该项，注册表里一眼可见）。两种模式：
+
+  ```powershell
+  Auto-AFK-CLI.bat autostart status          # 查看当前是否已注册、用的是哪种模式
+  Auto-AFK-CLI.bat autostart on              # 默认 tray 模式：静默拉起 GUI（--tray），无黑窗、不弹 UAC
+  Auto-AFK-CLI.bat autostart on --mode admin # admin 模式：经 launch_admin.vbs 提权，开机弹一次 UAC
+                                             #（M7A/BAAH 控制游戏需要管理员权限时选这个）
+  Auto-AFK-CLI.bat autostart off             # 取消开机启动
+  ```
+
+  典型用法：开机自启选 **admin** 模式 + 打开**空闲自动挂机**，即可实现
+  「开机后挂机程序常驻 → 你离开电脑 30 分钟 → 弹出提示框 → 不选择就自动跑完所有日常」。
+  自启 tray 模式时 GUI 以 `--tray` 启动（只驻留托盘，不弹主窗口）。
+
 原神 BetterGI **默认不参与一键挂机**（已从 groups 移除，避免误跑），可在 GUI 卡片上点「启动」手动单独运行；
 如需恢复原神的自动挂机（作为最后一组串行执行），把下面的分组加回 `groups` 列表末尾即可：
 ```yaml
@@ -126,7 +192,26 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 
 ## 运行前自动更新与模拟器管理
 
-每次「一键挂机」或定时启动前，会自动执行（可用 GUI 的「运行前更新」开关关闭）：
+**刚启动就自动更新**：Auto-AFK 界面一启动就会在后台自动更新全部项目
+（`pre_run.at_startup`，默认开；受"运行前更新"总开关和 `update_projects` 控制），
+日志区会显示"启动更新：正在后台更新全部项目..."。
+任务链启动时**不再重复更新项目**，只等待启动更新完成（若其仍在进行）；
+关闭 `at_startup` 后恢复旧行为（任务链启动前才更新）。
+
+**多个项目同时并行更新**（不再逐个等待）：各项目的更新彼此独立（各自的 git 工作树、
+各自的 `.afk_monitor_manifest.json`），因此一次性并行放出去，总耗时从"所有项目之和"
+降到"最慢的那个项目"（MaaEnd 的 `build-and-install` 通常是最慢的，过去串行时它会让
+其它项目一直干等）。并发度由 `pre_run.update_concurrency` 控制：
+
+```yaml
+pre_run:
+  update_concurrency: 0    # 0（默认）= 全部项目同时更新；填 N>0 则最多同时 N 个
+```
+
+日志会显示 `update: updating 5 project(s) in parallel (concurrency=unlimited)`；
+返回结果仍按注册表顺序排列，某个项目更新失败（如 git pull 失败）也不影响其它项目。
+
+每次「一键挂机」或定时启动前，仍会自动执行（可用 GUI 的「运行前更新」开关关闭）：
 
 1. **MuMu 模拟器**：
    - 记录当前版本（`MuMuManager version`），并执行 `MuMuNxUpdater.exe --silence-check` 静默检查（无窗口）；
@@ -171,6 +256,11 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
   - `min_runtime_sec`：运行时间过短且无完成标记 → 失败；
   - 错误模式命中、非零退出码、心跳静默超时 → 失败；
   - 失败原因写入事件与报告（`fail_reason`），错误模式命中时优先显示真实错误文本（而非退出码）。
+- **窗口完成判定**（借鉴 [YukinoChan/Anigame-script-manager](https://github.com/yukikino001-ship-it/Anigame-script-manager)）：
+  - 项目可配置 `window_keywords`（窗口标题关键词，不区分大小写），监管器每秒枚举可见窗口跟踪游戏窗口；
+  - `window_finish: true` 时：窗口出现过、随后**持续消失 `window_absent_sec` 秒**（默认 15，去抖防止启动器重启/自动更新/模拟器闪烁）→ 判定完成；
+  - **启动器秒退保护**：进程提前退出但游戏窗口仍在运行时，不立即判失败，继续等待窗口关闭（上限 `window_exit_wait_sec`，默认等于 `hang_timeout`）；
+  - `finish_patterns` 仍是主判定，窗口判定是兜底；未配置 `window_keywords` 的项目行为不变。
 - **出错即止**：`stop_on_error: true` 的项目（MaaEnd）在错误模式命中后，
   宽限 `stop_on_error_delay_sec` 秒（默认 10）即杀掉进程树并判定失败，不再空等卡死超时。
   MaaEnd 的 `分辨率不符合要求`（非 16:9 会被任务强制停止）已登记为错误模式，
@@ -179,7 +269,10 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
   - 心跳事件不刷新"活跃时间"，只有真实日志/输出才算活跃；
   - `hang_timeout: 900`（15 分钟无任何输出）判定卡死 → 杀掉进程树并清理游戏/模拟器 →
     `hang-detected` 修复规则自动重试一次 → 仍卡死则打包报告（`error tail` 会给出**最后一条日志**，即卡点）并通知；
+  - **卡死预警**：无输出达到 `hang_timeout` 的 5/6 时先发预警事件并截图一次（提前留证，再等最后 1/6）；
   - GUI/任务链启动时自动清理上次残留的"运行中"孤儿进程（校验进程工作目录，避免误杀）。
+- **软停止**：`stop-chain`（或向事件服务器发 `soft_stop` 命令）让当前组内项目自然跑完，
+  不再启动后续组，区别于"全部停止"的直接杀进程；任务链结果记为 `stopped`，不触发关机等后置动作。
 - **进程清理**：每次运行结束（成功/失败/停止）自动清理本次运行派生的子进程（模拟器、mxu、go-service、cpp-algo、云游戏客户端等），
   另可在项目配置中用 `cleanup_processes` 按进程名补充清理。
 - **修复**：`configs\core\repair_rules.yaml` 白名单规则（正则 → 动作），默认自动执行安全动作：
@@ -198,11 +291,16 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 
 ## 日志维护
 
-每次启动 GUI 时会自动执行一次清理（可在 `configs\core\settings.yaml` 的 `housekeeping` 中调整）：
+启动 GUI **或**执行会真正产生新日志的 CLI 命令（`run` / `start` / `update`）时会自动执行一次清理
+（可在 `configs\core\settings.yaml` 的 `housekeeping` 中调整）：
 
 - 删除 `log_days`（默认 14）天前的单次运行日志、卡死截图与 spool 导入文件；
-- 每个项目的滚动日志或 `events.jsonl` 过大时自动截断保留尾部；
+- 每个项目的滚动日志或 `events.jsonl` 过大时自动截断保留尾部
+  （`events_max_mb` 默认 50，超阈值截半；截断总是落在整行边界，不会拦腰截断 JSON）；
 - 删除 `report_days`（默认 30）天前的错误报告。
+
+> 过去只有「启动 GUI」才清理，长期只用 CLI 时 `events.jsonl` 会持续增长、阈值永不生效；
+> 现在 CLI 也会清理。纯查询命令（`status` / `stats` / `reports` / `idle`）**不触发**清理，保持轻量。
 
 ## 测试
 
@@ -212,9 +310,36 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 & .venv\Scripts\python.exe tests\smoke_classify.py    # 完成/失败判定
 & .venv\Scripts\python.exe tests\smoke_hang_flow.py   # 卡死 -> 修复 -> 重试 -> 报告
 & .venv\Scripts\python.exe tests\smoke_stop_error.py  # 出错即止（stop_on_error）
+& .venv\Scripts\python.exe tests\smoke_window.py      # 窗口完成判定 + 启动器秒退保护
+& .venv\Scripts\python.exe tests\smoke_softstop.py    # 软停止（跑完当前组即停）
 & .venv\Scripts\python.exe tests\smoke_cli_remote.py  # CLI 远程 stop/status
+& .venv\Scripts\python.exe tests\smoke_guiopen.py     # 打开项目 GUI（模拟入口，无窗口）
+& .venv\Scripts\python.exe tests\smoke_guiopen_real.py  # 实测打开 BAAH 编辑器（会闪现窗口）
 & .venv\Scripts\python.exe tests\smoke_gui.py         # GUI 离屏冒烟
+& .venv\Scripts\python.exe tests\smoke_retry_round.py # 链级容错：失败跳过 -> 末尾重跑 -> 单项目最多 3 次
+& .venv\Scripts\python.exe tests\smoke_update_parallel.py  # 项目并行更新（并发度、顺序、失败隔离、停止）
+& .venv\Scripts\python.exe tests\smoke_completion.py  # 今日已完成则跳过空闲自动执行（含跨天失效）
 ```
+
+空闲检测 / 桌面小组件 / 开机自启 / 线程安全的测试需离屏运行：
+
+```powershell
+$env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
+& .venv\Scripts\python.exe tests\smoke_idle.py       # 空闲阈值/武装冷却、三选一提示框、自启、background 组、小组件
+& .venv\Scripts\python.exe tests\smoke_idle_flow.py  # 空闲到点 -> 提示框 -> 启动任务 的完整链路（跨线程投递）
+& .venv\Scripts\python.exe tests\smoke_thread_qt.py  # 后台线程经 Signal 投递到 GUI 线程，不直接碰控件
+& .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/嵌入页）
+```
+
+> ⚠️ 会运行任务链的测试必须调用 `tests/smoke_isolation.py` 的 `isolate_runtime()`：
+> 链成功会写 `logs\last_chain_success.json`（今日已完成），写进真实目录会让用户当天
+> 的空闲自动挂机被误跳过。另外**等待链结束时必须用 `smoke_isolation.wait_chain_idle()`**
+> 而不是只看 `chain_status`：状态变终态的那一刻链线程仍在收尾写标记，若此时就
+> `restore()` 隔离目录，标记会落到真实 logs（实测 5 次里出现 2 次）。
+>
+> 相应地，`Supervisor` 已保证**「公布 chain_status=success」时完成标记必定已写好**
+> （写标记在前、公布状态在后），`smoke_completion.py` 用 1ms 高频轮询锁住这个不变量。
+
 
 ## 更新
 
@@ -243,7 +368,12 @@ powershell -ExecutionPolicy Bypass -File 40_apply_patches.ps1
        error_patterns: ["error", "Traceback"]
    ```
 3. 把项目名加入 `groups` 的成员列表（并行组或独占组）；
-4. 如需精细监测，在 `monitor_kit\patcher.py` 的 `PATCHES` 中登记补丁块。
+   组上可加 `background: true` —— 表示该组**不占用鼠标/键盘**，会被空闲自动挂机的
+   「仅运行不占用鼠标任务」选中（默认只有云游戏 + 模拟器组是 `background: true`）；
+4. 如需精细监测，在 `monitor_kit\patcher.py` 的 `PATCHES` 中登记补丁块；
+5. 可选窗口监测字段（借鉴 YukinoChan）：`window_keywords`（游戏窗口标题关键词）、
+   `window_finish`（窗口持续消失即完成）、`window_absent_sec`（去抖时长，默认 15）、
+   `window_exit_wait_sec`（启动器秒退后等待窗口关闭的上限）。
 
 ## 注意事项
 
