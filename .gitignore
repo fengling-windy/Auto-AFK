@@ -6,6 +6,9 @@ __pycache__/
 # runtime data
 logs/
 
+# code-review tool session artifacts (machine/session specific, not project source)
+.mimosa/
+
 # machine-specific shortcuts
 *.lnk
 
