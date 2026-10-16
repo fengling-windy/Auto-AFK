@@ -1,0 +1,53 @@
+groups: []
+
+projects:
+  PjA:
+    display_name: Parallel A
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, A, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+  PjB:
+    display_name: Parallel B
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, B, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+  PjC:
+    display_name: Parallel C
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, C, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+  PjD:
+    display_name: Parallel D
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, D, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+  PjOff:
+    display_name: Parallel Disabled
+    enabled: false
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, Off, "1"]
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core

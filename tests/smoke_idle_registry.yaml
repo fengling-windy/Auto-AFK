@@ -1,0 +1,43 @@
+groups:
+  - id: bg_group
+    label: Background group (no mouse)
+    parallel: true
+    background: true
+    members:
+      - BgA
+  - id: fg_group
+    label: Foreground group (grabs the mouse)
+    parallel: false
+    background: false
+    members:
+      - FgB
+
+projects:
+  BgA:
+    display_name: BgA
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, BgA, "1"]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  FgB:
+    display_name: FgB
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, FgB, "1"]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []

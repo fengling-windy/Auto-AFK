@@ -1,0 +1,79 @@
+groups:
+  - id: g_fail_once
+    label: Fails on the first run, succeeds on the retry
+    parallel: false
+    members:
+      - FlakyOnce
+  - id: g_fail_always
+    label: Always fails, must hit the attempt cap
+    parallel: false
+    members:
+      - FlakyNever
+  - id: g_ok
+    label: Succeeds first time, must never be retried
+    parallel: false
+    members:
+      - OkC
+  - id: g_hang_once
+    label: Hangs on the first run, succeeds on the retry
+    parallel: false
+    members:
+      - HangOnce
+
+projects:
+  FlakyOnce:
+    display_name: Flaky Once
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_flaky.py, FlakyOnce, "2"]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  FlakyNever:
+    display_name: Flaky Never
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_flaky.py, FlakyNever, "99"]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  OkC:
+    display_name: Ok C
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_flaky.py, OkC, "1"]
+    retry: 0
+    hang_timeout: 120
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []
+  HangOnce:
+    display_name: Hang Once
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_flaky.py, HangOnce, "2", "1", "120"]
+    retry: 0
+    hang_timeout: 8
+    require_finish: false
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: [Traceback]
+    finish_patterns: []

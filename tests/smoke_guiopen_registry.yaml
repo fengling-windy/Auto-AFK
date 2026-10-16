@@ -1,0 +1,15 @@
+groups: []
+
+projects:
+  GuiProject:
+    display_name: GUI Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_project.py]
+    gui:
+      args: [tests\smoke_gui_entry.py]
+    retry: 0
+    hang_timeout: 60
+    config_dir: configs\core

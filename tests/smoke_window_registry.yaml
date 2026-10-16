@@ -1,0 +1,26 @@
+groups:
+  - id: smoke
+    label: smoke
+    parallel: false
+    members:
+      - WindowProject
+
+projects:
+  WindowProject:
+    display_name: Window Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args:
+      - tests\smoke_proj_window.py
+    retry: 0
+    hang_timeout: 120
+    config_dir: configs\core
+    success_patterns: []
+    error_patterns:
+      - Traceback
+    finish_patterns: []
+    window_keywords: [FAKEGAMEWINDOW]
+    window_finish: true
+    window_absent_sec: 3
