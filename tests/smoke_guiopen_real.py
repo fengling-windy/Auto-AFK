@@ -1,3 +1,10 @@
+"""真实打开项目 GUI 的测试 —— ⚠️ 会真实弹出项目界面窗口，需人工在场时运行。
+
+它会 spawn 项目自身的配置 GUI（例如 BAAH 编辑器）并等它出现，屏幕上会闪现
+窗口；不适合无人值守的回归套件。只想验证编排逻辑请用 smoke_guiopen.py
+（模拟入口，不弹真实窗口）。
+"""
+
 import sys
 import time
 from pathlib import Path
