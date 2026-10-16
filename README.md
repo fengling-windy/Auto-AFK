@@ -321,15 +321,35 @@ pre_run:
 & .venv\Scripts\python.exe tests\smoke_completion.py  # 今日已完成则跳过空闲自动执行（含跨天失效）
 ```
 
-空闲检测 / 桌面小组件 / 开机自启 / 线程安全的测试需离屏运行：
+空闲检测 / 桌面小组件 / 开机自启 / 线程安全 / 新外壳的测试需离屏运行：
 
 ```powershell
 $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 & .venv\Scripts\python.exe tests\smoke_idle.py       # 空闲阈值/武装冷却、三选一提示框、自启、background 组、小组件
-& .venv\Scripts\python.exe tests\smoke_idle_flow.py  # 空闲到点 -> 提示框 -> 启动任务 的完整链路（跨线程投递）
+& .venv\Scripts\python.exe tests\smoke_idle_flow.py  # 空闲到点 -> 提示框 -> 启动任务（含 --tray 开机自启模式）
 & .venv\Scripts\python.exe tests\smoke_thread_qt.py  # 后台线程经 Signal 投递到 GUI 线程，不直接碰控件
 & .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/嵌入页）
+& .venv\Scripts\python.exe tests\smoke_modern_ui.py  # 主题与动效组件（按钮/滚动/Tab/状态点/胶囊）
 ```
+
+其余可运行的冒烟测试（用中心 venv 直接跑）：
+
+```powershell
+& .venv\Scripts\python.exe tests\smoke_supervisor.py      # Supervisor 基础编排
+& .venv\Scripts\python.exe tests\smoke_chain.py           # 并行组 + 独占组的分组编排
+& .venv\Scripts\python.exe tests\smoke_sequential.py      # 组内串行执行顺序
+& .venv\Scripts\python.exe tests\smoke_startup_update.py  # 启动时更新项目 + 链跳过重复更新
+& .venv\Scripts\python.exe tests\smoke_cleanup.py         # 进程清理
+& .venv\Scripts\python.exe tests\smoke_bus.py             # 事件总线与监测注入（含夹具 smoke_monitor.py）
+& .venv\Scripts\python.exe tests\smoke_emulator.py        # 模拟器管理
+& .venv\Scripts\python.exe tests\smoke_gui_log.py         # GUI 日志区
+& .venv\Scripts\python.exe tests\smoke_hang.py            # 卡死判定
+& .venv\Scripts\python.exe tests\smoke_close_exit.py      # 完成后退出
+```
+
+> `tests\smoke_baah.py` 需在 BAAH 自己的 venv 里跑（依赖 cv2）；
+> `tests\smoke_guiopen_real.py` / `smoke_embed_real.py` 会真实打开窗口，仅在需要时手动跑。
+> `tests\smoke_isolation.py` 是隔离工具（被其它测试 import），不是独立测试。
 
 > ⚠️ 会运行任务链的测试必须调用 `tests/smoke_isolation.py` 的 `isolate_runtime()`：
 > 链成功会写 `logs\last_chain_success.json`（今日已完成），写进真实目录会让用户当天
