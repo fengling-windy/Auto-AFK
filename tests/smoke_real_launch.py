@@ -64,11 +64,14 @@ proc = subprocess.Popen(
 )
 print("  PID(Popen) =", proc.pid)
 
-# 记录真实运行数据的基线，结束时比对，证明隔离确实「零影响」
+# 记录真实运行数据的基线，结束时比对，证明隔离确实「零影响」。
+# 注意：不能用「events.jsonl 大小是否变化」来判断——用户自己可能正在跑挂机
+# 任务，那也会让文件增长（实测踩到过：12 小时前跑本测试时因用户正在运行而
+# 误报失败）。改为用唯一探针 ID 精确检查「我发的事件有没有落进真实日志」。
 REAL_EVENTS = ROOT / "logs" / "events.jsonl"
 REAL_STATE = ROOT / "logs" / "state.json"
 REAL_COMPLETION = ROOT / "logs" / "last_chain_success.json"
-real_events_before = REAL_EVENTS.stat().st_size if REAL_EVENTS.exists() else -1
+unique_id = "probe-{0}-{1}".format(os.getpid(), int(time.time() * 1000))
 real_state_before = REAL_STATE.exists()
 real_completion_before = REAL_COMPLETION.exists()
 
@@ -100,14 +103,15 @@ try:
         ev = TMP / "logs" / "events.jsonl"
         # 说明：events.jsonl 是「懒创建」的（首次 emit 才生成文件），且 GUI 自身的
         # 界面日志走 _append_log 只写控件、不进事件流；因此 pre_run 关闭时启动
-        # 可能一条事件都没有。这里主动通过 /event 接口发一条事件，验证整条
-        # 「HTTP -> EventBus -> JSONL 落盘」管道在真实进程里工作。
+        # 可能一条事件都没有。这里主动通过 /event 接口发一条带唯一 ID 的事件，
+        # 验证整条「HTTP -> EventBus -> JSONL 落盘」管道在真实进程里工作。
         import urllib.request
+        probe_msg = "real-launch smoke probe {0}".format(unique_id)
         try:
             req = urllib.request.Request(
                 "http://127.0.0.1:{0}/event".format(info.get("port")),
                 data=json.dumps({"project": "core", "kind": "probe", "level": "info",
-                                 "message": "real-launch smoke probe"}).encode("utf-8"),
+                                 "message": probe_msg}).encode("utf-8"),
                 headers={"Content-Type": "application/json",
                          "X-AFK-Token": str(info.get("token", ""))},
                 method="POST",
@@ -126,7 +130,7 @@ try:
                 break
             time.sleep(0.25)
         size = ev.stat().st_size if ev.exists() else 0
-        check("隔离生效：事件写入影子根（用户环境零影响）", wrote, "{0} 字节".format(size))
+        check("隔离生效：事件写入影子根", wrote, "{0} 字节".format(size))
         if wrote:
             tail = ev.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[-1:]
             check("影子根事件内容包含刚发的探针事件",
@@ -180,11 +184,21 @@ finally:
     )
     check("关闭后无孤儿事件服务器（CLI 回退本地）", "chain:" in (r3.stdout or ""))
 
-    # 零影响的强证明：真实运行数据在测试前后完全一致
-    real_events_after = REAL_EVENTS.stat().st_size if REAL_EVENTS.exists() else -1
-    check("真实 logs/events.jsonl 未被写入（隔离有效）",
-          real_events_after == real_events_before,
-          "{0} -> {1}".format(real_events_before, real_events_after))
+    # 零影响的强证明：用唯一探针 ID 检查「我发的事件」有没有落进真实日志。
+    # 不能用文件大小差判断——用户自己可能正在跑任务，那也会让文件增长。
+    leaked = False
+    try:
+        if REAL_EVENTS.exists():
+            with open(REAL_EVENTS, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 1_000_000))          # 只看末尾 1MB
+                tail = f.read().decode("utf-8", errors="ignore")
+            leaked = unique_id in tail
+    except OSError:
+        leaked = False
+    check("真实 logs/events.jsonl 未出现本次探针事件（隔离有效）", leaked is False,
+          "probe id = {0}".format(unique_id))
     check("真实 state.json 未被创建",
           (ROOT / "logs" / "state.json").exists() == real_state_before)
     check("真实「今日已完成」标记未被创建",
