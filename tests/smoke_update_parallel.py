@@ -144,6 +144,20 @@ def test_disabled_projects_skipped():
 
 
 def main():
+    # 隔离运行数据（项目并行更新）：EventBus 默认用 config.LOGS_DIR /
+    # config.EVENTS_FILE；不隔离的话测试夹具事件会写进用户真实
+    # logs/events.jsonl（实测累计 3000+ 条）。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_updpar_")
+    try:
+        return _run()
+    finally:
+        smoke_isolation.wait_supervise_threads(timeout=30)
+        guard.restore()
+
+
+def _run():
     test_parallel_speedup()
     test_concurrency_limit()
     test_failure_isolation()

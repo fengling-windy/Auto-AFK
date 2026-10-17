@@ -21,6 +21,7 @@ DURATIONS_FILE 全部指向临时目录，并在结束时 restore()。
 也提供 checkpoint() 以便在结束时把新产生的文件清掉（双保险）。
 """
 
+import os
 import shutil
 import tempfile
 import threading
@@ -41,13 +42,20 @@ _TRACKED = (
 
 
 class _Guard:
-    def __init__(self, tmp, original):
+    def __init__(self, tmp, original, original_env=None, had_env=False):
         self.tmp = tmp
         self.original = original
+        self.original_env = original_env
+        self.had_env = had_env
 
     def restore(self):
         for name, value in self.original.items():
             setattr(config, name, value)
+        # 还原 AFK_ROOT（原本没有就删除）
+        if self.had_env:
+            os.environ["AFK_ROOT"] = self.original_env
+        else:
+            os.environ.pop("AFK_ROOT", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def __enter__(self):
@@ -59,8 +67,17 @@ class _Guard:
 
 
 def isolate_runtime(prefix="afk_test_"):
-    """把运行数据目录指向临时目录，返回一个 restore()/with 用的 guard。"""
+    """把运行数据目录指向临时目录，返回一个 restore()/with 用的 guard。
+
+    同时设置 AFK_ROOT 环境变量：被 Supervisor spawn 的子进程会继承环境
+    （_build_env 用 os.environ.copy()），从而让子进程也把运行数据写到同一个
+    临时根，而不是用户真实 logs。缺了这一步会出现跨进程路径不一致——
+    例如 tests/smoke_gui_entry.py 写的 marker 落到真实 logs，而父测试在
+    临时目录里等不到，表现为测试失败（实测 smoke_guiopen 即如此）。
+    """
     original = {name: getattr(config, name) for name in _TRACKED}
+    original_env = os.environ.get("AFK_ROOT")
+    had_env = "AFK_ROOT" in os.environ
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
 
     config.LOGS_DIR = tmp
@@ -70,10 +87,11 @@ def isolate_runtime(prefix="afk_test_"):
     config.STATE_FILE = tmp / "state.json"
     config.ERROR_INDEX = tmp / "errors.jsonl"
     config.DURATIONS_FILE = tmp / "durations.jsonl"
+    os.environ["AFK_ROOT"] = str(tmp)
 
     config.PROJECT_LOGS.mkdir(parents=True, exist_ok=True)
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    return _Guard(tmp, original)
+    return _Guard(tmp, original, original_env, had_env)
 
 
 def wait_supervise_threads(timeout=30.0, poll=0.1, prefix="afk-supervise-"):

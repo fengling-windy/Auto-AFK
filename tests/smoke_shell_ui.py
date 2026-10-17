@@ -508,6 +508,13 @@ def test_main_window(app):
 
 def main():
     app = QApplication(sys.argv)
+    # 整个文件的运行数据隔离：test_supervisor_extensions 会创建 EventBus 并
+    # 触发 post_action 事件，若不隔离就会写进用户真实 logs/events.jsonl。
+    # 提升到 main() 级别可覆盖所有子测试（原先只在 test_main_window 里隔离，
+    # 而在它之前执行的 test_supervisor_extensions 会漏出去）。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_shell_ui_")
     try:
         test_nav_rail(app)
         test_settings_page(app)
@@ -517,6 +524,8 @@ def main():
         test_main_window(app)
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS
+        smoke_isolation.wait_supervise_threads(timeout=30)
+        guard.restore()
         shutil.rmtree(_TMP_DIR, ignore_errors=True)
     print()
     if FAILURES:

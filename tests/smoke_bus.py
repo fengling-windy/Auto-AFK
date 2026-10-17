@@ -14,6 +14,20 @@ from afk_core.events import EventBus
 
 
 def main():
+    # 隔离运行数据（事件总线与监测注入）：EventBus 默认用 config.LOGS_DIR /
+    # config.EVENTS_FILE；不隔离的话测试夹具事件会写进用户真实
+    # logs/events.jsonl（实测累计 3000+ 条）。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_bus_")
+    try:
+        return _run()
+    finally:
+        smoke_isolation.wait_supervise_threads(timeout=30)
+        guard.restore()
+
+
+def _run():
     bus = EventBus()
     bus.start_server()
     script = ROOT / "tests" / "smoke_monitor.py"

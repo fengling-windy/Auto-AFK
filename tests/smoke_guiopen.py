@@ -15,7 +15,25 @@ from afk_core.supervisor import Supervisor
 
 
 def main():
-    marker = config.LOGS_DIR / "gui_open_marker.txt"
+    # 隔离运行数据（打开项目 GUI（模拟入口））：EventBus 默认用 config.LOGS_DIR /
+    # config.EVENTS_FILE；不隔离的话测试夹具事件会写进用户真实
+    # logs/events.jsonl（实测累计 3000+ 条）。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_guiopen_")
+    try:
+        return _run()
+    finally:
+        smoke_isolation.wait_supervise_threads(timeout=30)
+        guard.restore()
+
+
+def _run():
+    # marker 必须用「仓库根」而不是隔离目录：子进程由 Supervisor.spawn_project_gui
+    # 派生，而 _build_gui_env 会**有意剥离所有 AFK_ 环境变量**（避免向项目 GUI
+    # 泄漏监控配置），所以子进程读不到 AFK_ROOT、只能按仓库根写 marker。
+    # 隔离只用于事件流/状态（那部分由父进程写入，隔离有效）。
+    marker = ROOT / "logs" / "gui_open_marker.txt"
     if marker.exists():
         marker.unlink()
     bus = EventBus()
@@ -43,6 +61,11 @@ def main():
 
     ok_all = ok and marker_ok and len(gui_events) == 1 and "GuiProject" not in supervisor.runs and ok2 is False
     print("GUI-OPEN", "PASS" if ok_all else "FAIL")
+    # 清理自己产生的 marker（子进程按设计写在仓库根，不清理会留在用户 logs 里）
+    try:
+        marker.unlink()
+    except OSError:
+        pass
     bus.stop_server()
     return 0 if ok_all else 1
 
