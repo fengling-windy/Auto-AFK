@@ -15,7 +15,7 @@ from afk_core.supervisor import Supervisor
 
 
 def main():
-    marker = ROOT / "logs" / "gui_open_marker.txt"
+    marker = config.LOGS_DIR / "gui_open_marker.txt"
     if marker.exists():
         marker.unlink()
     bus = EventBus()

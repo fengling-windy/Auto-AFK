@@ -10,6 +10,8 @@ sys.path.insert(0, str(ROOT))
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from afk_core import config
+
 spec = importlib.util.spec_from_file_location("gui_main", ROOT / "gui" / "main.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -24,6 +26,9 @@ def main():
     try:
         return _run()
     finally:
+        # 先等监督线程（afk-supervise-*）收尾，否则其 _persist()
+        # 会写进尚未隔离的真实 logs（见 smoke_isolation）
+        smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
 
 
@@ -48,7 +53,7 @@ def _run():
 
     def save_preview():
         try:
-            window.grab().save(str(ROOT / "logs" / "gui_preview.png"))
+            window.grab().save(str(config.LOGS_DIR / "gui_preview.png"))
         except Exception:
             pass
 

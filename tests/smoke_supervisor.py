@@ -24,6 +24,9 @@ def main():
     try:
         return _run()
     finally:
+        # 先等监督线程（afk-supervise-*）收尾，否则其 _persist()
+        # 会写进尚未隔离的真实 logs（见 smoke_isolation）
+        smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
 
 
@@ -40,7 +43,7 @@ def _run():
     time.sleep(1.0)
     print("status:", run.status, "exit:", run.exit_code)
     print("report dir:", run.report_dir)
-    reports = list((ROOT / "logs" / "reports").glob("*_SmokeProject"))
+    reports = list((config.REPORTS_DIR).glob("*_SmokeProject"))
     print("report bundles:", len(reports))
     ok = run.status == "failed" and reports
     print("SUPERVISOR", "PASS" if ok else "FAIL")

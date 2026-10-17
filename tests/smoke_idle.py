@@ -231,12 +231,10 @@ def test_supervisor_background():
     from afk_core.repair import RepairEngine
     from afk_core.supervisor import Supervisor
 
-    # 隔离运行数据：本测试会真实跑成功一条 background 链，链成功会写
-    # logs/last_chain_success.json（今日已完成）；写进真实目录会让用户当天
-    # 空闲自动挂机被误跳过。
+    # 运行数据隔离由 main() 级别的 guard 统一负责（见 main() 里的说明）：
+    # 若这里再嵌一层 guard，它的 restore() 会把 config 路径还原到真实 logs，
+    # 之后链线程的异步收尾就会写进用户真实目录（实测会创建含 BgA 的 state.json）。
     from tests import smoke_isolation
-
-    guard = smoke_isolation.isolate_runtime(prefix="afk_idle_bg_")
 
     # 隔离外部副作用：Supervisor.start_chain() 会从磁盘重新加载 settings（有意设计，
     # 让 GUI 改完配置立即生效），所以在内存里改 pre_run 无效。这里直接把 MuMu 更新
@@ -305,7 +303,9 @@ def test_supervisor_background():
 
     emulator_mod.MuMuController.update_check = orig_emu_check
     updater_mod.Updater.update_all_projects = orig_update_all
-    guard.restore()
+    # 不在这里 restore：隔离由 main() 级别的 guard 统一管理。
+    # 若在此处提前 restore，链线程的异步收尾（写 state.json 等）会落到
+    # 真实 logs——实测会创建含 BgA 的 logs/state.json。
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +367,26 @@ def test_desktop_widget(app):
 # ---------------------------------------------------------------------------
 
 def main():
+    # 整个测试文件级隔离运行数据：test_supervisor_background 会真实跑一条
+    # background 链，链线程在收尾时还会写 state.json / durations.jsonl；
+    # 只在该子测试内部隔离不够——restore() 之后链线程可能仍在异步收尾，
+    # 于是写进用户真实 logs（实测会创建含 BgA 的 state.json）。
+    # 放在 main() 级别可覆盖所有子测试与任何异步残留。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_idle_all_")
+    try:
+        return _run()
+    finally:
+        # 关键：先等所有 afk-supervise-* 监督线程结束再还原隔离目录。
+        # 该线程在收尾时会 _persist() 写 state.json，而 stop_all() 并不等待它；
+        # 若提前 restore，那次写入会落到用户真实 logs（实测进程退出后约 220ms
+        # 才出现 logs/state.json）。
+        smoke_isolation.wait_supervise_threads(timeout=30)
+        guard.restore()
+
+
+def _run():
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)

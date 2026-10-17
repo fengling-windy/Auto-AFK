@@ -31,6 +31,9 @@ def main():
     try:
         return _run()
     finally:
+        # 先等监督线程（afk-supervise-*）收尾，否则其 _persist()
+        # 会写进尚未隔离的真实 logs（见 smoke_isolation）
+        smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
 
 
@@ -50,10 +53,11 @@ def _run():
         bus.stop_server()
         return 1
     print("status:", run.status, "exit:", run.exit_code, "window_seen:", run.window_seen)
-    durations = ROOT / "logs" / "durations.jsonl"
+    # 用 config.DURATIONS_FILE（而不是硬编码 ROOT/logs），这样隔离到临时目录后
+    # 仍能正确找到本次运行记录
     has_duration = False
     try:
-        has_duration = "WindowProject" in durations.read_text(encoding="utf-8")
+        has_duration = "WindowProject" in config.DURATIONS_FILE.read_text(encoding="utf-8")
     except OSError:
         pass
     print("duration recorded:", has_duration)

@@ -38,10 +38,17 @@ def check(name, ok):
 
 
 def isolated_logs():
-    """把 completion 的标记文件指到临时目录，避免污染真实 logs。"""
-    tmp = Path(tempfile.mkdtemp(prefix="afk_completion_"))
-    config.LOGS_DIR = tmp
-    return tmp
+    """把运行数据（含 DURATIONS_FILE / ERROR_INDEX / STATE_FILE）指到临时目录。
+
+    用 smoke_isolation.isolate_runtime() 而不是只改 LOGS_DIR——后者漏掉了
+    durations.jsonl / errors.jsonl / state.json，实测仍会把测试夹具项目写进
+    用户真实 logs（用户正在挂机时会污染其运行状态）。
+    返回临时目录路径，调用方照旧用 shutil.rmtree 清理（ignore_errors 无害）。
+    """
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_completion_")
+    return guard.tmp
 
 
 def test_cached_query():

@@ -217,12 +217,19 @@ pre_run:
    - 记录当前版本（`MuMuManager version`），并执行 `MuMuNxUpdater.exe --silence-check` 静默检查（无窗口）；
    - **仅在检测到有新版本时**才打开更新器界面（避免"当前版本无需更新"弹窗）：
      - 判定方式：读取 `nx_updater_config.json` 的 `force`/`reminder`（MuMu 自身就是靠它决定是否提示）并与当前版本比较；
-     - `updater_mode: gui`（默认）：有更新才 `--manual-check` 打开界面并等待关闭（超时 600s）；
+     - `updater_mode: gui`：有更新才 `--manual-check` 打开界面并等待关闭（超时 600s）；
        `always_open: true` 可恢复"每次都开界面"；
      - `auto`：有更新时 `--do-reminder-update` 无人值守更新；
-     - `silence`：只静默检查；`none`：跳过。
+     - `silence`：只静默检查；`none`：跳过（连 `--silence-check` 都不执行）。
+   - **Qt GUI 崩溃护栏**：MuMu 的 Qt GUI 前端（`MuMuNxUpdater.exe` / `MuMuManager.exe`）
+     在部分机器上会因 `no Qt platform plugin could be initialized` 而以 `0xC0000409`
+     （`FAST_FAIL_FATAL_APP_EXIT`）瞬间崩溃并弹出错误框。一旦 `--silence-check`
+     返回该状态码，`update_check()` 会打出 warn 并自动把 `mode` 降级为 `none`，
+     不再拉起 `--manual-check` 窗口。本机已把 `updater_mode` 设为 `none`
+     （见 `configs/core/settings.yaml`），需要升级 MuMu 时请手动打开模拟器自带的
+     更新入口，或临时用 `Auto-AFK-CLI.bat update --emulator-gui` 显式唤起
+     （同样受护栏保护）。
    - 更新器关闭后，如果 MuMu 主界面是本次被拉起的，会自动关闭（`close_main_after_update`）。
-   - 也可在 GUI 点「更新MuMu」或 `Auto-AFK-CLI.bat update --emulator-gui` 手动打开更新器。
    - 说明：`mumu-cli.exe` 与 `MuMuManager.exe` 是同一个工具（官网文档确认），只支持实例/应用/安卓版本管理，
      **没有客户端更新命令**；客户端升级只能通过 `MuMuNxUpdater.exe`。
 2. **模拟器生命周期由 Auto-AFK 统一管理**（BAAH 配置里的 `TARGET_EMULATOR_PATH` 已置空，不再由 BAAH 启动）：

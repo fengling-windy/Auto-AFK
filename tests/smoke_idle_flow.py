@@ -53,10 +53,12 @@ def pump(app, ms):
 def build_window(app, show=True, tray_mode=False):
     """构造 MainWindow；tray_mode=True 时模拟 --tray 启动（不 show 主窗口）。"""
     tmp_logs = _TMP / "logs"
-    config.LOGS_DIR = tmp_logs
-    config.PROJECT_LOGS = tmp_logs / "projects"
-    config.EVENTS_FILE = tmp_logs / "events.jsonl"
-    config.STATE_FILE = tmp_logs / "state.json"
+    # 用 isolate_runtime 覆盖全部运行数据路径（含 DURATIONS_FILE / ERROR_INDEX），
+    # 否则测试夹具项目会写进用户真实 durations.jsonl / errors.jsonl。
+    from tests import smoke_isolation
+
+    smoke_isolation.isolate_runtime(prefix="afk_idle_flow_")
+    config.PROJECT_LOGS.mkdir(parents=True, exist_ok=True)
     settings = config.settings()
     settings.setdefault("pre_run", {})["enabled"] = False
     settings["pre_run"]["at_startup"] = False

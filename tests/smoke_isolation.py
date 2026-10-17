@@ -23,6 +23,7 @@ DURATIONS_FILE 全部指向临时目录，并在结束时 restore()。
 
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -73,6 +74,27 @@ def isolate_runtime(prefix="afk_test_"):
     config.PROJECT_LOGS.mkdir(parents=True, exist_ok=True)
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     return _Guard(tmp, original)
+
+
+def wait_supervise_threads(timeout=30.0, poll=0.1, prefix="afk-supervise-"):
+    """等到所有「监督线程」结束。
+
+    为什么需要它：Supervisor 为每个运行中的项目起一个名为 afk-supervise-<key>
+    的守护线程。stop_all() 只停项目、**不等待**该线程退出；而它在收尾时还会
+    调用 _persist() 写 state.json。测试若在这之前 restore() 隔离目录，这次写入
+    就落到用户真实 logs——实测 smoke_idle 的 background 链留下存活线程，导致
+    进程退出后约 220ms 才出现 logs/state.json。
+
+    返回 True 表示都已结束。
+    """
+    deadline = time.time() + float(timeout)
+    while time.time() < deadline:
+        alive = [t for t in threading.enumerate()
+                 if t.name.startswith(prefix) and t.is_alive()]
+        if not alive:
+            return True
+        time.sleep(poll)
+    return False
 
 
 def real_state_paths():

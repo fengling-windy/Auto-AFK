@@ -481,20 +481,41 @@ class MuMuController:
         cfg = self._cfg()
         if not cfg.get("enabled", True):
             return {"checked": False, "reason": "disabled"}
+        mode = str(cfg.get("updater_mode", "gui")).lower()
         version = self.version()
         self._emit("MuMu version: {0}".format(version or "unknown"))
         exe = Path(str(cfg.get("updater_exe", "")))
         manager = str(cfg.get("manager_exe", ""))
-        silent_ok = False
-        if exe.exists():
+        silent_ok = None
+        silent_code = None
+        # MuMu 的 Qt GUI 前端（MuMuNxUpdater / MuMuManager）在部分机器上会因
+        # "no Qt platform plugin could be initialized" 而以 0xC0000409
+        # （FAST_FAIL_FATAL_APP_EXIT）瞬间崩溃并弹出错误对话框。
+        # 注意：不只是 --manual-check，连号称静默的 --silence-check 也会构造
+        # QApplication，所以 updater_mode=none 时必须两个都不碰。
+        if mode == "none":
+            self._emit("MuMu updater GUI skipped (updater_mode=none)")
+        elif exe.exists():
             code, out = self._run([str(exe), "--silence-check"], timeout=300, cwd=exe.parent)
+            silent_code = code
             silent_ok = code == 0
             self._emit("MuMu silent update check: {0}".format("ok" if silent_ok else "exit {0}".format(code)))
         else:
             self._emit("MuMu updater not found: {0}".format(exe), level="warn")
+        # 一旦 silent check 已经以 0xC0000409 崩溃，就不再拉起 --manual-check
+        # 窗口，避免每次挂机前都弹一个注定崩溃的框。
+        gui_crashed = silent_code is not None and (int(silent_code) & 0xFFFFFFFF) == 0xC0000409
+        if gui_crashed:
+            self._emit(
+                "MuMu Qt GUI frontend crashed (0xC0000409), updater UI suppressed; "
+                "the emulator itself is fine - set pre_run.emulator.updater_mode=none "
+                "and update MuMu manually",
+                level="warn",
+            )
         if cfg.get("suppress_prompt", False):
             self.suppress_update_prompt()
-        mode = str(cfg.get("updater_mode", "gui")).lower()
+        if gui_crashed:
+            mode = "none"
         timeout = int(cfg.get("timeout_sec", 600))
         current = self.current_version()
         available, target = self.update_available()

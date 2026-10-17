@@ -25,6 +25,9 @@ def main():
     try:
         return _run()
     finally:
+        # 先等监督线程（afk-supervise-*）收尾，否则其 _persist()
+        # 会写进尚未隔离的真实 logs（见 smoke_isolation）
+        smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
 
 

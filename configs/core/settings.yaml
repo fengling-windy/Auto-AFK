@@ -101,7 +101,12 @@ pre_run:
     suppress_prompt: false
     updater_config: E:\MuMuPlayer\configs\main\nx_updater_config.json
     updater_exe: E:\MuMuPlayer\nx_main\MuMuNxUpdater.exe
-    updater_mode: gui
+    # MuMu 的 Qt GUI 前端（MuMuNxUpdater.exe）在本机无法初始化 Qt 平台插件，
+    # 一启动就 0xC0000409 崩溃并弹出
+    # "This application failed to start because no Qt platform plugin could be
+    #  initialized."。改用 none：完全不启动更新器 GUI，需要时手动更新。
+    # 可选值：gui（弹更新窗口）| auto（静默自动更新）| none（不检查）
+    updater_mode: none
     always_open: false
     close_main_after_update: true
     timeout_sec: 600
