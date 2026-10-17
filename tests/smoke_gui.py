@@ -16,6 +16,18 @@ spec.loader.exec_module(module)
 
 
 def main():
+    # 隔离运行数据（GUI 离屏冒烟）：避免把 state.json / durations.jsonl /
+    # errors.jsonl 写进用户真实 logs——用户可能正在挂机，那会污染其运行状态。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_gui_")
+    try:
+        return _run()
+    finally:
+        guard.restore()
+
+
+def _run():
     app = QApplication([])
     app.setStyleSheet(module.APP_QSS)
     app.setQuitOnLastWindowClosed(False)
