@@ -22,6 +22,18 @@ EXPECTED = {
 
 
 def main():
+    # 隔离运行数据（完成/失败判定）：避免把 state.json / durations.jsonl /
+    # errors.jsonl 写进用户真实 logs——用户可能正在挂机，那会污染其运行状态。
+    from tests import smoke_isolation
+
+    guard = smoke_isolation.isolate_runtime(prefix="afk_classify_")
+    try:
+        return _run()
+    finally:
+        guard.restore()
+
+
+def _run():
     bus = EventBus()
     bus.start_server()
     supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
