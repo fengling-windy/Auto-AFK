@@ -1,4 +1,5 @@
 import json
+import logging
 import shutil
 import subprocess
 import threading
@@ -7,6 +8,8 @@ from pathlib import Path
 
 from . import config
 from .proc import popen as proc_popen, run as proc_run
+
+log = logging.getLogger("afk.emulator")
 
 
 class MuMuController:
@@ -393,7 +396,9 @@ class MuMuController:
                 time.sleep(3)
                 try:
                     self._minimize_once()
-                except Exception:
+                except Exception as exc:
+                    # 最小化循环持续失败时用户不会有感知，留痕便于排查
+                    log.warning("minimize watchdog stopped after error: %s", exc)
                     break
 
         self._watchdog = threading.Thread(target=_loop, daemon=True, name="mumu-minimize-watchdog")
