@@ -276,6 +276,10 @@ def build_shell():
     nav.add_item("sys-cap", "系统", section=True)
     nav.add_item("settings", "设置")
     nav.finish()
+    # 真实 MainWindow 在 _build_ui 末尾会 set_active("overview")；预览若跳过这一步，
+    # 就没有任何导航项被选中，左侧高亮条也不会落位（此前正是这块未定位的
+    # 指示条在左上角画出一块蓝色，压在品牌 Logo 上）。
+    nav.set_active("overview", animate=False)
     root.addWidget(nav)
 
     stack = QWidget()

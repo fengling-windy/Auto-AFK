@@ -33,12 +33,18 @@ class NavItem(QPushButton):
 
 
 class _NavIndicator(QWidget):
-    """导航项左侧的滑动高亮条。"""
+    """导航项左侧的滑动高亮条。
+
+    注意：不能一构造就 show()。QWidget 子对象的默认几何是 100x30 @ (0,0)，
+    在任何导航项被选中之前就可见，会画出一块蓝色压在左上角的品牌 Logo 上
+    （真实启动时的首帧、以及离屏预览截图里都能看到）。改为由
+    NavRail._move_indicator() 在拿到真实位置后再 show。
+    """
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.show()
+        self.hide()
 
     def paintEvent(self, ev):
         painter = QPainter(self)
@@ -141,6 +147,9 @@ class NavRail(QWidget):
         self._indicator.setGeometry(
             QRectF(4, y + 8, 3.0, max(16.0, height)).toAlignedRect()
         )
+        # 拿到真实位置后才显示（见 _NavIndicator 的说明）
+        if item is not None and not self._indicator.isVisible():
+            self._indicator.show()
 
     def _animate_indicator_to(self, y):
         if abs(y - self._indicator_y) < 0.5:

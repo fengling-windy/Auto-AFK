@@ -31,6 +31,16 @@ class _LastInputInfo(ctypes.Structure):
     _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
 
+def supported():
+    """当前系统是否支持空闲检测（GetLastInputInfo 只有 Windows 有）。
+
+    gui/settings_page.py 用它渲染「空闲检测：支持 / 当前系统不支持」，
+    之前该函数不存在，设置页永远显示「空闲检测不可用: module 'afk_core.idle'
+    has no attribute 'supported'」。
+    """
+    return bool(_IS_WINDOWS)
+
+
 def idle_seconds():
     """返回全局空闲秒数（无鼠标键盘输入）；不支持时返回 0.0。"""
     if not _IS_WINDOWS:
