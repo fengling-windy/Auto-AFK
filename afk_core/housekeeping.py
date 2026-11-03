@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import time
 
@@ -74,10 +75,13 @@ def cleanup_logs(bus=None, settings=None):
             newline = tail.find(b"\n")
             if newline >= 0:
                 tail = tail[newline + 1:]
-            events.write_bytes(tail)
+            # 原子替换：先写临时文件再 os.replace，避免写到一半被截断成损坏状态
+            tmp = events.with_name(events.name + ".tmp")
+            tmp.write_bytes(tail)
+            os.replace(tmp, events)
             _emit(bus, "events.jsonl truncated to last {0} MB".format(max_bytes // 2 // 1024 // 1024))
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("events.jsonl truncation failed: %s", exc)
 
     durations_max = int(float(cfg.get("durations_max_mb", 1)) * 1024 * 1024)
     try:
