@@ -9,6 +9,9 @@ logs/
 # code-review tool session artifacts (machine/session specific, not project source)
 .mimosa/
 
+# vision-router crop/preview artifacts (machine/session specific)
+.dsh-vision-router/
+
 # machine-specific shortcuts
 *.lnk
 
