@@ -39,18 +39,31 @@ def _run():
     settings.setdefault("pre_run", {})["enabled"] = False
     supervisor = Supervisor(bus, settings=settings, repair=RepairEngine(bus, settings))
     supervisor.run_chain()
-    # wait until the parallel first group (SmokeA + SmokeB) has finished
+    # 软停语义是「跑完当前组即停」，所以必须在组 A 还在跑的时候就置标志。
+    # 之前等 A、B 都 terminal 再软停，链线程可能已经越过 _chain_soft 检查启动
+    # 组 B 的 SmokeC（实测偶发 started=True 失败）——这是测试自身的竞态，
+    # 不是软停逻辑错误。
     deadline = time.time() + 120
-    group_done = False
+    armed = False
     while time.time() < deadline:
         a = supervisor.runs.get("SmokeA")
         b = supervisor.runs.get("SmokeB")
-        if a and b and a.terminal and b.terminal and not supervisor._chain_soft.is_set():
+        if a and b and (a.started_at is not None or b.started_at is not None):
+            supervisor.stop_chain_soon()
+            armed = True
+            break
+        time.sleep(0.05)
+    # wait until the parallel first group (SmokeA + SmokeB) has finished
+    group_done = False
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        a = supervisor.runs.get("SmokeA")
+        b = supervisor.runs.get("SmokeB")
+        if a and b and a.terminal and b.terminal:
             group_done = True
             break
         time.sleep(0.2)
-    print("first group terminal:", group_done)
-    supervisor.stop_chain_soon()
+    print("first group terminal:", group_done, "soft armed early:", armed)
     # chain must settle with SmokeC never started
     deadline = time.time() + 120
     while time.time() < deadline:

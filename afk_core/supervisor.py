@@ -510,7 +510,10 @@ class Supervisor:
             return run
 
         cmd, project = self._build_command(key, spec)
-        if spec.get("manage_emulator"):
+        # manage_emulator 是项目级开关，pre_run.emulator.manage 是全局总闸：
+        # 关掉全局就不再接管模拟器生命周期（用户可以自己手动开 MuMu）。
+        emu_global = bool(((self.settings.get("pre_run") or {}).get("emulator") or {}).get("manage", True))
+        if spec.get("manage_emulator") and emu_global:
             from .emulator import MuMuController
 
             try:
