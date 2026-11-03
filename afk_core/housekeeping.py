@@ -1,7 +1,10 @@
+import logging
 import shutil
 import time
 
 from . import config
+
+log = logging.getLogger("afk.housekeeping")
 
 PROJECT_LOG_MAX_BYTES = 5 * 1024 * 1024
 PROJECT_LOG_KEEP_BYTES = 2 * 1024 * 1024
@@ -12,8 +15,8 @@ def _emit(bus, message, level="info"):
         return
     try:
         bus.emit({"project": "core", "kind": "housekeeping", "level": level, "message": message, "data": {}})
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("housekeeping emit failed: %s", exc)
 
 
 def _older_than(path, cutoff):

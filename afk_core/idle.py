@@ -11,8 +11,11 @@ IdleWatcher 与 Scheduler 同构（daemon 线程 + 轮询 tick），区别是触
 """
 
 import ctypes
+import logging
 import threading
 import time
+
+log = logging.getLogger("afk.idle")
 
 DEFAULT_MINUTES = 30
 DEFAULT_PROMPT_SEC = 30
@@ -239,8 +242,8 @@ class IdleWatcher:
                         ),
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("idle prompt emit failed: %s", exc)
         try:
             self.on_trigger(idle)
         except Exception as exc:
