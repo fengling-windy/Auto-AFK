@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QGraphicsOpacityEffect,
     QFrame,
+    QLayout,
     QPushButton,
     QTabBar,
     QTabWidget,
@@ -45,6 +46,120 @@ from PySide6.QtWidgets import (
 )
 
 ACCENT = "#4c8dff"
+
+
+class FlowLayout(QLayout):
+    """自动换行的流式布局（Qt 官方 FlowLayout 示例的等价实现）。
+
+    存在的理由：总览页把 5 个项目卡横排在一个 QHBoxLayout 里，每张卡
+    minimumSizeHint 约 264px，合计把 MainWindow 的最小宽度顶到 1592px
+    —— 1366/1440 宽的笔记本上窗口撑出屏幕，w.resize(1360, 900) 会被 Qt
+    直接拉回 1592。改用本布局后卡片按可用宽度自动折行，最小宽度回落到
+    单张卡的宽度。
+    """
+
+    def __init__(self, parent=None, margin=0, h_spacing=12, v_spacing=12):
+        super().__init__(parent)
+        self._items = []
+        self._h_spacing = int(h_spacing)
+        self._v_spacing = int(v_spacing)
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    # -- QLayout 要求的接口 ------------------------------------------------
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRectF(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(QRectF(rect), test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(
+            margins.left() + margins.right(), margins.top() + margins.bottom()
+        )
+
+    # -- 折行计算 ----------------------------------------------------------
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        effective = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+        )
+
+        visible = []
+        widest = 0
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            hint = item.sizeHint()
+            # 卡片 minimumSizeHint 远大于 sizeHint 时用 minimum 兜底，
+            # 否则窄窗口里卡片会被压到画不全。
+            width = max(hint.width(), item.minimumSize().width())
+            height = max(hint.height(), item.minimumSize().height())
+            visible.append((item, width, height))
+            widest = max(widest, width)
+
+        if not visible:
+            return margins.top() + margins.bottom()
+
+        # 一行能放几张就均分成几张的宽度：所有卡片等宽，换行后最后一行
+        # 左对齐（不拉伸成一张超宽卡，那样视觉上像出错）。
+        per_row = max(1, int((effective.width() + self._h_spacing) // (widest + self._h_spacing)))
+        # 末尾那行只剩一张卡时（例如 5 张卡排成 4+1），把每行减一张换成
+        # 3+2 这种更均衡的分行，避免第二行孤零零一张。
+        if per_row > 2 and len(visible) % per_row == 1:
+            per_row -= 1
+        cell = (effective.width() - (per_row - 1) * self._h_spacing) / per_row
+        cell = max(cell, float(widest))
+
+        y = effective.y()
+        x = effective.x()
+        row_height = 0
+        placed = 0
+        for item, _width, height in visible:
+            if placed and placed % per_row == 0:
+                y += row_height + self._v_spacing
+                x = effective.x()
+                row_height = 0
+            if not test_only:
+                item.setGeometry(
+                    QRectF(x, y, cell, height).toAlignedRect()
+                )
+            x += cell + self._h_spacing
+            row_height = max(row_height, height)
+            placed += 1
+
+        return y + row_height - rect.y() + margins.bottom()
+
 
 APP_QSS = """
 * {

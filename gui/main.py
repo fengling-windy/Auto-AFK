@@ -47,6 +47,7 @@ from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
+    FlowLayout,
     HoverGlowCard,
     StatusDot,
     add_shadow,
@@ -443,8 +444,9 @@ class MainWindow(QMainWindow):
         cards_title = QLabel("项目状态")
         cards_title.setObjectName("sectionTitle")
         root.addWidget(cards_title)
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(12)
+        # 用 FlowLayout 而非 QHBoxLayout：5 张卡横排会把窗口最小宽度顶到 1592px，
+        # 1366/1440 宽的笔记本上窗口撑出屏幕。流式布局按可用宽度自动折行。
+        cards_row = FlowLayout(h_spacing=12, v_spacing=12)
         for key, spec in (config.registry().get("projects", {}) or {}).items():
             card = ProjectCard(
                 key, spec, self._project_color(key),

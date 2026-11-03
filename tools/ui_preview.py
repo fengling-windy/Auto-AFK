@@ -42,6 +42,7 @@ from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
+    FlowLayout,
     add_shadow,
     apply_palette,
     enable_smooth_scroll,
@@ -146,8 +147,7 @@ def build_overview():
     cards_title = QLabel("项目状态")
     cards_title.setObjectName("sectionTitle")
     root.addWidget(cards_title)
-    cards_row = QHBoxLayout()
-    cards_row.setSpacing(12)
+    cards_row = FlowLayout(h_spacing=12, v_spacing=12)
     cards = []
     for key, spec in FAKE_PROJECTS.items():
         card = gui_main.ProjectCard(
