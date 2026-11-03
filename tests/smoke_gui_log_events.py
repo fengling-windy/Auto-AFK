@@ -48,13 +48,10 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    config.LOGS_DIR = _TMP / "logs"
-    config.PROJECT_LOGS = _TMP / "logs" / "projects"
-    config.EVENTS_FILE = _TMP / "logs" / "events.jsonl"
-    config.STATE_FILE = _TMP / "logs" / "state.json"
-    config.REPORTS_DIR = _TMP / "logs" / "reports"
-    config.DURATIONS_FILE = _TMP / "logs" / "durations.jsonl"
-    config.ERROR_INDEX = _TMP / "logs" / "errors.jsonl"
+    # 统一用隔离工具：同时覆盖 7 个运行数据路径并设置 AFK_ROOT，
+    # 避免以后改成真跑任务链时子进程写回真实 logs（见 smoke_isolation 文档）。
+    from tests import smoke_isolation
+    guard = smoke_isolation.isolate_runtime(prefix="afk_guilogev_")
 
     settings = config.settings()
     settings.setdefault("pre_run", {})["enabled"] = False
@@ -120,6 +117,7 @@ def main():
     window.hide()
     window._quit()
     config.SETTINGS_YAML = _REAL
+    guard.restore()
     shutil.rmtree(_TMP, ignore_errors=True)
 
     print()
