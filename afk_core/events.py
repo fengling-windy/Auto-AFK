@@ -161,7 +161,14 @@ class EventBus:
     def port(self):
         return self._port
 
-    def start_server(self, host="127.0.0.1"):
+    def start_server(self, host=None):
+        # host 未显式给出时读 settings 的 event.host，让配置项真正生效；
+        # 默认仍绑回环地址，避免无意中把带 token 的事件接口暴露到局域网。
+        if host is None:
+            try:
+                host = ((config.settings().get("event") or {}).get("host") or "").strip() or "127.0.0.1"
+            except Exception:
+                host = "127.0.0.1"
         bus = self
 
         class Handler(BaseHTTPRequestHandler):
