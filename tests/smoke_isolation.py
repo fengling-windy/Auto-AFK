@@ -137,7 +137,6 @@ def wait_chain_idle(supervisor, timeout=300.0, poll=0.2):
     deadline = time.time() + float(timeout)
     while time.time() < deadline:
         thread = getattr(supervisor, "_chain_thread", None)
-        thread_started = getattr(supervisor, "_chain_thread_started", True)
         alive_thread = bool(thread is not None and thread.is_alive())
         runs = getattr(supervisor, "runs", {}) or {}
         any_alive = any(getattr(r, "alive", False) for r in runs.values())

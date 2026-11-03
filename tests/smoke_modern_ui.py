@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QEnterEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QPlainTextEdit, QWidget
 
 from gui.modern import (
     AnimatedButton,
@@ -108,7 +108,6 @@ def main():
     check("滚轮后立即产生中间值（动画启动）", early >= 0)
     check("滚动条平滑推进到目标", done >= 3 and done > early or (done > early >= 0 and done > 0))
     # 连续滚轮：目标累加，不跳变
-    before = bar.value()
     app.sendEvent(edit.viewport(), ev)
     app.sendEvent(edit.viewport(), ev)
     pump(app, 700)

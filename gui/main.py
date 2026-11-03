@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import autostart, config, doctor, idle, report
+from afk_core import config, doctor, idle, report
 from afk_core.events import EventBus
 from afk_core.idle import IdleWatcher
 from afk_core.repair import RepairEngine
@@ -56,7 +56,6 @@ from gui.modern import (
     fade_in_window,
 )
 from gui.idle_prompt import (
-    DECISION_ALL,
     DECISION_BACKGROUND,
     DECISION_NONE,
     DECISION_STOP,

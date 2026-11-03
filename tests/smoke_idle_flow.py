@@ -52,7 +52,6 @@ def pump(app, ms):
 
 def build_window(app, show=True, tray_mode=False):
     """构造 MainWindow；tray_mode=True 时模拟 --tray 启动（不 show 主窗口）。"""
-    tmp_logs = _TMP / "logs"
     # 用 isolate_runtime 覆盖全部运行数据路径（含 DURATIONS_FILE / ERROR_INDEX），
     # 否则测试夹具项目会写进用户真实 durations.jsonl / errors.jsonl。
     from tests import smoke_isolation

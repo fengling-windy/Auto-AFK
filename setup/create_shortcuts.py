@@ -19,7 +19,7 @@ def create_icon():
         from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
         from PySide6.QtWidgets import QApplication
 
-        app = QApplication.instance() or QApplication([])
+        QApplication.instance() or QApplication([])
         size = 256
         pix = QPixmap(size, size)
         pix.fill(Qt.transparent)

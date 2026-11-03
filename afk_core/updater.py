@@ -3,12 +3,11 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import config
-from .proc import popen as proc_popen, run as proc_run
+from .proc import run as proc_run
 
 
 class Updater:

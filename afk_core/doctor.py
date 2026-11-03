@@ -1,12 +1,10 @@
 import importlib.util
 import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 from . import config
-from .proc import popen as proc_popen, run as proc_run
+from .proc import run as proc_run
 
 TOOLS = [
     ("git", ["git", "--version"]),
@@ -139,7 +137,6 @@ def run_checks():
 
     for key, spec in (config.registry().get("projects", {}) or {}).items():
         project_dir = config.project_dir(spec)
-        source_ok = (project_dir / ".git").exists() or (project_dir / "mxu.exe").exists()
         results.append(
             {
                 "group": "project",

@@ -7,7 +7,6 @@
         .venv/Scripts/python.exe tests/smoke_shell_ui.py
 """
 
-import os
 import shutil
 import sys
 import tempfile
@@ -27,7 +26,6 @@ _TMP_SETTINGS = _TMP_DIR / "settings.yaml"
 shutil.copy(_REAL_SETTINGS, _TMP_SETTINGS)
 config.SETTINGS_YAML = _TMP_SETTINGS
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from afk_core.events import EventBus

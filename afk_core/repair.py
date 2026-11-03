@@ -1,11 +1,8 @@
-import os
 import re
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
-from . import config, report
+from . import config
 from .proc import popen as proc_popen, run as proc_run
 
 

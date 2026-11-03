@@ -67,7 +67,6 @@ def main():
     pump(app, 200)
 
     # 1) GUI 自身动作应进入事件流
-    before = len(window.bus.history(project=None))
     window._append_log("core", "info", "GUI 动作：切换空闲开关")
     pump(app, 200)
     gui_events = [e for e in window.bus.history(project=None)

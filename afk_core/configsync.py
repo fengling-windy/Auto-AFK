@@ -1,12 +1,11 @@
 import hashlib
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
 from . import config
-from .proc import popen as proc_popen, run as proc_run
+from .proc import run as proc_run
 
 
 def _store_dir(key, spec):
@@ -176,8 +175,9 @@ def restore(key, spec):
 
 
 def import_release_config(key, spec):
-    source_root = Path("E:/GameAFK")
-    project = config.project_dir(spec)
+    source_root = Path(
+        (config.settings().get("configsync", {}) or {}).get("source_root", "E:/GameAFK")
+    )
     store = _store_dir(key, spec)
     store.mkdir(parents=True, exist_ok=True)
     results = []
