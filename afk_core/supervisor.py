@@ -198,8 +198,8 @@ class Supervisor:
         if self.on_change:
             try:
                 self.on_change()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("afk.supervisor").warning("on_change callback failed: %s", exc)
 
     def _restore_state(self):
         try:
@@ -261,8 +261,8 @@ class Supervisor:
                 candidates = [config.PROJECT_LOGS / "{0}_spool.jsonl".format(key) for key in keys]
             for path in candidates:
                 self.bus.drain_spool(path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.supervisor").warning("spool drain failed: %s", exc)
 
     def cleanup_orphans(self, keys=None):
         for key in list(self._orphan_runs.keys()) if keys is None else list(keys):
@@ -843,8 +843,8 @@ class Supervisor:
             out = configsync.sync_out(key, spec)
             if out:
                 self._emit(key, "config", "; ".join(out))
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.supervisor").warning("config sync-out failed for %s: %s", key, exc)
 
         if watcher.warn_count():
             self._emit(
@@ -1041,8 +1041,8 @@ class Supervisor:
             config.DURATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(config.DURATIONS_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.supervisor").warning("failed to record run duration: %s", exc)
 
     def stop_chain_soon(self):
         """Soft stop (YukinoChan-style): running projects finish on their own,
@@ -1210,8 +1210,8 @@ class Supervisor:
                 if on_finish:
                     try:
                         on_finish(self.chain_status)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger("afk.supervisor").warning("on_finish callback failed: %s", exc)
                 return
         chain_cfg = self.settings.get("chain") or {}
         chain_order = [str(k) for k in (chain_cfg.get("order") or [])]
@@ -1345,8 +1345,8 @@ class Supervisor:
         if on_finish:
             try:
                 on_finish(self.chain_status)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("afk.supervisor").warning("on_finish callback failed: %s", exc)
 
     def _schedule_post_action(self):
         action = (self.settings.get("post_actions") or {}).get("after_all", "none")
