@@ -1,5 +1,6 @@
 import codecs
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -306,8 +307,9 @@ class Supervisor:
             }
             config.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             config.STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            # 状态持久化失败不能中断监督线程，但必须留痕，否则 state.json 会悄悄停止更新
+            logging.getLogger("afk.supervisor").warning("failed to persist supervisor state: %s", exc)
 
     def status_snapshot(self):
         with self._lock:
