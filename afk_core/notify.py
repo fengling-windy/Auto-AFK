@@ -1,5 +1,8 @@
+import logging
 import threading
 import time
+
+log = logging.getLogger("afk.notify")
 
 
 class Notifier:
@@ -48,8 +51,8 @@ class Notifier:
                 toast = Notification(app_id="Auto-AFK", title=title, msg=content[:500], duration="short")
                 toast.show()
                 sent = True
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("winotify toast failed: %s", exc)
         self.bus.emit(
             {
                 "project": "core",

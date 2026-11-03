@@ -1,5 +1,8 @@
+import logging
 import threading
 import time
+
+log = logging.getLogger("afk.scheduler")
 
 
 class Scheduler:
@@ -61,5 +64,5 @@ class Scheduler:
             )
         try:
             self.on_trigger()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("scheduled trigger callback failed: %s", exc)

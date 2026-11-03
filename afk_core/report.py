@@ -1,10 +1,13 @@
 import hashlib
 import json
+import logging
 import re
 import time
 from pathlib import Path
 
 from . import config
+
+log = logging.getLogger("afk.report")
 
 MASK = re.compile(r"(pass|pwd|secret|token|cookie|key|auth)", re.IGNORECASE)
 
@@ -154,8 +157,8 @@ def create_report(project, reason, run, watcher, bus, repair_log=None, extra=Non
     try:
         with open(config.ERROR_INDEX, "a", encoding="utf-8") as f:
             f.write(json.dumps(index_entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("failed to write error index: %s", exc)
     return report_dir
 
 

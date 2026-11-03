@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import sys
 import time
 import urllib.request
@@ -78,8 +79,8 @@ def cmd_run(args):
     while True:
         try:
             _print_event(q.get(timeout=1.0))
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.cli").warning("event print failed: %s", exc)
         if supervisor.chain_status in ("success", "failed", "stopped") and not any(
             r.alive for r in supervisor.runs.values()
         ):
@@ -396,8 +397,8 @@ def _housekeeping_once():
         from .housekeeping import cleanup_logs
 
         cleanup_logs(None, config.settings())
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("afk.cli").warning("log cleanup failed: %s", exc)
 
 
 if __name__ == "__main__":
