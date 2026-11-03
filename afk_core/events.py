@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import queue
 import re
@@ -244,8 +245,9 @@ class EventBus:
         try:
             info = {"port": self._port, "pid": os.getpid(), "token": self._token, "host": host, "ts": time.time()}
             self._server_info_path().write_text(json.dumps(info), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            # 写入失败会导致 GUI/CLI 找不到事件服务端口，必须留痕而不是静默
+            logging.getLogger("afk.events").warning("failed to write event server info: %s", exc)
 
     def stop_server(self):
         if self._server:
