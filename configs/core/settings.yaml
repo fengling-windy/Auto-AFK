@@ -8,6 +8,9 @@ housekeeping:
   log_days: 14
   report_days: 30
   events_max_mb: 50
+configsync:
+  # 导入旧副本配置时的源根目录（读取 BAAH/BAAH_CONFIGS、March7thAssistant、MaaEnd 的配置）。
+  source_root: E:/GameAFK
 chain:
   order: []
   continue_on_failure: true
