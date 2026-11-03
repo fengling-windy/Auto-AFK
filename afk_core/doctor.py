@@ -43,6 +43,11 @@ def _find_genshin():
     import json as _json
 
     candidates = []
+    # doctor.game_exe 是用户显式指定的路径，优先级最高：置顶后下面的候选
+    # 依次回退，这样非默认安装位置不需要改代码。
+    override = str(((config.settings().get("doctor") or {}).get("game_exe") or "")).strip()
+    if override:
+        candidates.append(Path(override))
     config_path = config.ROOT / "configs" / "BetterGI" / "User" / "config.json"
     if config_path.exists():
         try:
@@ -230,13 +235,19 @@ def run_checks():
     emu_cfg = ((config.settings().get("pre_run") or {}).get("emulator") or {})
     device_exe = Path(str(emu_cfg.get("device_exe", "")))
     manager_exe = Path(str(emu_cfg.get("manager_exe", "")))
-    emu_ok = device_exe.exists() and manager_exe.exists()
+    # doctor.emulator_exe 是用户显式指定的模拟器主程序，用于 device_exe/manager_exe
+    # 都没配（或装在非默认位置）时给出可用信号，否则这条检查永远 warn。
+    emu_override = str(((config.settings().get("doctor") or {}).get("emulator_exe") or "")).strip()
+    emu_override_ok = bool(emu_override) and Path(emu_override).exists()
+    emu_ok = (device_exe.exists() and manager_exe.exists()) or emu_override_ok
     results.append(
         {
             "group": "runtime",
             "name": "emulator:tools",
             "status": "ok" if emu_ok else "warn",
-            "detail": "device={0} manager={1}".format(device_exe.exists(), manager_exe.exists()),
+            "detail": "device={0} manager={1} emulator_exe={2}".format(
+                device_exe.exists(), manager_exe.exists(), emu_override_ok
+            ),
         }
     )
     try:
