@@ -311,7 +311,23 @@ pre_run:
 
 ## 测试
 
-`tests\` 下是可直接用中心 venv 运行的冒烟/回归测试（会使用 `tests\` 内的独立注册表，不触碰正式配置）：
+`tests\` 下是可直接用中心 venv 运行的冒烟/回归测试（会使用 `tests\` 内的独立注册表，不触碰正式配置）。
+
+### 一条命令跑完回归（推荐）
+
+```powershell
+& .venv\Scripts\python.exe tools\run_smokes.py              # 安全子集（默认，跳过需真实环境的）
+& .venv\Scripts\python.exe tools\run_smokes.py --list       # 看分组与清单
+& .venv\Scripts\python.exe tools\run_smokes.py --group ui    # 只跑 GUI 离屏测试
+& .venv\Scripts\python.exe tools\run_smokes.py --only smoke_bus
+& .venv\Scripts\python.exe tools\run_smokes.py --include-real  # 连真实环境测试也跑
+```
+
+运行器会在需要时自动设置 `QT_QPA_PLATFORM=offscreen` 与 `QT_QPA_FONTDIR`，
+逐项打印 PASS/FAIL 与耗时，末尾汇总失败清单；全部通过退出码为 0。
+默认跳过分组为 `real` 的测试（会真的拉起 MuMu、弹出真实窗口、依赖子项目 venv）。
+
+### 单项运行
 
 ```powershell
 & .venv\Scripts\python.exe tests\smoke_classify.py    # 完成/失败判定
