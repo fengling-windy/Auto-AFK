@@ -31,6 +31,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
 
+
+def _use_utf8_stdout():
+    """让中文说明在 Windows 重定向/管道下也能正常显示。
+
+    Python 的 stdout 在非 tty（管道、重定向）下默认用系统 ANSI 代码页（简体中文
+    环境是 gbk），直接打印中文会变成乱码。控制台本身支持 UTF-8，重配即可。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
 # (测试名, 分组, 说明)
 SUITE = [
     ("smoke_bus", "core", "事件总线与监测注入"),
@@ -76,6 +89,8 @@ def run_one(name, timeout):
     if not script.exists():
         return ("MISSING", 0.0, "")
     env = dict(os.environ)
+    # 子进程输出是被管道捕获的，默认同样会退回 gbk；统一成 UTF-8，失败尾行才可读
+    env["PYTHONIOENCODING"] = "utf-8"
     started = time.time()
     try:
         proc = subprocess.run(
@@ -99,6 +114,7 @@ def run_one(name, timeout):
 
 
 def main(argv=None):
+    _use_utf8_stdout()
     parser = argparse.ArgumentParser(description="统一冒烟测试运行器")
     parser.add_argument("--list", action="store_true", help="只列分组不执行")
     parser.add_argument("--group", action="append", default=None,
