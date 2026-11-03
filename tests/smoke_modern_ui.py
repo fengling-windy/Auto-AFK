@@ -130,7 +130,11 @@ def main():
     end_left = tab_bar.tabRect(1).left()
     mid_left = tab_bar._indicator.left()
     check("指示条滑动中段位于两标签之间", start_left < mid_left < end_left)
-    pump(app, 400)
+    # 基于动画状态等待收尾，而不是固定 sleep：负载高时 280ms 滑动可能超过固定窗口
+    deadline = time.monotonic() + 5.0
+    while tab_bar._anim.state() != tab_bar._anim.State.Stopped and time.monotonic() < deadline:
+        pump(app, 20)
+    pump(app, 20)
     check("指示条落位到新标签", abs(tab_bar._indicator.left() - end_left) <= 2)
     check("页面淡入效果已清理", page2.graphicsEffect() is None)
 
