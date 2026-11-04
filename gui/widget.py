@@ -190,14 +190,46 @@ class DesktopWidget(QWidget):
         if target > 0 and target != self.height():
             self.resize(self.width(), target)
 
+    # 位置校验至少要留这么多像素在屏上，否则判为「看不见」
+    MIN_VISIBLE = 48
+
+    def _is_on_some_screen(self, x, y):
+        """(x, y) 放小组件后是否还留有可点到的部分。
+
+        历史缺陷：restore_position 无条件接受写进 settings.yaml 的坐标。拔掉
+        副屏、改分辨率或改缩放比例后，上次记下的坐标（例如 5000,300）仍然被
+        原样恢复，小组件就在所有屏幕之外——用户既看不到也没法拖动，且这是
+        每次启动都会重放的状态，只能手动改 settings.yaml 才能救回来。
+        """
+        try:
+            from PySide6.QtCore import QRect
+            from PySide6.QtGui import QGuiApplication
+
+            width = self.width() if self.width() > 0 else 232
+            rect = QRect(x, y, width, max(self.height(), self.MIN_VISIBLE))
+            for screen in QGuiApplication.screens():
+                area = screen.availableGeometry()
+                overlap = area.intersected(rect)
+                if (
+                    overlap.width() >= min(self.MIN_VISIBLE, rect.width())
+                    and overlap.height() >= min(self.MIN_VISIBLE, rect.height())
+                ):
+                    return True
+        except Exception:
+            # 拿不到屏幕信息时不要因此把用户存的位置丢掉
+            return True
+        return False
+
     def restore_position(self, pos):
         """pos 为 [x, y] 或 None；越界时回落到屏幕右上角附近。"""
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
             try:
-                self.move(int(pos[0]), int(pos[1]))
-                return
+                x, y = int(pos[0]), int(pos[1])
             except (TypeError, ValueError):
-                pass
+                x = None
+            if x is not None and self._is_on_some_screen(x, y):
+                self.move(x, y)
+                return
         screen = None
         try:
             from PySide6.QtGui import QGuiApplication
@@ -207,7 +239,12 @@ class DesktopWidget(QWidget):
             screen = None
         if screen is not None:
             area = screen.availableGeometry()
-            self.move(area.right() - self.width() - 24, area.top() + 96)
+            width = self.width() if self.width() > 0 else 232
+            x = max(area.left(), area.right() - width - 24)
+            y = area.top() + 96
+            if y > area.bottom() - self.MIN_VISIBLE:
+                y = max(area.top(), area.bottom() - self.height() - 24)
+            self.move(x, y)
         else:
             self.move(1200, 120)
 

@@ -1359,13 +1359,30 @@ class MainWindow(QMainWindow):
         )
         self.widget.set_move_handler(self._on_widget_moved)
         gui_cfg = self.settings.get("gui") or {}
+        saved_pos = gui_cfg.get("widget_pos")
         # 恢复位置本身也会触发 moveEvent；用标志位避免把「回填初始位置」
         # 当成用户拖动去落盘。
         self._widget_restoring = True
         try:
-            self.widget.restore_position(gui_cfg.get("widget_pos"))
+            self.widget.restore_position(saved_pos)
         finally:
             self._widget_restoring = False
+        # 存的坐标可能已经不在任何屏上（拔掉副屏 / 改分辨率 / 改缩放比例），
+        # restore_position 会回落到右上角。此时把纠正后的位置写回去，让配置
+        # 自愈——否则每次启动都要重新判一次，用户也看不出为什么位置"不记住"。
+        try:
+            actual = self.widget.current_position()
+            stored = []
+            if isinstance(saved_pos, (list, tuple)) and len(saved_pos) == 2:
+                try:
+                    stored = [int(saved_pos[0]), int(saved_pos[1])]
+                except (TypeError, ValueError):
+                    stored = []
+            if stored != actual:
+                gui_cfg["widget_pos"] = actual
+                config.save_yaml(config.SETTINGS_YAML, self.settings)
+        except Exception as exc:
+            logging.getLogger("afk.gui").warning("failed to heal widget position: %s", exc)
         if bool(gui_cfg.get("widget_enabled", False)):
             self.widget.show()
         self.widget.tick(self.supervisor.status_snapshot(), self.idle_watcher.status(),

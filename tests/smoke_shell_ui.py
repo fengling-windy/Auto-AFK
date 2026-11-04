@@ -1054,6 +1054,33 @@ def test_main_window(app):
             finally:
                 config.save_yaml = orig_save
 
+        # 小组件位置必须仍然可见，存进去的坐标不能盲信。
+        # 历史缺陷：拔掉副屏 / 改分辨率后，settings.yaml 里记的 5000,300 被原样
+        # 恢复，小组件落到所有屏幕之外，用户看不到也拖不动，每次启动都重放。
+        if widget is not None:
+            from PySide6.QtGui import QGuiApplication
+
+            def _widget_visible(w):
+                rect = w.frameGeometry()
+                for screen in QGuiApplication.screens():
+                    overlap = screen.availableGeometry().intersected(rect)
+                    if overlap.width() >= min(48, rect.width()) and overlap.height() >= min(48, rect.height()):
+                        return True
+                return False
+
+            widget.restore_position([5000, 300])
+            pump(app, 60)
+            check("越界的小组件坐标不会把窗口丢到屏幕外", _widget_visible(widget))
+            widget.restore_position([-9999, -9999])
+            pump(app, 60)
+            check("负坐标同样回落到屏内", _widget_visible(widget))
+            widget.restore_position([0, 0])
+            pump(app, 60)
+            check("合法的左上角坐标被原样保留", widget.current_position() == [0, 0])
+            widget.restore_position(None)
+            pump(app, 60)
+            check("没有记录位置时回落到默认可见位置", _widget_visible(widget))
+
         # _poll 全流程：快照/胶囊/导航点/嵌入页 tick
         window._poll()
         pump(app, 60)
