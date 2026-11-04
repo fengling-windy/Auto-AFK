@@ -833,9 +833,21 @@ class MainWindow(QMainWindow):
         text = edit.toPlainText()
         if str(path).lower().endswith((".yaml", ".yml")):
             try:
-                yaml.safe_load(text)
+                parsed = yaml.safe_load(text)
             except Exception as exc:
                 QMessageBox.critical(self, "YAML 校验失败", "配置未保存，请先修正语法错误：\n\n{0}".format(exc))
+                return
+            # 语法通过还不够：顶层必须是映射。写成 `- a` 或一整句文字都能被
+            # yaml 解析成功，但存进去之后所有 settings().get(...) 立刻崩，程序
+            # 打不开也改不回来（只能手工编辑文件）。
+            if parsed is not None and not isinstance(parsed, dict):
+                QMessageBox.critical(
+                    self,
+                    "YAML 校验失败",
+                    "配置未保存：顶层必须是「键: 值」映射，当前读到的是{0}。".format(
+                        "列表" if isinstance(parsed, list) else "单个值"
+                    ),
+                )
                 return
         try:
             Path(path).write_text(text, encoding="utf-8")

@@ -825,6 +825,41 @@ def test_main_window(app):
         pump(app, 60)
         check("用户正在编辑的内容不会被程序覆盖", window.settings_edit.toPlainText() == typed)
 
+        # 顶层不是映射的 YAML 也能通过语法校验（`just a string` / `- a`），
+        # 存进去之后每处 settings().get(...) 都会 AttributeError，程序从此打不开、
+        # 也改不回来（只能手工编辑文件）。必须在校验阶段就挡住。
+        from PySide6.QtWidgets import QMessageBox as _QMB
+
+        saved_msgs = []
+        orig_critical = _QMB.critical
+        # 签名是 critical(parent, 标题, 正文)，正文在第三个参数
+        _QMB.critical = staticmethod(lambda *a, **k: saved_msgs.append(str(a[2]) if len(a) > 2 else ""))
+        try:
+            before_bytes = config.SETTINGS_YAML.read_bytes()
+            for bad_text in ("just a string", "- a\n- b\n"):
+                window.settings_edit.setPlainText(bad_text)
+                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                pump(app, 30)
+                check(
+                    "非映射的 YAML 被拒绝保存（{0}）".format(bad_text.split(chr(10))[0][:12]),
+                    config.SETTINGS_YAML.read_bytes() == before_bytes,
+                )
+            check("非映射的 YAML 会提示用户", any("顶层" in m for m in saved_msgs))
+        finally:
+            _QMB.critical = orig_critical
+            # 把编辑器恢复成合法内容，避免影响后续断言
+            window._load_text(window.settings_edit, config.SETTINGS_YAML)
+            window._settings_edit_dirty = False
+
+        # 底层读取也要兜住：即使文件被外部改坏，settings() 也不能把字符串
+        # 直接返回给调用方（否则每处 .get() 都 AttributeError，程序打不开）。
+        probe_yaml = config.SETTINGS_YAML.parent / "_probe_broken.yaml"
+        probe_yaml.write_text("just a string", encoding="utf-8")
+        try:
+            check("load_yaml 对非映射内容回落成空映射", config.load_yaml(probe_yaml, {}) == {})
+        finally:
+            probe_yaml.unlink(missing_ok=True)
+
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
         # 整份配置；改成合并到「停下 400ms 后」落盘一次。

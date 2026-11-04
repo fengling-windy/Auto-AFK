@@ -32,7 +32,18 @@ def load_yaml(path, default=None):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return data if data is not None else fallback
+        if data is None:
+            return fallback
+        # 配置文件都是映射（section: value）。有人手工把整份文件改成标量或列表
+        # （比如误删了所有缩进，或编辑器自动补了个 "- "），yaml 仍能解析成功，
+        # 但之后每一处 settings().get(...) 都会 AttributeError，程序整体不可用。
+        # 这里兜回默认值并留一条 warning，让程序至少还能打开并改回来。
+        if not isinstance(data, dict):
+            logging.getLogger("afk.config").warning(
+                "%s 的顶层不是映射（读到 %s），已改用默认配置", path, type(data).__name__
+            )
+            return fallback
+        return data
     except FileNotFoundError:
         return fallback
     except Exception as exc:
