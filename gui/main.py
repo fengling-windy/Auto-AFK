@@ -606,6 +606,11 @@ class MainWindow(QMainWindow):
             return
         if page is None:
             return
+        # 离开设置页时把防抖中的改动写掉：数值框改成「停止变动 400ms 后落盘」，
+        # 用户改完立刻切页/关窗口，未到期的改动不能丢。
+        settings_page = getattr(self, "settings_page", None)
+        if settings_page is not None and self.stack.currentWidget() is settings_page:
+            settings_page.flush_pending()
         self.stack.setCurrentWidget(page)
         self.nav.set_active(key, animate=False)
         if not key.startswith("page:"):
@@ -1241,6 +1246,13 @@ class MainWindow(QMainWindow):
         timer = getattr(self, "_widget_pos_timer", None)
         if timer is not None and timer.isActive():
             self._flush_widget_pos()
+        # 设置页的数值框走 400ms 防抖，关窗口时同样要补一次落盘
+        settings_page = getattr(self, "settings_page", None)
+        if settings_page is not None:
+            try:
+                settings_page.flush_pending()
+            except Exception as exc:
+                logging.getLogger("afk.gui").warning("flush settings on quit failed: %s", exc)
         if getattr(self, "scheduler", None) is not None:
             self.scheduler.stop()
         if getattr(self, "idle_watcher", None) is not None:

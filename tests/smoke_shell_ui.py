@@ -178,10 +178,48 @@ def test_settings_page(app):
     idx = page.post_combo.findData("shutdown")
     page.post_combo.setCurrentIndex(idx)
     page.post_delay.setValue(120)
-    pump(app, 40)
+    # 数值框改成「停止变动 400ms 后合并落盘」，等防抖窗口过去再断言
+    pump(app, 700)
     saved = config.settings()
     check("结束后操作写入设置", saved.get("post_actions", {}).get("after_all") == "shutdown")
     check("结束后延迟写入设置", saved.get("post_actions", {}).get("delay_sec") == 120)
+
+    # 3b. 连续拖动数值框不能逐格重写 settings.yaml + 刷屏日志。
+    # 历史缺陷：每次 valueChanged 都走「读 yaml → 改 → 写回 → 写一行日志」，
+    # 实测把延迟从 60 拖到 89 就落盘 29 次、日志面板多出 36 行，
+    # 把用户真正要看的运行日志全冲掉了。
+    smoke_logs = []
+    page._log = lambda *a, **k: smoke_logs.append(k if k else a)
+    writes = []
+    orig_save = config.save_yaml
+
+    def counting_save(path, data):
+        writes.append(path)
+        return orig_save(path, data)
+
+    config.save_yaml = counting_save
+    try:
+        for value in range(60, 90):
+            page.post_delay.setValue(value)
+        pump(app, 60)
+        check("拖动数值框过程中不写配置文件（防抖）", len(writes) == 0)
+        check("拖动数值框不逐格刷日志", len(smoke_logs) == 0)
+        deadline = time.monotonic() + 2.0
+        while not writes and time.monotonic() < deadline:
+            pump(app, 40)
+        check("停下后只落盘一次", len(writes) == 1)
+        check("停下后只写一行日志", len(smoke_logs) == 1)
+        check("落盘的是最后一次的值", config.settings().get("post_actions", {}).get("delay_sec") == 89)
+        # 切换页面 / 退出前必须能把还没到期的改动写掉，否则用户改完立刻离开会丢配置
+        page.post_delay.setValue(7)
+        pump(app, 60)
+        check("未到防抖窗口时磁盘还是旧值", config.settings().get("post_actions", {}).get("delay_sec") == 89)
+        writes.clear()
+        page.flush_pending()
+        check("flush_pending 立刻落盘", len(writes) == 1)
+        check("flush_pending 落盘值正确", config.settings().get("post_actions", {}).get("delay_sec") == 7)
+    finally:
+        config.save_yaml = orig_save
 
     # 4. reload_from_disk：外部改文件后界面跟随
     external = config.settings()

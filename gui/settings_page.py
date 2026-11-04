@@ -3,7 +3,7 @@
 所有修改即时写回 settings.yaml 并通过 changed 信号通知（刷新 supervisor.settings）。
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -62,6 +62,15 @@ class SettingsPage(QWidget):
         self._registry_injected = registry is not None
         self._registry = registry if registry is not None else config.registry()
         self._loading = True
+        # 数值框是「按住箭头连续变值」的控件：每变一个数就整份重写 settings.yaml
+        # 并往实时日志写一行。实测把「结束后延迟」从 60 拖到 89 就落盘 29 次、
+        # 日志面板多出 36 行，把用户真正要看的日志全冲掉了。
+        # 改成停止变动 400ms 后合并落盘一次（与桌面小组件拖动同一套思路）。
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setSingleShot(True)
+        self._pending_timer.setInterval(400)
+        self._pending_timer.timeout.connect(self._flush_pending_save)
+        self._pending_saves = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 10, 12, 10)
@@ -145,7 +154,7 @@ class SettingsPage(QWidget):
         self.post_delay.setRange(0, 86400)
         self.post_delay.setSuffix(" 秒后执行")
         self.post_delay.setValue(int(post_cfg.get("delay_sec", 60)))
-        self.post_delay.valueChanged.connect(self._save_post_action)
+        self.post_delay.valueChanged.connect(lambda _v: self._queue_save("post_delay", self._save_post_action))
         post_row.addWidget(QLabel("操作:"))
         post_row.addWidget(self.post_combo)
         post_row.addSpacing(12)
@@ -170,12 +179,12 @@ class SettingsPage(QWidget):
         self.idle_minutes.setRange(1, 1440)
         self.idle_minutes.setSuffix(" 分钟无操作后提示")
         self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
-        self.idle_minutes.valueChanged.connect(self._save_idle)
+        self.idle_minutes.valueChanged.connect(lambda _v: self._queue_save("idle", self._save_idle))
         self.idle_prompt = QSpinBox()
         self.idle_prompt.setRange(5, 600)
         self.idle_prompt.setSuffix(" 秒后自动执行")
         self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
-        self.idle_prompt.valueChanged.connect(self._save_idle)
+        self.idle_prompt.valueChanged.connect(lambda _v: self._queue_save("idle", self._save_idle))
         idle_row.addWidget(self.idle_check)
         idle_row.addWidget(self.idle_minutes)
         idle_row.addWidget(self.idle_prompt)
@@ -273,6 +282,39 @@ class SettingsPage(QWidget):
         config.save_yaml(config.SETTINGS_YAML, settings)
         self.changed.emit()
         return settings
+
+    def _queue_save(self, key, writer):
+        """把「变一个值就写一次盘」的改动合并成一次落盘。
+
+        数值框与拖动排序都是连续动作：每动一格就走一遍「读 yaml → 改 → 写回 →
+        写日志」。实测「结束后延迟」从 60 拖到 89 落盘 29 次、日志面板多出 36 行，
+        把用户真正要看的日志刷没了。这里只在停止改动 400ms 后执行最后一次。
+        """
+        if self._loading:
+            return
+        for index, (existing, _writer) in enumerate(self._pending_saves):
+            if existing == key:
+                self._pending_saves[index] = (key, writer)
+                break
+        else:
+            self._pending_saves.append((key, writer))
+        self._pending_timer.start()
+
+    def _flush_pending_save(self):
+        """定时器到期：把攒下的改动一次性写回 settings.yaml。"""
+        pending = self._pending_saves
+        self._pending_saves = []
+        for _key, writer in pending:
+            try:
+                writer()
+            except Exception as exc:  # 写盘失败不能让设置页崩掉
+                self._log("core", "error", "保存设置失败: {0}".format(exc))
+
+    def flush_pending(self):
+        """立刻结束防抖窗口并写盘（切页 / 退出前必须调用，否则改动会丢）。"""
+        if self._pending_saves:
+            self._pending_timer.stop()
+            self._flush_pending_save()
 
     def _toggle_silent(self, key, checked):
         if self._loading:
@@ -439,6 +481,8 @@ class SettingsPage(QWidget):
 
     def reload_from_disk(self):
         """重新读取 settings.yaml 刷新界面（外部改配置后调用）。"""
+        # 先把还没落盘的防抖改动写掉，否则 reload 会把界面上刚改的值覆盖回旧值。
+        self.flush_pending()
         self._loading = True
         try:
             settings = config.settings()
