@@ -180,39 +180,85 @@ class FlowHost(QWidget):
     def __init__(self, h_spacing=12, v_spacing=12, parent=None):
         super().__init__(parent)
         self._flow = FlowLayout(self, h_spacing=h_spacing, v_spacing=v_spacing)
+        self._syncing = False
+        # 纵向 Fixed + 自己按当前宽度算高度（见 sync_height）：不用 heightForWidth。
+        # 早期版本走 heightForWidth，Qt 在窗口首轮布局前会用 QWidget 默认宽度
+        # (640) 问一次 sizeHint，5 张卡被算成 5 行 848px，于是主窗口最小高度
+        # 抬到 1165，show() 时窗口从 900 直接撑到 1165（1080p 屏贴着任务栏，
+        # 1366x768 屏直接超出屏幕）。
         policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        policy.setHeightForWidth(True)
+        policy.setHeightForWidth(False)
         self.setSizePolicy(policy)
 
     def flow(self):
         return self._flow
 
-    def _rows_height(self):
-        width = self.width()
+    def _rows_height(self, width=None):
+        width = int(width if width is not None else self.width())
         if width <= 0 and self.parentWidget() is not None:
-            width = self.parentWidget().width()
+            width = int(self.parentWidget().width())
         if width <= 0:
-            width = 1000
-        height = self._flow.heightForWidth(int(width))
+            return self._single_row_height()
+        height = self._flow.heightForWidth(width)
         if height <= 0:
             height = self._flow.minimumSize().height()
         return int(height)
 
-    def hasHeightForWidth(self):
-        return True
+    def _single_row_height(self):
+        """单行时的高度（一行里最高的那张卡）。"""
+        tallest = 0
+        for index in range(self._flow.count()):
+            item = self._flow.itemAt(index)
+            if item is None:
+                continue
+            tallest = max(tallest, int(item.minimumSize().height()))
+        if tallest <= 0:
+            return 0
+        margins = self._flow.contentsMargins()
+        return int(tallest + margins.top() + margins.bottom())
 
-    def heightForWidth(self, width):
-        return self._flow.heightForWidth(int(width))
+    def hasHeightForWidth(self):
+        return False
+
+    def rows_height_for(self, width):
+        """给定容器宽度时该项目卡区域应有的高度（折成几行就有多高）。"""
+        return self._rows_height(width)
+
+    def sync_height(self, width=None):
+        """按宽度钉住自身高度（折成几行就多高）。
+
+        由父窗口在窗口宽度变化时调用——必须在真正 resize 时算，而不是让 Qt
+        在布局求解阶段用未知宽度去猜。
+        """
+        target = self._rows_height(width)
+        if target <= 0:
+            return 0
+        if self.minimumHeight() != target or self.maximumHeight() != target:
+            self.setFixedHeight(target)
+            self.updateGeometry()
+        return target
 
     def sizeHint(self):
-        return QSize(self._flow.minimumSize().width(), self._rows_height())
+        # 首轮布局前宽度是不可信的（QWidget 默认 640），按当前 width() 算折行只会
+        # 把 5 张卡算成竖排、把窗口最小高度顶到 1165。这里统一报「一行」，
+        # 真实高度由 sync_height 在窗口 resize 之后钉死。
+        return QSize(self._flow.minimumSize().width(), self._single_row_height())
 
     def minimumSizeHint(self):
-        return QSize(self._flow.minimumSize().width(), self._rows_height())
+        return QSize(self._flow.minimumSize().width(), self._single_row_height())
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        # 折行数量随宽度变化，让父布局重新按新的高度需求分配空间
+        # 宽度变了折行数就可能变：自己把高度钉到「当前宽度需要几行」。
+        # 放在 resizeEvent 里而不是交给布局求解，是因为布局求解阶段拿不到可信
+        # 宽度（见 sizeHint 注释）；setFixedHeight 会再触发一次 resizeEvent，
+        # 用 _syncing 兜住避免递归。
+        if not self._syncing:
+            self._syncing = True
+            try:
+                self.sync_height(self.width())
+            finally:
+                self._syncing = False
         self.updateGeometry()
 
 

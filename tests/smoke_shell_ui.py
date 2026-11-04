@@ -573,8 +573,20 @@ def test_main_window(app):
         host = window.cards_host
         check(
             "卡片容器的要求高度随折行数变化（宽屏一行、窄屏两行）",
-            host.heightForWidth(1600) < host.heightForWidth(1000),
+            host.rows_height_for(1600) < host.rows_height_for(1000),
         )
+        # 窗口最小高度不能由「折行数」决定。历史缺陷：FlowHost 用 heightForWidth
+        # 报高度，Qt 在首轮布局前用 QWidget 默认宽度 640 去问，5 张卡被算成竖排
+        # 848px，主窗口最小高度抬到 1165，show() 时窗口从 900 撑到 1165
+        # （1080p 屏贴着任务栏，1366x768 屏直接超出屏幕）。
+        window.resize(1360, 900)
+        pump(app, 80)
+        check("1360x900 下窗口高度不被折行撑大", window.height() <= 900)
+        check("窗口最小高度不超过 900（1080p 屏可完整显示）", window.minimumSizeHint().height() <= 900)
+        window.resize(1280, 900)
+        pump(app, 120)
+        check("1280 宽折成两行时窗口仍是 900 高", window.height() <= 900)
+        check("窄窗口下卡片区域确实变高（折行生效）", host.minimumHeight() > 0)
 
         # 导航指示条必须落在被选中项上，不能在左上角画出孤立的蓝色块。
         # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中

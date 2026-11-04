@@ -1346,6 +1346,7 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, ev):
         super().showEvent(ev)
+        self._sync_cards_height()
         if self._did_intro:
             return
         self._did_intro = True
@@ -1353,6 +1354,25 @@ class MainWindow(QMainWindow):
         fade_in_window(self, duration=280)
         for i, card in enumerate(self.cards.values()):
             fade_in_widget(card, duration=300, delay=120 + i * 70)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._sync_cards_height()
+
+    def _sync_cards_height(self):
+        """按窗口当前宽度重算项目卡区域的高度（折成几行就有多高）。
+
+        必须在窗口真正 resize 之后算：布局求解阶段宽度还不可知，让它去猜
+        就会把 5 张卡当成竖排，把窗口最小高度顶到 1165（见 FlowHost 注释）。
+        """
+        host = getattr(self, "cards_host", None)
+        if host is None:
+            return
+        width = host.width()
+        if width <= 0:
+            central = self.centralWidget()
+            width = (central.width() if central is not None else self.width()) - 24
+        host.sync_height(width)
 
     def closeEvent(self, event):
         if (self.settings.get("gui", {}) or {}).get("minimize_to_tray", False):

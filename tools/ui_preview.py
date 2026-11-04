@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, QTime, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,7 +42,7 @@ from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
-    FlowLayout,
+    FlowHost,
     add_shadow,
     apply_palette,
     enable_smooth_scroll,
@@ -92,6 +92,20 @@ def _noop(*args, **kwargs):
     pass
 
 
+def _subtitle_text():
+    """副标题从假注册表算，和真实 MainWindow._subtitle_text 保持同一套逻辑。
+
+    写死成「三月七小助手 + BAAH + MaaEnd」会让预览图里的项目名单比实际能挂的
+    少两个（绝区零一龙、BetterGI），预览图和真实界面不一致就没法拿来核对了。
+    """
+    names = []
+    for _key, spec in FAKE_PROJECTS.items():
+        names.append(str(spec.get("display_name", _key)).split("（")[0].strip())
+    if not names:
+        return "一键挂机 · 统一编排"
+    return "一键挂机 · {0} 统一编排".format(" + ".join(names))
+
+
 def build_overview():
     overview = QWidget()
     overview.setObjectName("central")
@@ -113,7 +127,9 @@ def build_overview():
     title_box.setSpacing(0)
     title = QLabel("Auto-AFK")
     title.setObjectName("title")
-    subtitle = QLabel("一键挂机 · 三月七小助手 + BAAH + MaaEnd 统一编排")
+    # 副标题从假注册表算，和真实 MainWindow._subtitle_text 保持一致：
+    # 写死旧文案会让预览图里的项目名单和实际能挂的项目不符（曾漏两个项目）。
+    subtitle = QLabel(_subtitle_text())
     subtitle.setObjectName("subtitle")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
@@ -142,6 +158,9 @@ def build_overview():
     schedule_check.setChecked(True)
     schedule_time = QTimeEdit()
     schedule_time.setDisplayFormat("HH:mm")
+    # 假日志里写的是「定时启动: 开 04:00」，时间框也得是 04:00 才对得上；
+    # QTimeEdit 默认 00:00，预览图会出现「勾了定时启动但时间是 00:00」的假象。
+    schedule_time.setTime(QTime(4, 0))
     controls.addWidget(pre_run_check)
     controls.addWidget(schedule_check)
     controls.addWidget(schedule_time)
@@ -151,7 +170,11 @@ def build_overview():
     cards_title = QLabel("项目状态")
     cards_title.setObjectName("sectionTitle")
     root.addWidget(cards_title)
-    cards_row = FlowLayout(h_spacing=12, v_spacing=12)
+    # 和真实主窗口一样用 FlowHost 包一层：它按窗口宽度决定折成几行并钉住高度。
+    # 直接把 FlowLayout 塞进 QVBoxLayout 时预览图里第二行卡片会压在页签上，
+    # 那种重叠在真实界面里已经被修掉，预览工具不能继续画错的版本。
+    cards_host = FlowHost(h_spacing=12, v_spacing=12)
+    cards_row = cards_host.flow()
     cards = []
     for key, spec in FAKE_PROJECTS.items():
         card = gui_main.ProjectCard(
@@ -161,7 +184,7 @@ def build_overview():
         card.update_state(FAKE_RUNS.get(key))
         cards.append(card)
         cards_row.addWidget(card)
-    root.addLayout(cards_row)
+    root.addWidget(cards_host)
 
     splitter = QSplitter(Qt.Vertical)
     splitter.setChildrenCollapsible(False)
