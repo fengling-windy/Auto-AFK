@@ -28,6 +28,14 @@ _TMP_SETTINGS = _TMP_DIR / "settings.yaml"
 shutil.copy(_REAL_SETTINGS, _TMP_SETTINGS)
 config.SETTINGS_YAML = _TMP_SETTINGS
 
+# 项目注册表同理：注册表热重载那条用例会真的把 projects.yaml 写一遍，
+# 而 config.save_yaml 会抹掉注释、重排缩进——直接写仓库里的真文件会把
+# configs/core/afk_projects.yaml 永久改脏（实测发生过）。指向临时副本。
+_REAL_PROJECTS = config.PROJECTS_YAML
+_TMP_PROJECTS = _TMP_DIR / "afk_projects.yaml"
+shutil.copy(_REAL_PROJECTS, _TMP_PROJECTS)
+config.PROJECTS_YAML = _TMP_PROJECTS
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -662,8 +670,13 @@ def test_main_window(app):
         try:
             probe_win = gm.MainWindow()
             probe_win.show()
-            pump(app, 60)
+            pump(app, 120)
             frame = probe_win.frameGeometry()
+            if not (frame.top() >= 0 and frame.top() + frame.height() <= 728):
+                print("  [debug] frame={0} size={1}x{2} minHint={3} initial_applied={4}".format(
+                    frame.getRect(), probe_win.width(), probe_win.height(),
+                    probe_win.minimumSizeHint().height(),
+                    getattr(probe_win, "_initial_geometry_applied", None)))
             check("1366x728 屏上窗口不超出可用区域", frame.top() >= 0 and frame.top() + frame.height() <= 728)
             probe_win.hide()
             probe_win._quit()
@@ -860,6 +873,45 @@ def test_main_window(app):
         finally:
             probe_yaml.unlink(missing_ok=True)
 
+        # 在「项目注册表」tab 保存后，界面必须跟着重载。
+        # 历史缺陷：_save_text 对 projects.yaml 什么都不做，文件对了但项目卡、
+        # 左侧导航、supervisor、设置页全是开窗时那份旧注册表——新增的项目不出现，
+        # 删掉的项目卡片还在。
+        original_registry = config.registry()
+        mutated = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        mutated.setdefault("projects", {})
+        extra_key = "SmokeExtra"
+        mutated["projects"][extra_key] = dict(next(iter(mutated["projects"].values())))
+        mutated["projects"][extra_key]["display_name"] = "冒烟新增项目"
+        dropped_key = next(iter(mutated["projects"]))
+        if dropped_key != extra_key:
+            mutated["projects"].pop(dropped_key, None)
+        window.registry_edit.setPlainText(yaml.safe_dump(mutated, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("保存注册表后新项目出现在项目卡", extra_key in window.cards)
+        check("保存注册表后删掉的项目卡片消失", dropped_key not in window.cards)
+        check("保存注册表后 supervisor 用新注册表", extra_key in (window.supervisor.registry.get("projects") or {}))
+        check("保存注册表后设置页运行顺序跟随", extra_key in [
+            window.settings_page.order_list.item(i).data(Qt.UserRole)
+            for i in range(window.settings_page.order_list.count())
+        ])
+        if (mutated["projects"][extra_key] or {}).get("gui"):
+            check("保存注册表后新项目出现在导航", window.nav.item_for_key("page:" + extra_key) is not None)
+            check("导航项排在「设置」前面", [
+                window.nav.layout().itemAt(i).widget()
+                for i in range(window.nav.layout().count())
+            ].index(window.nav.item_for_key("page:" + extra_key)) < [
+                window.nav.layout().itemAt(i).widget()
+                for i in range(window.nav.layout().count())
+            ].index(window.nav.item_for_key("settings")))
+        check("保存注册表后副标题跟随项目数量", "冒烟新增项目" in window._subtitle_label.text())
+        # 还原：把注册表写回原样，后续断言依赖原来的 5 个项目
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
+
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
         # 整份配置；改成合并到「停下 400ms 后」落盘一次。
@@ -933,6 +985,7 @@ def main():
         test_main_window(app)
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS
+        config.PROJECTS_YAML = _REAL_PROJECTS
         smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
         shutil.rmtree(_TMP_DIR, ignore_errors=True)

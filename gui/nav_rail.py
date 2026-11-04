@@ -66,6 +66,8 @@ class NavRail(QWidget):
         self._items = {}
         self._indicator_y = 0.0
         self._finished = False
+        # finish() 之后新增的导航项要插到尾部弹性空隙之前，这里记下它的位置
+        self._stretch_index = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 16, 12, 14)
@@ -103,23 +105,68 @@ class NavRail(QWidget):
         item = NavItem(key, label)
         self._items[key] = item
         self._group.addButton(item)
-        layout.addWidget(item)
         if self._finished:
-            # finish() 之后动态追加（如运行中注册的新项目）。
+            # finish() 之后动态追加（如运行中在注册表里新增了项目）。
+            # 必须插到尾部弹性空隙之前：直接 addWidget 会落到 stretch 后面，
+            # 新项被顶到侧栏最底部、和分组内容脱节。项目入口还要排到「设置」
+            # 前面——用户新加的项目出现在「设置」下方会让人以为它不属于项目列表。
+            anchor = self._items.get("settings") if key.startswith("page:") else None
+            index = self._index_of(anchor) if anchor is not None else -1
+            if index < 0:
+                index = self._stretch_index
+            layout.insertWidget(index, item)
+            self._stretch_index = layout.count() - 1
             # 注意这里不能再次 connect buttonClicked：__init__ 里已经连过一次，
             # 重复连接会让一次点击发出两遍 navigate。
-            item_y = float(item.y())
             if self._group.checkedButton() is item:
-                self._move_indicator(item_y)
+                self._move_indicator(float(item.y()))
+        else:
+            layout.addWidget(item)
 
     def finish(self):
         """在所有导航项之后补上尾部弹性空隙；必须最后调用。"""
         self.layout().addStretch(1)
+        self._stretch_index = self.layout().count() - 1
         self._finished = True
         active = self._group.checkedButton()
         if active is not None:
             self._indicator_y = float(active.y())
             self._move_indicator(self._indicator_y)
+
+    def _index_of(self, item):
+        """导航项在当前布局里的下标（找不到返回 -1）。
+
+        不用 QLayout.indexOf(widget)：PySide6 里它对 QWidget 重载的返回不可靠
+        （实测已有的导航项也返回 -1，新增项会被插到「设置」后面）。
+        """
+        if item is None:
+            return -1
+        layout = self.layout()
+        for index in range(layout.count()):
+            entry = layout.itemAt(index)
+            if entry is not None and entry.widget() is item:
+                return index
+        return -1
+
+    def remove_item(self, key):
+        """移除一个导航项（注册表里删除了某个项目）。"""
+        item = self._items.pop(key, None)
+        if item is None:
+            return
+        was_checked = self._group.checkedButton() is item
+        self._group.removeButton(item)
+        self.layout().removeWidget(item)
+        item.setParent(None)
+        item.deleteLater()
+        if self._finished:
+            self._stretch_index = self.layout().count() - 1
+        if was_checked:
+            # 选中项被删掉了：指示条无处可落，先藏起来，等 set_active 重新定位
+            self._indicator.hide()
+            self._stop_indicator_anim()
+
+    def item_keys(self):
+        return list(self._items.keys())
 
     def set_active(self, key, animate=True):
         item = self._items.get(key)

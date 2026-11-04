@@ -442,6 +442,8 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         subtitle = QLabel(self._subtitle_text())
         subtitle.setObjectName("subtitle")
+        # 存引用：注册表改过之后副标题要跟着重新生成（项目数量变了）
+        self._subtitle_label = subtitle
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         top.addWidget(logo)
@@ -852,7 +854,8 @@ class MainWindow(QMainWindow):
         try:
             Path(path).write_text(text, encoding="utf-8")
             self._append_log("core", "info", "已保存 {0}".format(path))
-            if Path(path) == Path(config.SETTINGS_YAML):
+            saved = Path(path)
+            if saved == Path(config.SETTINGS_YAML):
                 self.settings = config.settings()
                 self.supervisor.settings = self.settings
                 if getattr(self, "settings_page", None) is not None:
@@ -866,8 +869,109 @@ class MainWindow(QMainWindow):
                 # 刚写进去的就是编辑器里这一份，脏标记清掉，后续外部改动可以再同步
                 if edit is getattr(self, "settings_edit", None):
                     self._settings_edit_dirty = False
+            elif saved == Path(config.PROJECTS_YAML):
+                self._reload_registry()
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    def _reload_registry(self):
+        """「项目注册表」保存后让界面跟上新注册表。
+
+        历史缺陷：这里原来什么都没做。改完注册表一保存，文件是对的，但界面、
+        supervisor、设置页全都还在用开窗时读到的那一份——用户新增的项目不出现
+        在总览页和左侧导航、删掉的项目卡片还在、改过的显示名/启用状态不生效。
+        重新读盘后按差异同步三处：项目卡、左侧导航入口、设置页（含运行顺序）。
+        """
+        registry = config.registry()
+        projects = registry.get("projects", {}) or {}
+        self.supervisor.registry = registry
+        # -- 1. 导航栏：新增的加进来，删掉的移走，改名/启用状态跟随 --------
+        nav = getattr(self, "nav", None)
+        for key, spec in projects.items():
+            nav_key = "page:" + key
+            label = str(spec.get("display_name", key)).split("（")[0]
+            if nav is not None and nav.item_for_key(nav_key) is None:
+                nav.add_item(nav_key, label)
+            elif nav is not None:
+                item = nav.item_for_key(nav_key)
+                if item is not None and item.text() != label:
+                    item.setText(label)
+        if nav is not None:
+            for nav_key in nav.item_keys():
+                if not nav_key.startswith("page:"):
+                    continue
+                key = nav_key[5:]
+                if key not in projects or not (projects[key] or {}).get("gui"):
+                    nav.remove_item(nav_key)
+        self._nav_page_keys = [
+            (key, "page:" + key) for key, spec in projects.items() if spec.get("gui")
+        ]
+        # -- 2. 项目卡：缺的补上，多的撤掉，其余更新文案/颜色 ----------------
+        cards = getattr(self, "cards", {})
+        host = getattr(self, "cards_host", None)
+        flow = host.flow() if host is not None else None
+        for key, spec in projects.items():
+            if key in cards or flow is None:
+                continue
+            card = ProjectCard(
+                key, spec, self._project_color(key),
+                self.start_project, self.stop_project, self.show_project_logs,
+                on_gui=self.open_project_page if spec.get("gui") else None,
+            )
+            cards[key] = card
+            flow.addWidget(card)
+        for key in [k for k in cards if k not in projects]:
+            card = cards.pop(key)
+            if flow is not None:
+                flow.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+        # -- 3. 项目嵌入页：新增带 gui 的补页，删掉的移除 ---------------------
+        pages = getattr(self, "project_pages", {})
+        for key, spec in projects.items():
+            if not spec.get("gui") or key in pages:
+                continue
+            page = ProjectPage(
+                key, spec, self._project_color(key),
+                self.supervisor, self._append_log,
+                open_logs_fn=self._open_project_logs,
+            )
+            pages[key] = page
+            self.stack.addWidget(page)
+        for key in [k for k in pages if k not in projects or not (projects[k] or {}).get("gui")]:
+            page = pages.pop(key)
+            try:
+                page.shutdown()
+            except Exception:
+                pass
+            self.stack.removeWidget(page)
+            page.setParent(None)
+            page.deleteLater()
+        # -- 4. 日志过滤器、设置页、副标题 -----------------------------------
+        combo = getattr(self, "filter_combo", None)
+        if combo is not None:
+            wanted = list(projects.keys()) + ["core"]
+            current = combo.currentData() or ""
+            existing = [combo.itemData(i) for i in range(combo.count())]
+            if existing != ["", *wanted]:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItem("全部项目", "")
+                for key in wanted:
+                    combo.addItem(key, key)
+                idx = combo.findData(current)
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+                combo.blockSignals(False)
+        settings_page = getattr(self, "settings_page", None)
+        if settings_page is not None:
+            settings_page.reload_from_disk()
+        label = getattr(self, "_subtitle_label", None)
+        if label is not None:
+            label.setText(self._subtitle_text())
+        self._sync_cards_height()
+        self._append_log(
+            "core", "info", "项目注册表已重新加载：{0} 个项目".format(len(projects))
+        )
 
     def _sync_header_settings(self):
         """把「设置」tab 里手改 yaml 的结果同步回头部控件。
@@ -1447,16 +1551,30 @@ class MainWindow(QMainWindow):
             return
         # 首选尺寸要按「窗口实际所在的那块屏」重算：多显示器上主屏和当前屏
         # 可用区域可能差很多，只在 __init__ 用 primaryScreen 算一次会算错。
+        # 还要扣掉标题栏/边框：resize() 设的是客户区，frameGeometry() 才是用户在
+        # 屏幕上看到的那个矩形。1366x768 上边框约 30px，不扣就会「客户区刚好放得下、
+        # 窗口底边还是掉出屏幕」——历史缺陷正是这么漏掉的。
+        frame = self.frameGeometry()
+        extra_w = max(0, frame.width() - self.width())
+        extra_h = max(0, frame.height() - self.height())
+        avail_w = max(0, avail.width() - extra_w)
+        avail_h = max(0, avail.height() - extra_h)
         want_w, want_h = _preferred_window_size(screen)
-        width = max(want_w, min(self.width(), max(640, int(avail.width() * 0.98))))
-        height = max(want_h, min(self.height(), max(480, int(avail.height() * 0.98))))
-        width = min(width, max(640, int(avail.width() * 0.98)))
-        height = min(height, max(480, int(avail.height() * 0.98)))
+        width = max(want_w, min(self.width(), max(640, int(avail_w * 0.98))))
+        height = max(want_h, min(self.height(), max(480, int(avail_h * 0.98))))
+        width = min(width, max(640, int(avail_w * 0.98)))
+        height = min(height, max(480, int(avail_h * 0.98)))
         if (width, height) != (self.width(), self.height()):
             self.resize(width, height)
+        # resize 之后重新取一次 frameGeometry：尺寸变了，边框后的实际矩形也变了，
+        # 用旧的算居中会偏出屏幕。
         frame = self.frameGeometry()
         x = avail.left() + max(0, (avail.width() - frame.width()) // 2)
         y = avail.top() + max(0, (avail.height() - frame.height()) // 2)
+        # 居中之后仍要夹一次：窗口比可用区域还大时 max(0, …) 会把窗口贴到左上角，
+        # 但底边照样越界，只能靠位置往上顶到可见范围内。
+        x = min(x, avail.left() + max(0, avail.width() - frame.width()))
+        y = min(y, avail.top() + max(0, avail.height() - frame.height()))
         self.move(x, y)
 
     def resizeEvent(self, ev):
