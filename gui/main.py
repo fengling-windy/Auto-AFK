@@ -310,6 +310,16 @@ class MainWindow(QMainWindow):
         if not self.no_widget:
             self._build_widget()
 
+        # 定时启动的时间框：按住小时/分钟的箭头连点、或滚轮拖动时，
+        # QTimeEdit 每变一格就发一次 timeChanged。原本直连 _toggle_schedule，
+        # 实测拖动 30 格就是 30 次整份写 settings.yaml、30 行实时日志，
+        # 把用户要看的运行日志冲掉。改成合并到「停下 400ms 后」落盘一次
+        # （与设置页数值框、桌面小组件拖动同一套思路）。
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setSingleShot(True)
+        self._schedule_timer.setInterval(400)
+        self._schedule_timer.timeout.connect(self._flush_schedule)
+
         self.doctor_result.connect(self._render_doctor)
         try:
             from afk_core.housekeeping import cleanup_logs
@@ -824,6 +834,10 @@ class MainWindow(QMainWindow):
                 time_edit.blockSignals(False)
 
     def _toggle_schedule(self, *_):
+        self._schedule_timer.start()
+
+    def _flush_schedule(self):
+        """把定时启动开关与时间落盘（合并防抖后的真正写盘动作）。"""
         schedule = self.settings.setdefault("schedule", {})
         schedule["enabled"] = bool(self.schedule_check.isChecked())
         schedule["time"] = self.schedule_time.time().toString("HH:mm")
@@ -1298,6 +1312,13 @@ class MainWindow(QMainWindow):
         timer = getattr(self, "_widget_pos_timer", None)
         if timer is not None and timer.isActive():
             self._flush_widget_pos()
+        # 定时启动的防抖写盘同理：改完时间立刻关窗口不能丢
+        sched_timer = getattr(self, "_schedule_timer", None)
+        if sched_timer is not None and sched_timer.isActive():
+            try:
+                self._flush_schedule()
+            except Exception as exc:
+                logging.getLogger("afk.gui").warning("flush schedule on quit failed: %s", exc)
         # 设置页的数值框走 400ms 防抖，关窗口时同样要补一次落盘
         settings_page = getattr(self, "settings_page", None)
         if settings_page is not None:

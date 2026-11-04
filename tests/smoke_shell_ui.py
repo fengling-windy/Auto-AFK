@@ -201,7 +201,8 @@ def test_settings_page(app):
     try:
         for value in range(60, 90):
             page.post_delay.setValue(value)
-        pump(app, 60)
+        # 不先 pump：负载高时这 30 次 setValue 本身可能就超过 400ms 防抖窗口，
+        # 一进事件循环定时器立刻到期，断言会假失败（setValue 是同步的）。
         check("拖动数值框过程中不写配置文件（防抖）", len(writes) == 0)
         check("拖动数值框不逐格刷日志", len(smoke_logs) == 0)
         deadline = time.monotonic() + 2.0
@@ -638,6 +639,50 @@ def test_main_window(app):
             "设置 tab 保存后定时时间跟随文件",
             window.schedule_time.time().toString("HH:mm") == "07:30",
         )
+
+        # 拖动「定时启动」时间框不能逐格写盘 + 刷屏日志。
+        # 历史缺陷：timeChanged 直连 _toggle_schedule，按住箭头连点 30 格就是
+        # 30 次整份写 settings.yaml、30 行「定时启动: ...」日志，把运行日志冲掉。
+        sched_writes = []
+        sched_logs = []
+        orig_save = config.save_yaml
+        orig_log_fn = window._append_log
+
+        def counting_save(path, data):
+            sched_writes.append(path)
+            return orig_save(path, data)
+
+        def counting_log(project, level, message, *args, **kwargs):
+            sched_logs.append(message)
+            return orig_log_fn(project, level, message, *args, **kwargs)
+
+        base_time = window.schedule_time.time()
+        try:
+            config.save_yaml = counting_save
+            window._append_log = counting_log
+            from PySide6.QtCore import QTime
+
+            moment = QTime(base_time.hour(), base_time.minute())
+            for _step in range(30):
+                moment = moment.addSecs(60)
+                window.schedule_time.setTime(moment)
+            # 这里不能先 pump：整机负载高时这 30 次 setTime 本身就可能花掉 400ms
+            # 以上，一进事件循环防抖定时器立刻到期，断言会假失败。setTime 是同步
+            # 的，不 pump 就不会有写盘，直接断言即可。
+            check("拖动时间框过程中不写配置文件（防抖）", len(sched_writes) == 0)
+            check("拖动时间框不逐格刷日志", len(sched_logs) == 0)
+            deadline = time.monotonic() + 2.0
+            while not sched_writes and time.monotonic() < deadline:
+                pump(app, 30)
+            check("停下后定时时间只落盘一次", len(sched_writes) == 1)
+            check("停下后只写一行定时日志", len(sched_logs) == 1)
+            check(
+                "落盘的是最后一次拖到的时间",
+                str((config.settings().get("schedule") or {}).get("time")) == moment.toString("HH:mm"),
+            )
+        finally:
+            config.save_yaml = orig_save
+            window._append_log = orig_log_fn
 
         # 保存设置后托盘勾选与桌面小组件可见性也要跟随文件。
         # 历史缺陷：_save_text 只同步了头部三个控件，用户在「设置」tab 把
