@@ -702,11 +702,6 @@ def test_main_window(app):
             probe_win.show()
             pump(app, 120)
             frame = probe_win.frameGeometry()
-            if not (frame.top() >= 0 and frame.top() + frame.height() <= 728):
-                print("  [debug] frame={0} size={1}x{2} minHint={3} initial_applied={4}".format(
-                    frame.getRect(), probe_win.width(), probe_win.height(),
-                    probe_win.minimumSizeHint().height(),
-                    getattr(probe_win, "_initial_geometry_applied", None)))
             check("1366x728 屏上窗口不超出可用区域", frame.top() >= 0 and frame.top() + frame.height() <= 728)
             probe_win.hide()
             probe_win._quit()
@@ -927,14 +922,16 @@ def test_main_window(app):
             for i in range(window.settings_page.order_list.count())
         ])
         if (mutated["projects"][extra_key] or {}).get("gui"):
+            nav_widgets = [
+                window.nav._layout().itemAt(i).widget()
+                for i in range(window.nav._layout().count())
+            ]
             check("保存注册表后新项目出现在导航", window.nav.item_for_key("page:" + extra_key) is not None)
-            check("导航项排在「设置」前面", [
-                window.nav.layout().itemAt(i).widget()
-                for i in range(window.nav.layout().count())
-            ].index(window.nav.item_for_key("page:" + extra_key)) < [
-                window.nav.layout().itemAt(i).widget()
-                for i in range(window.nav.layout().count())
-            ].index(window.nav.item_for_key("settings")))
+            check(
+                "导航项排在「设置」前面",
+                nav_widgets.index(window.nav.item_for_key("page:" + extra_key))
+                < nav_widgets.index(window.nav.item_for_key("settings")),
+            )
         check("保存注册表后副标题跟随项目数量", "冒烟新增项目" in window._subtitle_label.text())
         # 还原：把注册表写回原样，后续断言依赖原来的 5 个项目
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))

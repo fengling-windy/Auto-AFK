@@ -2,7 +2,17 @@
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 class NavItem(QPushButton):
@@ -90,12 +100,37 @@ class NavRail(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._group.buttonClicked.connect(lambda btn: self.navigate.emit(btn.key))
-        self._indicator = _NavIndicator(self)
         self._anim = None
+
+        # 导航项放在可滚动区域里。用普通布局时，侧栏的最小高度等于所有导航项
+        # 高度之和，项目一多就把主窗口最小高度顶上去——实测注册表里有 25 个
+        # 带界面的项目时 minimumSizeHint 变成 1122px，1080p 屏上「设置」入口
+        # 直接跑到屏幕外点不到。套滚动区后最小高度不再随项目数增长。
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("navScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setStyleSheet("QScrollArea#navScroll { background: transparent; border: none; }")
+        self._list = QWidget()
+        self._list.setObjectName("navList")
+        self._list_layout = QVBoxLayout(self._list)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(4)
+        self._scroll.setWidget(self._list)
+        root.addWidget(self._scroll, 1)
+        # 指示条挂在滚动内容上（不是侧栏本身）：item.y() 是内容坐标系，
+        # 挂在外面的话滚动之后就指错位置了。
+        self._indicator = _NavIndicator(self._list)
+
+    def _layout(self):
+        """导航项所在的布局（滚动区里的那一层）。"""
+        return self._list_layout
 
     def add_item(self, key, label, section=False):
         """按添加顺序追加导航项；section=True 渲染为分组小标题。"""
-        layout = self.layout()
+        layout = self._layout()
         if section:
             cap = QLabel(label)
             cap.setObjectName("navSection")
@@ -125,8 +160,8 @@ class NavRail(QWidget):
 
     def finish(self):
         """在所有导航项之后补上尾部弹性空隙；必须最后调用。"""
-        self.layout().addStretch(1)
-        self._stretch_index = self.layout().count() - 1
+        self._layout().addStretch(1)
+        self._stretch_index = self._layout().count() - 1
         self._finished = True
         active = self._group.checkedButton()
         if active is not None:
@@ -141,7 +176,7 @@ class NavRail(QWidget):
         """
         if item is None:
             return -1
-        layout = self.layout()
+        layout = self._layout()
         for index in range(layout.count()):
             entry = layout.itemAt(index)
             if entry is not None and entry.widget() is item:
@@ -155,11 +190,11 @@ class NavRail(QWidget):
             return
         was_checked = self._group.checkedButton() is item
         self._group.removeButton(item)
-        self.layout().removeWidget(item)
+        self._layout().removeWidget(item)
         item.setParent(None)
         item.deleteLater()
         if self._finished:
-            self._stretch_index = self.layout().count() - 1
+            self._stretch_index = self._layout().count() - 1
         if was_checked:
             # 选中项被删掉了：指示条无处可落，先藏起来，等 set_active 重新定位
             self._indicator.hide()
@@ -192,9 +227,15 @@ class NavRail(QWidget):
     def _move_indicator(self, y):
         self._indicator_y = y
         item = self._group.checkedButton()
-        height = item.height() - 16 if item is not None else 24
+        # 高度必须跟着导航项走，但 item.height() 在布局跑过之前是不可信的
+        # （QWidget 默认高度可能几百像素，实测一次进来是 480，指示条就被画成
+        # 464px 一根贯穿整个侧栏的竖条）。超过 minimumHeight 太多就退回最小高度。
+        target = item.minimumHeight() if item is not None else 24
+        if item is not None and 0 < item.height() <= target + 8:
+            target = item.height()
+        height = max(16.0, float(target) - 16.0)
         self._indicator.setGeometry(
-            QRectF(4, y + 8, 3.0, max(16.0, height)).toAlignedRect()
+            QRectF(4, y + 8, 3.0, height).toAlignedRect()
         )
         # 拿到真实位置后才显示（见 _NavIndicator 的说明）
         if item is not None and not self._indicator.isVisible():
