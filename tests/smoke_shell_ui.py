@@ -36,6 +36,12 @@ _TMP_PROJECTS = _TMP_DIR / "afk_projects.yaml"
 shutil.copy(_REAL_PROJECTS, _TMP_PROJECTS)
 config.PROJECTS_YAML = _TMP_PROJECTS
 
+# 修复规则同理：保存动作会真的写文件，指向临时副本。
+_REAL_REPAIR = config.REPAIR_YAML
+_TMP_REPAIR = _TMP_DIR / "repair_rules.yaml"
+shutil.copy(_REAL_REPAIR, _TMP_REPAIR)
+config.REPAIR_YAML = _TMP_REPAIR
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -939,6 +945,53 @@ def test_main_window(app):
         pump(app, 400)
         check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
 
+        # 保存「修复规则」后运行中的引擎必须看到新规则。
+        # 历史缺陷：RepairEngine 只在构造时读一次 repair_rules.yaml，界面上加
+        # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。
+        engine = window.supervisor.repair
+        rules_before = len(engine.rules)
+        mutated_rules = yaml.safe_load(window.repair_edit.toPlainText()) or {}
+        mutated_rules.setdefault("rules", [])
+        mutated_rules["rules"].append(
+            {
+                "id": "smoke-probe-rule",
+                "description": "冒烟专用，永不匹配",
+                "match": "NEVER_MATCH_SMOKE_PROBE",
+                "actions": [{"type": "rerun"}],
+            }
+        )
+        window.repair_edit.setPlainText(yaml.safe_dump(mutated_rules, allow_unicode=True, sort_keys=False))
+        window._save_text(window.repair_edit, config.REPAIR_YAML)
+        pump(app, 300)
+        check("保存修复规则后引擎规则数 +1", len(engine.rules) == rules_before + 1)
+        check(
+            "保存修复规则后新规则进入引擎",
+            any(str(r.get("id")) == "smoke-probe-rule" for r in engine.rules),
+        )
+        # 还原规则文件并让引擎重新读
+        config.save_yaml(config.REPAIR_YAML, yaml.safe_load(Path(_REAL_REPAIR).read_text(encoding="utf-8")))
+        engine.reload()
+        check("还原修复规则后引擎规则数回到原来", len(engine.rules) == rules_before)
+
+        # 保存「设置」后引擎手上的 repair 配置也要跟着换。
+        settings_before = dict(engine.settings.get("repair") or {})
+        mutated_settings = yaml.safe_load(window.settings_edit.toPlainText()) or {}
+        mutated_settings.setdefault("repair", {})
+        mutated_settings["repair"]["max_rounds"] = int(settings_before.get("max_rounds", 2)) + 5
+        window.settings_edit.setPlainText(
+            yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False)
+        )
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 300)
+        check(
+            "保存设置后修复引擎同步 repair 配置",
+            int((engine.settings.get("repair") or {}).get("max_rounds", 0))
+            == int(settings_before.get("max_rounds", 2)) + 5,
+        )
+        config.save_yaml(config.SETTINGS_YAML, yaml.safe_load(Path(_REAL_SETTINGS).read_text(encoding="utf-8")))
+        window._on_settings_changed()
+        pump(app, 100)
+
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
         # 整份配置；改成合并到「停下 400ms 后」落盘一次。
@@ -1013,6 +1066,7 @@ def main():
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS
         config.PROJECTS_YAML = _REAL_PROJECTS
+        config.REPAIR_YAML = _REAL_REPAIR
         smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()
         shutil.rmtree(_TMP_DIR, ignore_errors=True)

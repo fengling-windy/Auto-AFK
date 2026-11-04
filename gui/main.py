@@ -720,6 +720,14 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self):
         self.settings = config.settings()
         self.supervisor.settings = self.settings
+        # 修复引擎也持有 settings 与 repair_rules：之前只同步了 supervisor，
+        # 结果在「设置」里关掉 repair.enabled、或改 max_rounds，挂机时照样按
+        # 旧配置重试（引擎手上的还是开窗时那份 dict）。
+        repair_engine = getattr(self, "repair", None)
+        if repair_engine is None:
+            repair_engine = getattr(self.supervisor, "repair", None)
+        if repair_engine is not None:
+            repair_engine.reload(self.settings)
         if self.widget is not None:
             gui_cfg = self.settings.get("gui") or {}
             want = bool(gui_cfg.get("widget_enabled", False))
@@ -886,6 +894,13 @@ class MainWindow(QMainWindow):
                     self._settings_edit_dirty = False
             elif saved == Path(config.PROJECTS_YAML):
                 self._reload_registry()
+            elif saved == Path(config.REPAIR_YAML):
+                # 「修复规则」保存后同样要让运行中的引擎看到新规则，否则只能重启
+                repair_engine = getattr(self, "repair", None)
+                if repair_engine is None:
+                    repair_engine = getattr(self.supervisor, "repair", None)
+                if repair_engine is not None:
+                    repair_engine.reload()
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 

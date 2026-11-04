@@ -17,6 +17,20 @@ class RepairEngine:
     def reset(self):
         self.attempt_counts = {}
 
+    def reload(self, settings=None):
+        """重新读取 settings 与 repair_rules.yaml。
+
+        历史缺陷：两者都只在构造时读一次。用户在「修复规则」tab 里加了一条
+        规则并保存，文件里有 11 条、引擎里仍是开窗时那 10 条 —— 新规则永远
+        不生效，只能重启程序；同理在「设置」里关掉 repair.enabled 也不生效，
+        挂机时照样按旧配置重试。
+        """
+        if settings is not None:
+            self.settings = settings
+        self.rules = (config.repair_rules() or {}).get("rules", [])
+        self.attempt_counts = {}
+        return self.rules
+
     def _emit(self, project, message, level="warn", data=None):
         self.bus.emit(
             {
