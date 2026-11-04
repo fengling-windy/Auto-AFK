@@ -203,6 +203,7 @@ class ProjectCard(HoverGlowCard):
     def __init__(self, key, spec, color, on_start, on_stop, on_logs, on_gui=None):
         super().__init__()
         self.key = key
+        self.spec = spec
         self.color = color
         self.on_start = on_start
         self.on_stop = on_stop
@@ -219,6 +220,7 @@ class ProjectCard(HoverGlowCard):
         accent.setFixedHeight(4)
         accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
         layout.addWidget(accent)
+        self.accent = accent
 
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -273,6 +275,24 @@ class ProjectCard(HoverGlowCard):
         buttons.addWidget(self.logs_btn)
         buttons.addStretch(1)
         layout.addLayout(buttons)
+
+    def apply_spec(self, spec, color=None):
+        """注册表里这个项目的显示名/颜色改了之后刷新卡片。
+
+        历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一律
+        沿用构造时的 spec——用户在「项目注册表」里改了 display_name 再保存，
+        左侧导航和副标题都变了，项目卡上的名字还是旧的，看起来像没保存成功。
+        颜色同理（settings.yaml 的 gui.project_colors 改完要跟着变）。
+        """
+        self.spec = spec or {}
+        display_name = str(self.spec.get("display_name", self.key))
+        short = display_name.split("（")[0]
+        if self.name_label.text() != short:
+            self.name_label.setText(short)
+        self.name_label.setToolTip(display_name if display_name != short else "")
+        if color and color != self.color:
+            self.color = color
+            self.accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
 
     def update_state(self, run):
         status = run.get("status", "pending") if run else "pending"
@@ -721,6 +741,27 @@ class MainWindow(QMainWindow):
         else:
             threading.Thread(target=self.supervisor.open_project_gui, args=(key,), daemon=True, name="afk-gui-" + key).start()
 
+    def _reload_project_colors(self):
+        """settings.yaml 的 gui.project_colors 改了之后让卡片/嵌入页配色跟上。
+
+        历史缺陷：project_colors 只在 MainWindow.__init__ 里读一次并 snapshot 成
+        self.project_colors。用户在「设置」tab 里改某个项目的颜色（或在 yaml 里加
+        gui.project_colors）再保存，卡片顶部色条、项目嵌入页的指示灯、
+        以及实时日志里该项目的前缀颜色全是开窗时那份旧配色，看起来像没保存。
+        """
+        custom = (self.settings.get("gui") or {}).get("project_colors") or {}
+        colors = dict(PROJECT_COLORS)
+        colors.update({str(k): str(v) for k, v in custom.items()})
+        self.project_colors = colors
+        for key, card in (getattr(self, "cards", {}) or {}).items():
+            color = self._project_color(key)
+            if card.color != color:
+                card.apply_spec(card.spec, color)
+        for key, page in (getattr(self, "project_pages", {}) or {}).items():
+            color = self._project_color(key)
+            if page.color != color:
+                page.apply_spec(page.spec, color)
+
     def _on_settings_changed(self):
         self.settings = config.settings()
         self.supervisor.settings = self.settings
@@ -748,6 +789,7 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(want)
             action.blockSignals(False)
+        self._reload_project_colors()
         self._sync_settings_editor()
 
     def _silent_open_pages(self, keys):
@@ -945,7 +987,12 @@ class MainWindow(QMainWindow):
         host = getattr(self, "cards_host", None)
         flow = host.flow() if host is not None else None
         for key, spec in projects.items():
-            if key in cards or flow is None:
+            if key in cards:
+                # 已存在的卡片也要跟新显示名：否则改完 display_name 保存后导航和
+                # 副标题都变了，卡片标题还是旧的。
+                cards[key].apply_spec(spec, self._project_color(key))
+                continue
+            if flow is None:
                 continue
             card = ProjectCard(
                 key, spec, self._project_color(key),
@@ -963,7 +1010,10 @@ class MainWindow(QMainWindow):
         # -- 3. 项目嵌入页：新增带 gui 的补页，删掉的移除 ---------------------
         pages = getattr(self, "project_pages", {})
         for key, spec in projects.items():
-            if not spec.get("gui") or key in pages:
+            if not spec.get("gui"):
+                continue
+            if key in pages:
+                pages[key].apply_spec(spec)
                 continue
             page = ProjectPage(
                 key, spec, self._project_color(key),

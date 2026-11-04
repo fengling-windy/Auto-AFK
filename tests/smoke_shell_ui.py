@@ -1024,6 +1024,55 @@ def test_main_window(app):
         pump(app, 400)
         check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
 
+        # 改已存在项目的显示名，卡片和嵌入页页头都要跟着变。
+        # 历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片/页一直
+        # 用构造时的 spec，导航和副标题都改了名字，卡片标题还是旧的。
+        rename_key = next(iter(original_registry["projects"]))
+        renamed = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        renamed["projects"][rename_key]["display_name"] = "冒烟改名项目（测试）"
+        window.registry_edit.setPlainText(yaml.safe_dump(renamed, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("改显示名后项目卡标题跟随", window.cards[rename_key].name_label.text() == "冒烟改名项目")
+        if rename_key in window.project_pages:
+            check(
+                "改显示名后嵌入页页头跟随",
+                window.project_pages[rename_key].name_label.text() == "冒烟改名项目",
+            )
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+
+        # 改 gui.project_colors 后卡片色条与嵌入页指示灯要跟着变。
+        # 历史缺陷：project_colors 只在 MainWindow.__init__ 读过一次，改完保存后
+        # 卡片顶部色条、嵌入页指示灯、日志前缀颜色全是开窗时那份旧配色。
+        color_key = rename_key
+        color_before = window.cards[color_key].color
+        probe_color = "#ff00aa"
+        settings_text = window.settings_edit.toPlainText()
+        mutated_settings = yaml.safe_load(settings_text) or {}
+        mutated_settings.setdefault("gui", {})["project_colors"] = {color_key: probe_color}
+        window.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 400)
+        check("改项目配色后卡片颜色跟随", window.cards[color_key].color == probe_color)
+        check(
+            "改项目配色后卡片色条跟随",
+            probe_color in window.cards[color_key].accent.styleSheet(),
+        )
+        if color_key in window.project_pages:
+            check(
+                "改项目配色后嵌入页指示灯跟随",
+                window.project_pages[color_key].color == probe_color,
+            )
+        check("改项目配色后日志前缀用新颜色", window._project_color(color_key) == probe_color)
+        # 还原配色，避免影响后面的断言
+        mutated_settings["gui"]["project_colors"] = {}
+        window.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 300)
+        check("还原配色后卡片颜色回到原来", window.cards[color_key].color == color_before)
+
         # 保存「修复规则」后运行中的引擎必须看到新规则。
         # 历史缺陷：RepairEngine 只在构造时读一次 repair_rules.yaml，界面上加
         # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。

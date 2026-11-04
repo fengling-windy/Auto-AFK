@@ -143,6 +143,27 @@ class ProjectPage(QWidget):
             return "启动中..."
         return "启动界面"
 
+    def apply_spec(self, spec, color=None):
+        """注册表里这个项目的显示名/颜色改了之后刷新页头。
+
+        历史缺陷：_reload_registry 只会给「新增」的带界面项目建页，已存在的页
+        一直用构造时的 spec 与颜色。改完 display_name 保存后，左侧导航和总览
+        副标题都换了名字，进入这个项目的嵌入页页头还是旧名字；改
+        gui.project_colors 同理，指示灯还是旧配色。
+        """
+        self.spec = spec or {}
+        display_name = str(self.spec.get("display_name", self.key))
+        short = display_name.split("（")[0]
+        if self.name_label.text() != short:
+            self.name_label.setText(short)
+        self.name_label.setToolTip(display_name if display_name != short else "")
+        if color and color != self.color:
+            self.color = color
+            # 状态点当前可能是失败态红色，不能无条件刷回项目色；
+            # _set_state 会把 dot 重置成 self.color，失败态（非 idle）不重画。
+            if self._state in (self.STATE_IDLE, self.STATE_HIDDEN, self.STATE_EMBEDDED):
+                self._set_state(self._state, self.state_label.text())
+
     def dot_state(self):
         """侧栏指示灯：界面已启动（启动中/已嵌入/后台）返回绿色。"""
         return DOT_ON if self._state in (
