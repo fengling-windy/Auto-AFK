@@ -205,6 +205,13 @@ def main():
         check("QSS 引用了 {0}".format(asset), asset in APP_QSS)
     check("QSpinBox 上下按钮背景透明", "QSpinBox::up-button" in APP_QSS and "background: transparent" in APP_QSS)
     check("QComboBox 下拉箭头有独立样式", "QComboBox::down-arrow" in APP_QSS)
+    # QTimeEdit 是 QAbstractSpinBox 的子类（右侧是上下两个堆叠按钮），不能跟
+    # QComboBox 那样只给一个 ::down-arrow。历史缺陷：它被归进 QComboBox 那条
+    # 规则，上面那个按钮仍由 Qt 默认画成实心三角，与下面我们给的 chevron 挤在
+    # 一起、还越出圆角（header 的「定时启动 04:00」）。
+    check("QTimeEdit 上下按钮单独写了样式", "QTimeEdit::up-button" in APP_QSS and "QTimeEdit::down-button" in APP_QSS)
+    check("QTimeEdit 箭头用 SVG 而不是 Qt 默认三角", "QTimeEdit::up-arrow" in APP_QSS and "QTimeEdit::down-arrow" in APP_QSS)
+    check("QComboBox 不再把 QTimeEdit 一起塞进 drop-down 规则", "QComboBox::drop-down, QTimeEdit::drop-down" not in APP_QSS)
 
     print()
     if FAILURES:

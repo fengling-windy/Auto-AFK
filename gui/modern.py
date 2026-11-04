@@ -458,7 +458,11 @@ QComboBox:hover, QTimeEdit:hover {
 QComboBox:focus, QTimeEdit:focus {
     border-color: #4c8dff;
 }
-QComboBox::drop-down, QTimeEdit::drop-down {
+/* 只给 QComboBox 画下拉箭头。QTimeEdit 是 QAbstractSpinBox 的子类，它的右侧是
+ * 「上/下」一对堆叠按钮，用 ::down-arrow 一个 chevron 去套它，上面那个按钮仍由
+ * Qt 默认绘制成实心三角，两个形状挤在一起还越出圆角（实测见 header 的定时启动框）。
+ * QTimeEdit 的按钮在下面按 QSpinBox 的方式统一处理。 */
+QComboBox::drop-down {
     subcontrol-origin: border;
     subcontrol-position: center right;
     width: 20px;
@@ -466,7 +470,7 @@ QComboBox::drop-down, QTimeEdit::drop-down {
     border: none;
     border-left: 1px solid #242f42;
 }
-QComboBox::down-arrow, QTimeEdit::down-arrow {
+QComboBox::down-arrow {
     image: url("__ASSET_DIR__/chevron.svg");
     width: 9px;
     height: 6px;
@@ -642,33 +646,35 @@ QSpinBox:hover {
 QSpinBox:focus {
     border-color: #4c8dff;
 }
-/* Qt 默认绘制 QSpinBox 的上下按钮和 QComboBox 的箭头时，会画成浅色立体块，
+/* Qt 默认绘制 QSpinBox / QTimeEdit 的上下按钮和 QComboBox 的箭头时，会画成浅色立体块，
  * 在深色圆角输入框里像两个突兀的小方块越出边界（实测见 tools/ui_widget_probe.py）。
  * 这里把按钮背景设为透明，箭头改用 SVG 资源——CSS 三角形边框技巧在 QSS 里
- * 不生效（只会画出小方块），必须走 image。 */
-QSpinBox::up-button {
+ * 不生效（只会画出小方块），必须走 image。
+ * QTimeEdit 也在这组里：它是 QAbstractSpinBox 的子类，右侧同样是上下两个按钮。 */
+QSpinBox::up-button, QTimeEdit::up-button {
     subcontrol-origin: border;
     subcontrol-position: top right;
     width: 16px;
     background: transparent;
     border: none;
 }
-QSpinBox::down-button {
+QSpinBox::down-button, QTimeEdit::down-button {
     subcontrol-origin: border;
     subcontrol-position: bottom right;
     width: 16px;
     background: transparent;
     border: none;
 }
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QTimeEdit::up-button:hover, QTimeEdit::down-button:hover {
     background: rgba(255, 255, 255, 0.06);
 }
-QSpinBox::up-arrow {
+QSpinBox::up-arrow, QTimeEdit::up-arrow {
     image: url("__ASSET_DIR__/arrow_up.svg");
     width: 8px;
     height: 5px;
 }
-QSpinBox::down-arrow {
+QSpinBox::down-arrow, QTimeEdit::down-arrow {
     image: url("__ASSET_DIR__/arrow_down.svg");
     width: 8px;
     height: 5px;
