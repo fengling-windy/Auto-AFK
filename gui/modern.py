@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLayout,
     QPushButton,
+    QSizePolicy,
     QTabBar,
     QTabWidget,
     QWidget,
@@ -1012,6 +1013,9 @@ class AnimatedPill(QWidget):
         font.setPixelSize(12)
         font.setWeight(QFont.DemiBold)
         self.setFont(font)
+        # 高度必须固定。默认 Preferred 让它在 QVBoxLayout 里被纵向拉满——
+        # 桌面小组件（gui/widget.py）里胶囊就摊成了一个竖向椭圆的怪物。
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(280)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)

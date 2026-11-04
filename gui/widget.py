@@ -8,7 +8,7 @@ gui.widget_pos，下次启动回到原处。所有数据由主窗口的 300ms �
 tick() 推进（小组件自己不轮询、不碰 supervisor）。
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -122,6 +122,11 @@ class DesktopWidget(QWidget):
         self._hint.setObjectName("hintLabel")
         body.addWidget(self._hint)
 
+        # 末尾必须留弹性空隙：否则 QVBoxLayout 会把可伸展的 QLabel
+        # （默认 Preferred 纵向策略）拉高填满窗口，折叠后剩下一大片空白，
+        # 小组件高度几乎不缩（实测 267 -> 261，只有 6px）。
+        body.addStretch(1)
+
     # -- 外部接口 --------------------------------------------------------------
     def tick(self, snapshot, idle_status=None, threshold_sec=0, completed_today=False):
         """由主窗口轮询调用：snapshot 来自 supervisor.status_snapshot()。"""
@@ -170,7 +175,20 @@ class DesktopWidget(QWidget):
         self._hint.setVisible(not self._collapsed)
         self.run_label.setVisible(not self._collapsed)
         self.fold_btn.setText("+" if self._collapsed else "—")
-        self.adjustSize()
+        # 隐藏子控件不会在同一次调用栈里刷新 sizeHint（Qt 把布局重算排到
+        # 事件循环里），所以此刻直接 adjustSize() 拿到的还是折叠前的 282px，
+        # 小组件高度卡在 261 几乎不缩。推迟到下一轮事件循环再按真实
+        # sizeHint 收缩。
+        QTimer.singleShot(0, self._apply_collapsed_size)
+
+    def _apply_collapsed_size(self):
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        target = max(self.minimumSizeHint().height(), self.sizeHint().height())
+        if target > 0 and target != self.height():
+            self.resize(self.width(), target)
 
     def restore_position(self, pos):
         """pos 为 [x, y] 或 None；越界时回落到屏幕右上角附近。"""
