@@ -54,6 +54,18 @@ def pump(app, ms):
         time.sleep(0.01)
 
 
+class _FakeScreen:
+    """假屏幕，用来验证窗口在不同可用区域下的尺寸收敛。"""
+
+    def __init__(self, x, y, width, height):
+        from PySide6.QtCore import QRect
+
+        self._rect = QRect(x, y, width, height)
+
+    def availableGeometry(self):
+        return self._rect
+
+
 FAKE_REGISTRY = {
     "projects": {
         "Alpha": {"display_name": "Alpha（示例项目甲）", "gui": {"args": ["app.py"]}},
@@ -563,12 +575,12 @@ def test_main_window(app):
         # 折行后的第二行项目卡不能压到下面的页签上。历史缺陷：FlowLayout 直接
         # addLayout 进 QVBoxLayout，父布局只按「单卡高度」分配空间，1062px 宽时
         # 第二行卡片被画在实时日志页签上面（两个控件互相重叠）。
+        # 卡片区现在套在滚动区里，卡片的 geometry 是宿主坐标，必须映射到窗口
+        # 坐标再比，否则比较的是两套坐标系。
         cards_bottom = max(
-            (card.geometry().y() + card.geometry().height()) for card in window.cards.values()
+            card.mapTo(window, card.rect().bottomLeft()).y() for card in window.cards.values()
         )
-        tabs_top = window.tabs.parentWidget().mapTo(
-            window, window.tabs.parentWidget().rect().topLeft()
-        ).y()
+        tabs_top = window.tabs.mapTo(window, window.tabs.rect().topLeft()).y()
         check("折行后的项目卡不会压住下方页签", cards_bottom <= tabs_top)
         host = window.cards_host
         check(
@@ -587,6 +599,34 @@ def test_main_window(app):
         pump(app, 120)
         check("1280 宽折成两行时窗口仍是 900 高", window.height() <= 900)
         check("窄窗口下卡片区域确实变高（折行生效）", host.minimumHeight() > 0)
+
+        # 卡片区必须能滚动：历史缺陷是卡片直接摆进页面布局，5 张卡把主窗口
+        # 最小高度顶到 821px，1366x768 笔记本（可用 728）上底部按钮掉出屏幕。
+        # 套滚动区后最小高度只剩一行的量，矮屏上靠滚动看完整张卡。
+        cards_scroll = window.cards_scroll
+        check("卡片区套在滚动区里", cards_scroll is not None and cards_scroll.widget() is host)
+        check("卡片区不再撑高窗口最小高度（矮屏可用）", window.minimumSizeHint().height() <= 640)
+        check("卡片区期望高度与折行数一致", cards_scroll.content_height() == host.rows_height_for(host.width()))
+
+        # 窗口必须完整落在屏幕可用区域内。历史缺陷：尺寸写死 1360x900 且从不
+        # 校正位置，1366x768（可用 728）上底边掉出屏幕 132px。
+        pref_w, pref_h = gm._preferred_window_size()
+        check("首选窗口尺寸不超过屏幕可用区域", pref_w <= 1360 and pref_h <= 900)
+        fake = _FakeScreen(0, 0, 1366, 728)
+        prev_screen = gm.MainWindow.screen
+        gm.MainWindow.screen = lambda self, _s=fake: _s
+        try:
+            probe_win = gm.MainWindow()
+            probe_win.show()
+            pump(app, 60)
+            frame = probe_win.frameGeometry()
+            check("1366x728 屏上窗口不超出可用区域", frame.top() >= 0 and frame.top() + frame.height() <= 728)
+            probe_win.hide()
+            probe_win._quit()
+            probe_win.deleteLater()
+            pump(app, 40)
+        finally:
+            gm.MainWindow.screen = prev_screen
 
         # 导航指示条必须落在被选中项上，不能在左上角画出孤立的蓝色块。
         # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中

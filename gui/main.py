@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -131,6 +132,36 @@ CHAIN_COLORS = {
     "failed": "#f87171",
     "stopped": "#c084fc",
 }
+
+# 首选窗口尺寸。1360x900 在 1920x1080 / 125% 缩放（可用 1536x824）、
+# 1366x768、1280x720 上都放不下，底部按钮会掉到屏幕外，所以要按实际可用
+# 区域收敛，而不是写死。
+PREFERRED_WINDOW_SIZE = (1360, 900)
+CARDS_MIN_HEIGHT = 120
+
+
+def _preferred_window_size(screen=None):
+    """按屏幕可用区域算出不超过可用范围的首选窗口尺寸。"""
+    from PySide6.QtGui import QGuiApplication
+
+    width, height = PREFERRED_WINDOW_SIZE
+    if screen is None:
+        try:
+            screen = QGuiApplication.primaryScreen()
+        except Exception:
+            screen = None
+    if screen is None:
+        return width, height
+    try:
+        avail = screen.availableGeometry()
+    except Exception:
+        return width, height
+    if avail.width() <= 0 or avail.height() <= 0:
+        return width, height
+    # 留 2% 余量，避免窗口贴边（任务栏/Dock 吃掉几个像素就出现滚动条）
+    limit_w = max(640, int(avail.width() * 0.98))
+    limit_h = max(480, int(avail.height() * 0.98))
+    return min(width, limit_w), min(height, limit_h)
 
 
 def make_icon():
@@ -265,7 +296,11 @@ class MainWindow(QMainWindow):
         self.project_colors = dict(PROJECT_COLORS)
         self.project_colors.update({str(k): str(v) for k, v in custom_colors.items()})
         self.setWindowTitle("Auto-AFK 一键挂机")
-        self.resize(1360, 900)
+        # 默认尺寸按屏幕可用区域收敛：写死 1360x900 在 1366x768 的笔记本上
+        # 会矮出屏幕 132px（窗口底边压到任务栏以下，底部按钮点不到），
+        # 1280x720/1920x1080+缩放 125% 的机器上同样越界。
+        self._initial_geometry_applied = False
+        self.resize(*_preferred_window_size())
         self.setWindowIcon(make_icon())
 
         self.bus = EventBus()
@@ -475,7 +510,20 @@ class MainWindow(QMainWindow):
             )
             self.cards[key] = card
             cards_row.addWidget(card)
-        root.addWidget(cards_host)
+        # 卡片区可滚动：卡片是等宽定宽的，窗口窄时折成两行、矮屏上就没地方放了。
+        # 直接把它塞进 QVBoxLayout 会把主窗口最小高度顶到 821px——1366x768 的
+        # 笔记本（可用 728）上窗口底部按钮直接掉出屏幕。套一层滚动区后最小高度
+        # 只剩一行的量，空间够时仍然完整显示不出现滚动条。
+        cards_scroll = CardsScrollArea()
+        cards_scroll.setObjectName("cardsScroll")
+        cards_scroll.setWidgetResizable(True)
+        cards_scroll.setFrameShape(QFrame.NoFrame)
+        cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        cards_scroll.setMinimumHeight(CARDS_MIN_HEIGHT)
+        cards_scroll.setWidget(cards_host)
+        enable_smooth_scroll(cards_scroll)
+        self.cards_scroll = cards_scroll
+        root.addWidget(cards_scroll, 0)
 
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
@@ -1346,6 +1394,9 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, ev):
         super().showEvent(ev)
+        if not self._initial_geometry_applied:
+            self._initial_geometry_applied = True
+            self._fit_to_screen()
         self._sync_cards_height()
         if self._did_intro:
             return
@@ -1355,15 +1406,53 @@ class MainWindow(QMainWindow):
         for i, card in enumerate(self.cards.values()):
             fade_in_widget(card, duration=300, delay=120 + i * 70)
 
+    def _fit_to_screen(self):
+        """首次显示时保证窗口完整落在屏幕可用区域内。
+
+        历史缺陷：窗口尺寸写死 1360x900 且从不校正位置。在 1366x768 的笔记本上
+        底边会掉出屏幕 132px（底部按钮点不到），1920x1080 + 125% 缩放的机器上
+        同样越界；而小屏上窗口还会被系统贴在左上角之外。
+        """
+        try:
+            screen = self.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            return
+        try:
+            avail = screen.availableGeometry()
+        except Exception:
+            return
+        if avail.width() <= 0 or avail.height() <= 0:
+            return
+        # 首选尺寸要按「窗口实际所在的那块屏」重算：多显示器上主屏和当前屏
+        # 可用区域可能差很多，只在 __init__ 用 primaryScreen 算一次会算错。
+        want_w, want_h = _preferred_window_size(screen)
+        width = max(want_w, min(self.width(), max(640, int(avail.width() * 0.98))))
+        height = max(want_h, min(self.height(), max(480, int(avail.height() * 0.98))))
+        width = min(width, max(640, int(avail.width() * 0.98)))
+        height = min(height, max(480, int(avail.height() * 0.98)))
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+        frame = self.frameGeometry()
+        x = avail.left() + max(0, (avail.width() - frame.width()) // 2)
+        y = avail.top() + max(0, (avail.height() - frame.height()) // 2)
+        self.move(x, y)
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._sync_cards_height()
 
     def _sync_cards_height(self):
-        """按窗口当前宽度重算项目卡区域的高度（折成几行就有多高）。
+        """按窗口当前宽度重算项目卡区域应有的高度（折成几行就有多高）。
 
         必须在窗口真正 resize 之后算：布局求解阶段宽度还不可知，让它去猜
         就会把 5 张卡当成竖排，把窗口最小高度顶到 1165（见 FlowHost 注释）。
+
+        这里只把「折行后需要的高度」报给滚动区当 sizeHint，不设固定高度：
+        空间够时滚动区长到刚好放下（看起来和没有滚动区一样），不够时布局把
+        它压到最小高度并出现滚动条。写成 setFixedHeight 会和窗口高度互相
+        反馈——钉高滚动区 → 窗口最小高度变大 → 布局把窗口撑高 → 再钉更高。
         """
         host = getattr(self, "cards_host", None)
         if host is None:
@@ -1373,6 +1462,14 @@ class MainWindow(QMainWindow):
             central = self.centralWidget()
             width = (central.width() if central is not None else self.width()) - 24
         host.sync_height(width)
+        scroll = getattr(self, "cards_scroll", None)
+        if scroll is None:
+            return
+        desired = host.rows_height_for(width)
+        if desired <= 0:
+            return
+        if scroll.content_height() != desired:
+            scroll.set_content_height(desired)
 
     def closeEvent(self, event):
         if (self.settings.get("gui", {}) or {}).get("minimize_to_tray", False):
@@ -1381,6 +1478,44 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("Auto-AFK", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
             self._quit()
+
+
+class CardsScrollArea(QScrollArea):
+    """项目卡区域的滚动容器。
+
+    卡片等宽定宽，窗口变窄会折行、变多行就更高。把它直接塞进 QVBoxLayout
+    会让它按内容高度报 sizeHint，主窗口最小高度随之涨到 821px —— 1366x768
+    笔记本（可用 728）上窗口底部按钮直接掉出屏幕。
+
+    做成滚动区后最小高度只剩一行的量；但 QScrollArea 的默认 sizeHint 偏小，
+    空间充足时它也只想占 160px（大屏上白白出现滚动条）。所以这里自己报
+    「内容需要的高度」作为 sizeHint，布局空间够就完整显示，不够才压小滚动。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._content_height = 0
+
+    def set_content_height(self, height):
+        height = int(height)
+        if height == self._content_height:
+            return
+        self._content_height = height
+        self.updateGeometry()
+
+    def content_height(self):
+        return self._content_height
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self._content_height <= 0:
+            return hint
+        return QSize(hint.width(), self._content_height)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        height = max(hint.height(), CARDS_MIN_HEIGHT)
+        return QSize(hint.width(), height)
 
 
 def _escape_html(text):
