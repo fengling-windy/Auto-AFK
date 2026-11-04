@@ -92,16 +92,8 @@ class SettingsPage(QWidget):
             "勾选后，Auto-AFK 启动时会自动拉起对应项目的配置界面并隐藏到后台；点击左侧导航进入该页时再嵌入显示。",
         )
         self.silent_checks = {}
-        gui_cfg = config.settings().get("gui") or {}
-        silent_set = {str(k) for k in (gui_cfg.get("silent_open_projects") or [])}
-        for key, spec in self._projects_with_gui().items():
-            check = QCheckBox(str(spec.get("display_name", key)).split("（")[0])
-            check.setChecked(key in silent_set)
-            check.toggled.connect(lambda checked, k=key: self._toggle_silent(k, checked))
-            self.silent_checks[key] = check
-            self.silent_card.body.addWidget(check)
-        if not self.silent_checks:
-            self.silent_card.body.addWidget(QLabel("（当前没有配置 gui 入口的项目）"))
+        self._silent_empty_hint = QLabel("（当前没有配置 gui 入口的项目）")
+        self._build_silent_checks()
         layout.addWidget(self.silent_card)
 
         # -- 2. 运行顺序 ---------------------------------------------------------
@@ -247,7 +239,9 @@ class SettingsPage(QWidget):
             "屏幕上的常驻小面板：显示运行状态与空闲倒计时，提供「一键挂机 / 全部停止 / 显示主窗口」，可拖动与折叠。",
         )
         self.widget_check = QCheckBox("显示桌面小组件")
-        self.widget_check.setChecked(bool(gui_cfg.get("widget_enabled", False)))
+        self.widget_check.setChecked(
+            bool((config.settings().get("gui") or {}).get("widget_enabled", False))
+        )
         self.widget_check.toggled.connect(self._save_widget)
         self.widget_card.body.addWidget(self.widget_check)
         layout.addWidget(self.widget_card)
@@ -265,6 +259,38 @@ class SettingsPage(QWidget):
     def _projects_with_gui(self):
         projects = self._registry.get("projects", {}) or {}
         return {k: s for k, s in projects.items() if s.get("gui")}
+
+    def _build_silent_checks(self):
+        """按当前注册表重建「启动时后台打开项目界面」的勾选项。
+
+        历史缺陷：这几个复选框只在 __init__ 里按当时的注册表建一次。用户在
+        「项目注册表」tab 新增一个带界面的项目并保存后，主窗口的项目卡、左侧
+        导航、嵌入页都跟着更新了，唯独这里没有它的勾选框——用户永远无法让新
+        项目开机静默启动，也看不出少了一项。删掉的项目反之会留下一个勾选框，
+        勾上后保存进 silent_open_projects，之后每次启动都去拉起一个不存在的项目。
+        """
+        silent_set = {
+            str(k)
+            for k in ((config.settings().get("gui") or {}).get("silent_open_projects") or [])
+        }
+        # 注册表同样要重读（除非构造时被注入假注册表，那是测试/预览的用法）。
+        if not self._registry_injected:
+            self._registry = config.registry()
+        body = self.silent_card.body
+        for check in self.silent_checks.values():
+            body.removeWidget(check)
+            check.setParent(None)
+            check.deleteLater()
+        self.silent_checks = {}
+        body.removeWidget(self._silent_empty_hint)
+        for key, spec in self._projects_with_gui().items():
+            check = QCheckBox(str(spec.get("display_name", key)).split("（")[0])
+            check.setChecked(key in silent_set)
+            check.toggled.connect(lambda checked, k=key: self._toggle_silent(k, checked))
+            self.silent_checks[key] = check
+            body.addWidget(check)
+        self._silent_empty_hint.setVisible(not self.silent_checks)
+        body.addWidget(self._silent_empty_hint)
 
     def _ordered_project_keys(self):
         settings = config.settings()
@@ -486,9 +512,9 @@ class SettingsPage(QWidget):
         self._loading = True
         try:
             settings = config.settings()
-            silent_set = {str(k) for k in ((settings.get("gui") or {}).get("silent_open_projects") or [])}
-            for key, check in self.silent_checks.items():
-                check.setChecked(key in silent_set)
+            # 静默启动勾选项要跟着注册表重建（外部新增/删除带界面的项目后必须
+            # 反映到这几行，见 _build_silent_checks 的历史缺陷说明）。
+            self._build_silent_checks()
             # 运行顺序也要跟着刷新：之前漏了这一项，外部改了 chain.order
             # （或直接在「设置」tab 里改了 yaml 保存）再回来，列表还是旧顺序，
             # 用户以为没生效。重建而不是原地重排，避免丢掉新增的项目。

@@ -939,6 +939,40 @@ def test_main_window(app):
         finally:
             probe_yaml.unlink(missing_ok=True)
 
+        # 注册表里手写 `gui: true` 不能把程序搞崩。
+        # 历史缺陷：gui/main.py 与 afk_core/supervisor.py 都直接对 spec["gui"]
+        # 调 .get()，写成布尔值会在 MainWindow 构造时抛
+        # AttributeError: 'bool' object has no attribute 'get'，用户连界面都打不开，
+        # 也没法把配置改回来。config.registry() 现在把它归一成 None。
+        bool_gui_yaml = config.SETTINGS_YAML.parent / "_probe_gui_bool.yaml"
+        bool_gui_yaml.write_text(
+            "projects:\n"
+            "  BoolGui:\n"
+            "    display_name: 布尔界面\n"
+            "    gui: true\n"
+            "  MapGui:\n"
+            "    display_name: 映射界面\n"
+            "    gui:\n"
+            "      args: [app.py]\n",
+            encoding="utf-8",
+        )
+        real_projects_yaml = config.PROJECTS_YAML
+        try:
+            config.PROJECTS_YAML = bool_gui_yaml
+            probe_registry = config.registry()
+            check("注册表里 gui: true 不会让程序打不开", isinstance(probe_registry, dict))
+            check(
+                "gui: true 被归一成「没有界面入口」",
+                probe_registry["projects"]["BoolGui"]["gui"] is None,
+            )
+            check(
+                "gui 写成映射时原样保留",
+                probe_registry["projects"]["MapGui"]["gui"] == {"args": ["app.py"]},
+            )
+        finally:
+            config.PROJECTS_YAML = real_projects_yaml
+            bool_gui_yaml.unlink(missing_ok=True)
+
         # 在「项目注册表」tab 保存后，界面必须跟着重载。
         # 历史缺陷：_save_text 对 projects.yaml 什么都不做，文件对了但项目卡、
         # 左侧导航、supervisor、设置页全是开窗时那份旧注册表——新增的项目不出现，
@@ -962,6 +996,16 @@ def test_main_window(app):
             window.settings_page.order_list.item(i).data(Qt.UserRole)
             for i in range(window.settings_page.order_list.count())
         ])
+        # 设置页「启动时后台打开项目界面」的勾选项同样要按注册表重建。
+        # 历史缺陷：这几个复选框只在 SettingsPage.__init__ 里建一次，新增的带界面
+        # 项目永远没有勾选框（无法让它开机静默启动），删掉的项目反而留下一个勾上
+        # 就写进 silent_open_projects 的死项。
+        if (mutated["projects"][extra_key] or {}).get("gui"):
+            check("保存注册表后静默启动勾选项跟随", extra_key in window.settings_page.silent_checks)
+        dropped_gui = dropped_key if (original_registry["projects"].get(dropped_key) or {}).get("gui") else None
+        if dropped_gui:
+            check("保存注册表后删掉项目的静默勾选项消失",
+                  dropped_gui not in window.settings_page.silent_checks)
         if (mutated["projects"][extra_key] or {}).get("gui"):
             nav_widgets = [
                 window.nav._layout().itemAt(i).widget()
