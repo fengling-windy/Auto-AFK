@@ -138,6 +138,12 @@ CHAIN_COLORS = {
 # 区域收敛，而不是写死。
 PREFERRED_WINDOW_SIZE = (1360, 900)
 CARDS_MIN_HEIGHT = 120
+# 页签区（实时日志等）与卡片区共用一个 QSplitter。卡片折行需要更高时，只能
+# 从页签区借空间；算「卡片区还剩多少余量」时按这个最小值计，而不是按它当前
+# 占的高度，否则它会把余量吃光、卡片区永远只放得下一行（用户看不到后两个项目）。
+# 取 120 而不是 QSplitter 自己算出的 181：181 会让 1366x768 差 30px 放不下第二
+# 行卡片，而日志区压到 120 仍能显示页签栏 + 过滤行 + 两行日志，比藏掉两张卡强。
+SPLITTER_MIN_HEIGHT = 120
 
 
 def _preferred_window_size(screen=None):
@@ -527,6 +533,8 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
+        splitter.setMinimumHeight(SPLITTER_MIN_HEIGHT)
+        self._log_splitter = splitter
         self.tabs = AnimatedTabWidget()
 
         log_tab = QWidget()
@@ -1465,11 +1473,57 @@ class MainWindow(QMainWindow):
         scroll = getattr(self, "cards_scroll", None)
         if scroll is None:
             return
+        # 单行高度与行间距交给滚动区，让它在空间不够时把高度吸附到整行，
+        # 避免出现「第二行卡片被切在按钮中间」的半行。
+        scroll.set_row_metrics(host.single_row_height(), host.flow().v_spacing())
         desired = host.rows_height_for(width)
         if desired <= 0:
             return
+        # 空间不够时把可用高度吸附到「能完整放下的整行数」：卡片高度一致，
+        # 半行会把按钮切在中间，看起来像界面画坏了。多余的空间让给下面的
+        # 日志区，滚动条则明确提示下面还有卡片。
+        available = self._cards_available_height()
+        if available > 0:
+            desired = min(desired, scroll.snapped_height(available))
         if scroll.content_height() != desired:
             scroll.set_content_height(desired)
+
+    def _cards_available_height(self):
+        """本页面里除卡片区之外的开销之外，还能留给卡片区多少像素。
+
+        用当前已求解的几何逐项累加（resizeEvent 里布局已经算过一轮），
+        而不是拿常量去猜——头部高度会随副标题换行变化。
+
+        日志页签所在的 QSplitter 是可伸展的那一个：算余量时按它可以被压到的
+        最小高度计（SPLITTER_MIN_HEIGHT），否则它当前占的高度会把余量吃掉，
+        卡片区永远被判成「只放得下一行」。
+        """
+        overview = self.stack.widget(0) if hasattr(self, "stack") else None
+        layout = overview.layout() if overview is not None else None
+        scroll = getattr(self, "cards_scroll", None)
+        if layout is None or scroll is None:
+            return 0
+        splitter = self._log_splitter
+        margins = layout.contentsMargins()
+        used = margins.top() + margins.bottom()
+        spacing = max(0, layout.spacing())
+        countable = 0
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is scroll:
+                continue
+            countable += 1
+            if widget is None:
+                used += item.minimumSize().height()
+            elif widget is splitter:
+                used += SPLITTER_MIN_HEIGHT
+            else:
+                used += max(widget.height(), widget.minimumSizeHint().height())
+        used += spacing * max(0, countable)
+        return max(0, overview.height() - used)
 
     def closeEvent(self, event):
         if (self.settings.get("gui", {}) or {}).get("minimize_to_tray", False):
@@ -1495,6 +1549,45 @@ class CardsScrollArea(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._content_height = 0
+        self._row_height = 0
+        self._row_spacing = 0
+
+    def set_row_metrics(self, row_height, row_spacing):
+        """记下单行卡片高度与行间距，用来把可用高度吸附到整行。"""
+        row_height = int(row_height)
+        row_spacing = int(row_spacing)
+        if (row_height, row_spacing) == (self._row_height, self._row_spacing):
+            return
+        self._row_height = row_height
+        self._row_spacing = row_spacing
+        self.updateGeometry()
+
+    def snapped_height(self, available):
+        """把可用高度吸附到「能完整显示的整行数」上。
+
+        历史表现：1338px 宽时卡片折成 3+2，滚动区被压到 396px，第二行卡片
+        正好被切在按钮中间（只露出半个卡），看起来像界面画坏了。这里把高度
+        取成整行的倍数，多余的空间让给下面的日志页签。
+        """
+        available = int(available)
+        if available <= 0 or self._row_height <= 0:
+            return max(CARDS_MIN_HEIGHT, available)
+        step = self._row_height + self._row_spacing
+        rows = max(1, (available + self._row_spacing) // step)
+        snapped = rows * step - self._row_spacing
+        if snapped > available:
+            rows = max(1, rows - 1)
+            snapped = rows * step - self._row_spacing
+        return max(CARDS_MIN_HEIGHT, snapped)
+
+    def rows_for(self, height):
+        """给定高度能完整放下几行（不足一行按 1 行算）。"""
+        if self._row_height <= 0:
+            return 0
+        step = self._row_height + self._row_spacing
+        if height < self._row_height:
+            return 0
+        return max(1, (int(height) + self._row_spacing) // step)
 
     def set_content_height(self, height):
         height = int(height)
@@ -1511,6 +1604,10 @@ class CardsScrollArea(QScrollArea):
         if self._content_height <= 0:
             return hint
         return QSize(hint.width(), self._content_height)
+
+    def snap_height_for(self, available):
+        """测试用：给定可用高度时滚动区最终会占的高度。"""
+        return self.snapped_height(available)
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()

@@ -90,6 +90,9 @@ class FlowLayout(QLayout):
     def hasHeightForWidth(self):
         return True
 
+    def v_spacing(self):
+        return self._v_spacing
+
     def heightForWidth(self, width):
         return self._do_layout(QRectF(0, 0, width, 0), test_only=True)
 
@@ -219,6 +222,14 @@ class FlowHost(QWidget):
 
     def hasHeightForWidth(self):
         return False
+
+    def v_spacing(self):
+        """行间距（取自内部 FlowLayout），供滚动区做整行吸附。"""
+        return self._flow.v_spacing()
+
+    def single_row_height(self):
+        """单行时的高度（一行里最高的那张卡），供滚动区做整行吸附。"""
+        return self._single_row_height()
 
     def rows_height_for(self, width):
         """给定容器宽度时该项目卡区域应有的高度（折成几行就有多高）。"""

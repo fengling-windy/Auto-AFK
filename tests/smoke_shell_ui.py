@@ -606,7 +606,35 @@ def test_main_window(app):
         cards_scroll = window.cards_scroll
         check("卡片区套在滚动区里", cards_scroll is not None and cards_scroll.widget() is host)
         check("卡片区不再撑高窗口最小高度（矮屏可用）", window.minimumSizeHint().height() <= 640)
-        check("卡片区期望高度与折行数一致", cards_scroll.content_height() == host.rows_height_for(host.width()))
+        # 卡片区高度要么等于折行所需高度，要么被可用空间吸附到更少的整行；
+        # 不能超过折行所需（否则底部留一片空白）。
+        check(
+            "卡片区期望高度不超过折行所需高度",
+            0 < cards_scroll.content_height() <= host.rows_height_for(host.width()),
+        )
+        check(
+            "卡片区高度按整行吸附（不会切半行卡片）",
+            cards_scroll.content_height() % max(1, host.single_row_height() + host.flow().v_spacing())
+            in (0, host.single_row_height()),
+        )
+
+        # 1366x768 笔记本（可用 728）上必须能同时看到两行卡片：历史缺陷是卡片区
+        # 只拿到一行高度、第二行卡片被切在按钮中间，看起来像界面画坏了。
+        fake_small = _FakeScreen(0, 0, 1366, 728)
+        prev_screen = gm.MainWindow.screen
+        gm.MainWindow.screen = lambda self, _s=fake_small: _s
+        try:
+            small_win = gm.MainWindow()
+            small_win.show()
+            pump(app, 200)
+            small_rows = small_win.cards_scroll.rows_for(small_win.cards_scroll.height())
+            check("1366x728 屏上两行卡片都能完整显示", small_rows >= 2)
+            small_win.hide()
+            small_win._quit()
+            small_win.deleteLater()
+            pump(app, 60)
+        finally:
+            gm.MainWindow.screen = prev_screen
 
         # 窗口必须完整落在屏幕可用区域内。历史缺陷：尺寸写死 1360x900 且从不
         # 校正位置，1366x768（可用 728）上底边掉出屏幕 132px。
