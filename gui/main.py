@@ -930,6 +930,18 @@ class MainWindow(QMainWindow):
                     ),
                 )
                 return
+            # 空内容同样要拦：把整份配置改成注释（或在「读取失败」提示上直接按
+            # 保存）都会让 safe_load 得到 None，写进去之后 settings() 立刻变成空
+            # 映射——运行顺序、空闲挂机、开机自启、配色全部回到默认值，界面还
+            # 一本正经地显示「已保存」，用户根本不知道配置被清空了。
+            if not parsed:
+                QMessageBox.critical(
+                    self,
+                    "YAML 校验失败",
+                    "配置未保存：内容为空（或只有注释），保存后整份配置会被清空，"
+                    "所有设置都会回到默认值。确实要清空请直接编辑文件。",
+                )
+                return
         try:
             Path(path).write_text(text, encoding="utf-8")
             self._append_log("core", "info", "已保存 {0}".format(path))

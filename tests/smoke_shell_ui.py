@@ -955,6 +955,19 @@ def test_main_window(app):
                     config.SETTINGS_YAML.read_bytes() == before_bytes,
                 )
             check("非映射的 YAML 会提示用户", any("顶层" in m for m in saved_msgs))
+            # 空内容 / 只有注释：safe_load 返回 None，写进去之后 settings() 变成
+            # 空映射——运行顺序、空闲挂机、开机自启、配色全部静默回到默认值。
+            before_bytes = config.SETTINGS_YAML.read_bytes()
+            saved_msgs.clear()
+            for empty_text in ("", "# 读取失败: 磁盘只读\n", "\n\n"):
+                window.settings_edit.setPlainText(empty_text)
+                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                pump(app, 30)
+                check(
+                    "空内容的 YAML 被拒绝保存（{0!r}）".format(empty_text[:8]),
+                    config.SETTINGS_YAML.read_bytes() == before_bytes,
+                )
+            check("空内容的 YAML 会提示用户", any("内容为空" in m for m in saved_msgs))
         finally:
             _QMB.critical = orig_critical
             # 把编辑器恢复成合法内容，避免影响后续断言
