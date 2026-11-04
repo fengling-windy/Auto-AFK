@@ -332,6 +332,7 @@ class MainWindow(QMainWindow):
         self._log_line_count = 0
         self._did_intro = False
         self._last_chain_for_completion = None
+        self._last_done_today = None
         self.event_buffer = deque(maxlen=5000)
         self._build_ui()
         self._build_tray()
@@ -1260,9 +1261,14 @@ class MainWindow(QMainWindow):
                 self.idle_watcher.threshold_seconds(),
                 completed_today=self._is_done_today(),
             )
-        # 链刚成功结束时刷新设置页的「今日状态」（避免用户看到过期信息）
-        if chain != self._last_chain_for_completion:
+        # 链刚成功结束时刷新设置页的「今日状态」（避免用户看到过期信息）。
+        # 但不能只看链状态：标记文件也可能由 CLI 或另一个 Auto-AFK 进程写入，
+        # 本进程的 chain_status 一直是 idle，标签就永远停在「未完成」。所以再
+        # 比一次「今日是否已完成」的布尔值（读的是 mtime 缓存，几乎零开销）。
+        done_today = self._is_done_today()
+        if chain != self._last_chain_for_completion or done_today != self._last_done_today:
             self._last_chain_for_completion = chain
+            self._last_done_today = done_today
             if getattr(self, "settings_page", None) is not None:
                 try:
                     self.settings_page._refresh_completion_label()

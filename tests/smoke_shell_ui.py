@@ -992,6 +992,31 @@ def test_main_window(app):
         window._on_settings_changed()
         pump(app, 100)
 
+        # 「今日状态」标签必须跟着标记文件走，即使 chain_status 没变。
+        # 历史缺陷：_poll 只在 chain 状态变化时刷新标签，而标记也可能由 CLI 或
+        # 另一个进程写入，本进程链路一直 idle，标签就永远停在「未完成」。
+        from afk_core import completion as completion_mod
+
+        completion_mod.clear()
+        window.settings_page._refresh_completion_label()
+        pump(app, 100)
+        check("未完成时「今天还没完成」按钮不可点", not window.settings_page.clear_completion_btn.isEnabled())
+        completion_mod.mark_chain_success(["March7thAssistant"])
+        pump(app, 1200)
+        check(
+            "外部写入完成标记后标签自动变「已完成」",
+            "已完成" in window.settings_page.completion_label.text(),
+        )
+        check("完成后恢复按钮可点", window.settings_page.clear_completion_btn.isEnabled())
+        completion_mod.clear()
+        pump(app, 1200)
+        check(
+            "外部清除标记后标签自动回到「未完成」",
+            "未完成" in window.settings_page.completion_label.text(),
+        )
+        window.settings_page._refresh_completion_label()
+        pump(app, 100)
+
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
         # 整份配置；改成合并到「停下 400ms 后」落盘一次。
