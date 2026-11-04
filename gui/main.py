@@ -48,7 +48,7 @@ from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
-    FlowLayout,
+    FlowHost,
     HoverGlowCard,
     StatusDot,
     add_shadow,
@@ -451,8 +451,12 @@ class MainWindow(QMainWindow):
         cards_title.setObjectName("sectionTitle")
         root.addWidget(cards_title)
         # 用 FlowLayout 而非 QHBoxLayout：5 张卡横排会把窗口最小宽度顶到 1592px，
-        # 1366/1440 宽的笔记本上窗口撑出屏幕。流式布局按可用宽度自动折行。
-        cards_row = FlowLayout(h_spacing=12, v_spacing=12)
+        # 1366/1440 宽的笔记本上窗口撑出屏幕。流式布局按可用宽度自动折行；
+        # 外层 FlowHost 负责把「折成几行就有多高」报给父布局，否则第二行会被
+        # 画到下面的页签上面（窄窗口下实测重叠）。
+        cards_host = FlowHost(h_spacing=12, v_spacing=12)
+        cards_row = cards_host.flow()
+        self.cards_host = cards_host
         for key, spec in (config.registry().get("projects", {}) or {}).items():
             card = ProjectCard(
                 key, spec, self._project_color(key),
@@ -461,7 +465,7 @@ class MainWindow(QMainWindow):
             )
             self.cards[key] = card
             cards_row.addWidget(card)
-        root.addLayout(cards_row)
+        root.addWidget(cards_host)
 
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)

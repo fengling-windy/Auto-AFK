@@ -559,6 +559,22 @@ def test_main_window(app):
         pump(app, 80)
         check("resize(1360) 真正生效，不被最小宽度顶回", window.width() <= 1366)
 
+        # 折行后的第二行项目卡不能压到下面的页签上。历史缺陷：FlowLayout 直接
+        # addLayout 进 QVBoxLayout，父布局只按「单卡高度」分配空间，1062px 宽时
+        # 第二行卡片被画在实时日志页签上面（两个控件互相重叠）。
+        cards_bottom = max(
+            (card.geometry().y() + card.geometry().height()) for card in window.cards.values()
+        )
+        tabs_top = window.tabs.parentWidget().mapTo(
+            window, window.tabs.parentWidget().rect().topLeft()
+        ).y()
+        check("折行后的项目卡不会压住下方页签", cards_bottom <= tabs_top)
+        host = window.cards_host
+        check(
+            "卡片容器的要求高度随折行数变化（宽屏一行、窄屏两行）",
+            host.heightForWidth(1600) < host.heightForWidth(1000),
+        )
+
         # 导航指示条必须落在被选中项上，不能在左上角画出孤立的蓝色块。
         # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中
         # 之前用 QWidget 默认几何 100x30 @ (0,0)，压住品牌 Logo。

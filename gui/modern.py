@@ -163,6 +163,59 @@ class FlowLayout(QLayout):
         return y + row_height - rect.y() + margins.bottom()
 
 
+class FlowHost(QWidget):
+    """承载 FlowLayout 的容器：把「当前宽度下需要几行」的高度报给父布局。
+
+    为什么需要它：FlowLayout 直接 addLayout 进 QVBoxLayout 时，父布局只按
+    sizeHint（单张卡的高度）分配空间，折行后的第二行会被画到下面的控件上面
+    （实测 1062 宽时第二行项目卡压住了实时日志的页签）。QWidget 的
+    heightForWidth 只有在容器自己身上才被父布局稳定采纳，所以外面套一层。
+
+    高度不写死成两行：宽窗口下只要一行，硬撑着两行的高度会白占屏幕。
+    sizeHint / minimumSizeHint 都按当前宽度算，窗口从宽变窄时布局会跟着
+    要求更多高度（这也让 MainWindow 的最小高度在窄窗口下自然抬高，
+    而不是让内容重叠）。
+    """
+
+    def __init__(self, h_spacing=12, v_spacing=12, parent=None):
+        super().__init__(parent)
+        self._flow = FlowLayout(self, h_spacing=h_spacing, v_spacing=v_spacing)
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def flow(self):
+        return self._flow
+
+    def _rows_height(self):
+        width = self.width()
+        if width <= 0 and self.parentWidget() is not None:
+            width = self.parentWidget().width()
+        if width <= 0:
+            width = 1000
+        height = self._flow.heightForWidth(int(width))
+        if height <= 0:
+            height = self._flow.minimumSize().height()
+        return int(height)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._flow.heightForWidth(int(width))
+
+    def sizeHint(self):
+        return QSize(self._flow.minimumSize().width(), self._rows_height())
+
+    def minimumSizeHint(self):
+        return QSize(self._flow.minimumSize().width(), self._rows_height())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # 折行数量随宽度变化，让父布局重新按新的高度需求分配空间
+        self.updateGeometry()
+
+
 APP_QSS = """
 * {
     font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
