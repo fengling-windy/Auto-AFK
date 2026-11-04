@@ -213,6 +213,23 @@ class NavRail(QWidget):
             self._animate_indicator_to(y)
         else:
             self._move_indicator(y)
+        self._ensure_item_visible(item)
+
+    def _ensure_item_visible(self, item):
+        """把选中的导航项滚进视口。
+
+        历史缺陷：导航项放进 QScrollArea（项目一多时不再顶高窗口最小高度）之后，
+        选中一个靠后的项目，侧栏滚动位置仍停在顶部，高亮和指示条都落在视口外，
+        用户只看得到「项目00…项目15」——看起来像点了没反应。实测注册表 25 个
+        带界面项目时导航到 P20，scroll value 仍是 0，item 在视口内 y=882。
+        """
+        if item is None:
+            return
+        try:
+            self._scroll.ensureWidgetVisible(item, 0, 8)
+        except RuntimeError:
+            # 项刚被 deleteLater 的情况，忽略即可
+            return
 
     def active_key(self):
         checked = self._group.checkedButton()

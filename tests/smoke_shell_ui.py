@@ -174,6 +174,37 @@ def test_nav_rail(app):
     check("finish 后新增项点击只发一次信号", late_got == ["page:Late"])
     nav.hide()
 
+    # 导航项多到超出侧栏高度时，选中靠后的项目必须自动滚进视口。
+    # 历史缺陷：导航项放进 QScrollArea（免得项目一多就把窗口最小高度顶上去）
+    # 之后，set_active 只挪指示条、不动滚动位置，选中项与高亮都在视口外，
+    # 用户点完看起来像没反应。
+    tall = NavRail()
+    tall.resize(196, 240)
+    tall.add_item("overview", "总览")
+    for index in range(25):
+        tall.add_item("page:P{0:02d}".format(index), "项目{0:02d}".format(index))
+    tall.add_item("settings", "设置")
+    tall.finish()
+    tall.show()
+    pump(app, 60)
+    scroll_bar = tall._scroll.verticalScrollBar()
+    check("导航项多于视口时出现滚动条", scroll_bar.maximum() > 0)
+    viewport = tall._scroll.viewport()
+    tall.set_active("page:P20", animate=False)
+    pump(app, 80)
+    target_item = tall.item_for_key("page:P20")
+    item_top = target_item.mapTo(viewport, target_item.rect().topLeft()).y()
+    item_bottom = item_top + target_item.height()
+    check("选中靠后的导航项会自动滚进视口", item_top >= 0 and item_bottom <= viewport.height())
+    indicator_top = tall._indicator.mapTo(viewport, tall._indicator.rect().topLeft()).y()
+    check("指示条与选中项一起进入视口", 0 <= indicator_top and indicator_top < viewport.height())
+    tall.set_active("overview", animate=False)
+    pump(app, 80)
+    first_item = tall.item_for_key("overview")
+    first_top = first_item.mapTo(viewport, first_item.rect().topLeft()).y()
+    check("选回顶部项时滚动区跟着回到顶部", first_top >= 0 and first_top < viewport.height())
+    tall.hide()
+
 
 def test_settings_page(app):
     # 干净起点
