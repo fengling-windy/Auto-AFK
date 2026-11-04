@@ -59,6 +59,7 @@ class SettingsPage(QWidget):
     def __init__(self, log_fn=None, registry=None, parent=None):
         super().__init__(parent)
         self._log = log_fn or (lambda *a, **k: None)
+        self._registry_injected = registry is not None
         self._registry = registry if registry is not None else config.registry()
         self._loading = True
 
@@ -444,6 +445,10 @@ class SettingsPage(QWidget):
             silent_set = {str(k) for k in ((settings.get("gui") or {}).get("silent_open_projects") or [])}
             for key, check in self.silent_checks.items():
                 check.setChecked(key in silent_set)
+            # 运行顺序也要跟着刷新：之前漏了这一项，外部改了 chain.order
+            # （或直接在「设置」tab 里改了 yaml 保存）再回来，列表还是旧顺序，
+            # 用户以为没生效。重建而不是原地重排，避免丢掉新增的项目。
+            self._reload_order_list()
             post_cfg = settings.get("post_actions") or {}
             idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
             self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -453,9 +458,25 @@ class SettingsPage(QWidget):
             self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
             self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
             self.idle_skip_check.setChecked(bool(idle_cfg.get("skip_if_completed_today", True)))
+            mode = str(autostart.status().get("mode") or autostart.MODE_TRAY)
+            mode_idx = self.autostart_mode.findData(mode)
+            self.autostart_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
+            self.autostart_check.setChecked(bool(autostart.status().get("enabled")))
             self.widget_check.setChecked(bool((settings.get("gui") or {}).get("widget_enabled", False)))
             self._refresh_idle_hint()
             self._refresh_autostart_hint()
             self._refresh_completion_label()
         finally:
             self._loading = False
+
+    def _reload_order_list(self):
+        # 只在注册表由外面注入时不动它（测试/预览构造用假注册表），
+        # 正常运行时重读一次，让运行中新增的项目也能出现在列表里。
+        if not self._registry_injected:
+            self._registry = config.registry()
+        self.order_list.clear()
+        for key in self._ordered_project_keys():
+            spec = (self._registry.get("projects", {}) or {}).get(key) or {}
+            item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
+            item.setData(Qt.UserRole, key)
+            self.order_list.addItem(item)

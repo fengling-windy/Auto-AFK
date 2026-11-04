@@ -185,11 +185,18 @@ def test_settings_page(app):
     external = config.settings()
     external.setdefault("gui", {})["silent_open_projects"] = ["Beta"]
     external["post_actions"]["after_all"] = "exit"
+    # 历史缺陷：reload_from_disk 不刷新「项目运行顺序」列表，外部改了
+    # chain.order（或直接在「设置」tab 里改 yaml 保存）再回来，界面还是旧顺序。
+    external.setdefault("chain", {})["order"] = ["Gamma", "Beta", "Alpha"]
     config.save_yaml(config.SETTINGS_YAML, external)
     page.reload_from_disk()
     pump(app, 40)
     check("reload 后勾选跟随文件", page.silent_checks["Beta"].isChecked() and not page.silent_checks["Alpha"].isChecked())
     check("reload 后操作跟随文件", page.post_combo.currentData() == "exit")
+    reloaded_order = [
+        page.order_list.item(i).data(Qt.UserRole) for i in range(page.order_list.count())
+    ]
+    check("reload 后运行顺序列表跟随文件", reloaded_order == ["Gamma", "Beta", "Alpha"])
     page.hide()
 
 
@@ -552,6 +559,38 @@ def test_main_window(app):
                 and window.report_list.item(0).data(Qt.UserRole) is None
             )
             check("错误报告页不会是完全空白", window.report_list.count() > 0 or has_placeholder)
+
+        # 拖动桌面小组件不能逐帧重写 settings.yaml。
+        # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
+        # 整份配置；改成合并到「停下 400ms 后」落盘一次。
+        widget = window.widget
+        check("主窗口已构建小组件", widget is not None)
+        if widget is not None:
+            write_count = []
+            orig_save = config.save_yaml
+
+            def counting_save(path, data):
+                write_count.append(path)
+                return orig_save(path, data)
+
+            config.save_yaml = counting_save
+            try:
+                # 离屏下隐藏窗口的 move() 不会产生 moveEvent，必须先 show 出来
+                widget.show()
+                pump(app, 80)
+                base = widget.current_position()
+                for step in range(20):
+                    widget.move(base[0] + step * 3, base[1] + step * 2)
+                pump(app, 40)
+                check("拖动过程中不写配置文件（防抖）", len(write_count) == 0)
+                deadline = time.monotonic() + 1.5
+                while not write_count and time.monotonic() < deadline:
+                    pump(app, 30)
+                check("停下后只落盘一次", len(write_count) == 1)
+                saved_pos = (window.settings.get("gui") or {}).get("widget_pos")
+                check("落盘位置与小组件实际位置一致", list(saved_pos or []) == widget.current_position())
+            finally:
+                config.save_yaml = orig_save
 
         # _poll 全流程：快照/胶囊/导航点/嵌入页 tick
         window._poll()

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import threading
@@ -301,6 +302,11 @@ class MainWindow(QMainWindow):
 
         # 桌面小组件
         self.widget = None
+        # 拖动时合并落盘：moveEvent 按鼠标采样率触发，逐帧写 yaml 会有几十次磁盘写入。
+        self._widget_pos_timer = QTimer(self)
+        self._widget_pos_timer.setSingleShot(True)
+        self._widget_pos_timer.setInterval(400)
+        self._widget_pos_timer.timeout.connect(self._flush_widget_pos)
         if not self.no_widget:
             self._build_widget()
 
@@ -991,21 +997,40 @@ class MainWindow(QMainWindow):
         )
         self.widget.set_move_handler(self._on_widget_moved)
         gui_cfg = self.settings.get("gui") or {}
-        self.widget.restore_position(gui_cfg.get("widget_pos"))
+        # 恢复位置本身也会触发 moveEvent；用标志位避免把「回填初始位置」
+        # 当成用户拖动去落盘。
+        self._widget_restoring = True
+        try:
+            self.widget.restore_position(gui_cfg.get("widget_pos"))
+        finally:
+            self._widget_restoring = False
         if bool(gui_cfg.get("widget_enabled", False)):
             self.widget.show()
         self.widget.tick(self.supervisor.status_snapshot(), self.idle_watcher.status(),
                          self.idle_watcher.threshold_seconds())
 
     def _on_widget_moved(self, pos):
+        """记录小组件位置。
+
+        拖动过程中 moveEvent 会按鼠标采样率触发（实测一次拖动 60 帧 → 60 次回调），
+        每次都整体重写 settings.yaml 会造成高频磁盘写入。这里只更新内存值，
+        再用单次定时器把落盘合并到「松手后 400ms」一次。
+        """
         gui_cfg = self.settings.setdefault("gui", {})
-        if list(gui_cfg.get("widget_pos") or []) == list(pos):
+        target = [int(pos[0]), int(pos[1])]
+        if list(gui_cfg.get("widget_pos") or []) == target:
             return
-        gui_cfg["widget_pos"] = [int(pos[0]), int(pos[1])]
+        gui_cfg["widget_pos"] = target
+        if getattr(self, "_widget_restoring", False):
+            return
+        self._widget_pos_timer.start()
+
+    def _flush_widget_pos(self):
+        self._widget_pos_timer.stop()
         try:
             config.save_yaml(config.SETTINGS_YAML, self.settings)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.gui").warning("failed to persist widget position: %s", exc)
 
     def toggle_widget(self, checked=None):
         if self.widget is None:
@@ -1124,6 +1149,10 @@ class MainWindow(QMainWindow):
 
     def _quit(self):
         self.timer.stop()
+        # 退出前把还没落盘的小组件位置写掉（拖动后立刻关程序否则会丢）
+        timer = getattr(self, "_widget_pos_timer", None)
+        if timer is not None and timer.isActive():
+            self._flush_widget_pos()
         if getattr(self, "scheduler", None) is not None:
             self.scheduler.stop()
         if getattr(self, "idle_watcher", None) is not None:
