@@ -506,7 +506,13 @@ class MainWindow(QMainWindow):
         enable_smooth_scroll(self.report_list)
         reports_layout.addLayout(report_controls)
         reports_layout.addWidget(self.report_list)
+        # 记录引用：切到本页时按需刷新（列表不预先加载——启动时扫盘会拖慢开窗，
+        # 但只在点「刷新」时加载又会让用户打开本页看到空列表，误以为没有报告）。
+        self._reports_tab = reports_tab
+        self._reports_loaded = False
+        self.report_list.itemDoubleClicked.connect(lambda _item: self.open_selected_report())
         self.tabs.addTab(reports_tab, "错误报告")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.registry_edit = QPlainTextEdit()
         self._load_text(self.registry_edit, config.PROJECTS_YAML)
@@ -904,6 +910,18 @@ class MainWindow(QMainWindow):
     def _on_change(self):
         pass
 
+    def _on_tab_changed(self, index):
+        """切到「错误报告」页时按需加载一次。
+
+        历史缺陷：报告列表只在点「刷新」时填充，打开程序切到本页永远是空列表，
+        用户会以为没有错误报告（实际磁盘上有 44 份）。
+        """
+        if self.tabs.widget(index) is not getattr(self, "_reports_tab", None):
+            return
+        if self._reports_loaded:
+            return
+        self.refresh_reports()
+
     def refresh_reports(self):
         self.report_list.clear()
         for item in report.list_reports(limit=200):
@@ -911,12 +929,21 @@ class MainWindow(QMainWindow):
             list_item = QListWidgetItem(entry)
             list_item.setData(Qt.UserRole, item["dir"])
             self.report_list.addItem(list_item)
+        self._reports_loaded = True
+        if self.report_list.count() == 0:
+            placeholder = QListWidgetItem("（还没有错误报告：项目异常退出时才会生成）")
+            placeholder.setFlags(Qt.NoItemFlags)
+            placeholder.setData(Qt.UserRole, None)
+            self.report_list.addItem(placeholder)
 
     def open_selected_report(self):
         item = self.report_list.currentItem()
         if item is None:
             return
-        self._open_path(item.data(Qt.UserRole))
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        self._open_path(path)
 
     def run_doctor(self):
         self.doctor_view.setPlainText("环境自检运行中...")

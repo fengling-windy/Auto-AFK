@@ -26,6 +26,7 @@ _TMP_SETTINGS = _TMP_DIR / "settings.yaml"
 shutil.copy(_REAL_SETTINGS, _TMP_SETTINGS)
 config.SETTINGS_YAML = _TMP_SETTINGS
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from afk_core.events import EventBus
@@ -504,6 +505,26 @@ def test_main_window(app):
         window._navigate("overview")
         pump(app, 60)
         check("导航切回总览", window.stack.currentIndex() == 0)
+
+        # 「错误报告」页不能在用户首次打开时显示空列表。
+        # 历史缺陷：report_list 只在点「刷新」按钮时填充，切到本页永远 0 条
+        # （磁盘上实际有 40+ 份报告），用户会以为没有错误报告。
+        reports_index = None
+        for i in range(window.tabs.count()):
+            if window.tabs.widget(i) is window._reports_tab:
+                reports_index = i
+                break
+        check("错误报告页存在", reports_index is not None)
+        if reports_index is not None:
+            window.tabs.setCurrentIndex(reports_index)
+            pump(app, 120)
+            check("切到错误报告页会加载列表", window._reports_loaded)
+            # 空目录时也应给出一条不可选中的说明项，而不是空白
+            has_placeholder = (
+                window.report_list.count() == 1
+                and window.report_list.item(0).data(Qt.UserRole) is None
+            )
+            check("错误报告页不会是完全空白", window.report_list.count() > 0 or has_placeholder)
 
         # _poll 全流程：快照/胶囊/导航点/嵌入页 tick
         window._poll()
