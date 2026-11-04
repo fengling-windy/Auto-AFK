@@ -199,6 +199,10 @@ def make_icon():
     return QIcon(pix)
 
 
+# apply_spec 的哨兵值：区分「没传 on_gui」和「显式传 None（这个项目没有界面入口）」
+_UNSET = object()
+
+
 class ProjectCard(HoverGlowCard):
     def __init__(self, key, spec, color, on_start, on_stop, on_logs, on_gui=None):
         super().__init__()
@@ -255,17 +259,18 @@ class ProjectCard(HoverGlowCard):
         self.start_btn = AnimatedButton("启动", variant="mini")
         self.stop_btn = AnimatedButton("停止", variant="mini")
         self.logs_btn = AnimatedButton("日志", variant="mini")
-        if self.on_gui is not None:
+        # 点击时再看一眼 self.on_gui：注册表里的 gui 段可能在运行中被改掉，
+        # apply_spec 会把 on_gui 置空，这里不能把回调固定死在构造时的值上。
+        def _gui_clicked():
+            if self.on_gui is None:
+                return
+            # 防抖：点击后短暂禁用，避免双击拉起两个实例
+            self.gui_btn.setEnabled(False)
+            self.on_gui(self.key)
+            QTimer.singleShot(1500, lambda: self.gui_btn.setEnabled(True))
 
-            def _gui_clicked():
-                # 防抖：点击后短暂禁用，避免双击拉起两个实例
-                self.gui_btn.setEnabled(False)
-                self.on_gui(self.key)
-                QTimer.singleShot(1500, lambda: self.gui_btn.setEnabled(True))
-
-            self.gui_btn.clicked.connect(_gui_clicked)
-        else:
-            self.gui_btn.setVisible(False)
+        self.gui_btn.clicked.connect(_gui_clicked)
+        self.gui_btn.setVisible(self.on_gui is not None)
         self.start_btn.clicked.connect(lambda: self.on_start(self.key))
         self.stop_btn.clicked.connect(lambda: self.on_stop(self.key))
         self.logs_btn.clicked.connect(lambda: self.on_logs(self.key))
@@ -276,13 +281,15 @@ class ProjectCard(HoverGlowCard):
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
-    def apply_spec(self, spec, color=None):
-        """注册表里这个项目的显示名/颜色改了之后刷新卡片。
+    def apply_spec(self, spec, color=None, on_gui=_UNSET):
+        """注册表里这个项目的显示名/颜色/gui 入口改了之后刷新卡片。
 
         历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一律
         沿用构造时的 spec——用户在「项目注册表」里改了 display_name 再保存，
         左侧导航和副标题都变了，项目卡上的名字还是旧的，看起来像没保存成功。
-        颜色同理（settings.yaml 的 gui.project_colors 改完要跟着变）。
+        颜色同理（settings.yaml 的 gui.project_colors 改完要跟着变）；
+        「界面」按钮也一样，gui 段被删掉后按钮还留着，点下去照样去拉起一个
+        已经没有界面入口的进程。
         """
         self.spec = spec or {}
         display_name = str(self.spec.get("display_name", self.key))
@@ -290,6 +297,9 @@ class ProjectCard(HoverGlowCard):
         if self.name_label.text() != short:
             self.name_label.setText(short)
         self.name_label.setToolTip(display_name if display_name != short else "")
+        if on_gui is not _UNSET:
+            self.on_gui = on_gui
+        self.gui_btn.setVisible(self.on_gui is not None)
         if color and color != self.color:
             self.color = color
             self.accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
@@ -990,7 +1000,11 @@ class MainWindow(QMainWindow):
             if key in cards:
                 # 已存在的卡片也要跟新显示名：否则改完 display_name 保存后导航和
                 # 副标题都变了，卡片标题还是旧的。
-                cards[key].apply_spec(spec, self._project_color(key))
+                cards[key].apply_spec(
+                    spec,
+                    self._project_color(key),
+                    self.open_project_page if spec.get("gui") else None,
+                )
                 continue
             if flow is None:
                 continue

@@ -1073,6 +1073,22 @@ def test_main_window(app):
         pump(app, 300)
         check("还原配色后卡片颜色回到原来", window.cards[color_key].color == color_before)
 
+        # 注册表里去掉某个项目的 gui 段后，卡片上的「界面」按钮要收起来。
+        # 历史缺陷：gui_btn 只在 ProjectCard 构造时决定一次可见性，之后改注册表
+        # 存盘，按钮还在，点下去会去拉起一个已经没有界面入口的进程。
+        gui_key = next(k for k, spec in original_registry["projects"].items() if spec.get("gui"))
+        check("有界面入口的项目卡片显示「界面」按钮", window.cards[gui_key].gui_btn.isVisible())
+        no_gui = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        no_gui["projects"][gui_key]["gui"] = None
+        window.registry_edit.setPlainText(yaml.safe_dump(no_gui, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("去掉 gui 段后卡片「界面」按钮收起", not window.cards[gui_key].gui_btn.isVisible())
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("还原 gui 段后「界面」按钮回来", window.cards[gui_key].gui_btn.isVisible())
+
         # 删掉「当前正被日志过滤器选中的项目」后，日志区要跟着回到全部项目。
         # 历史缺陷：重建下拉框时 blockSignals 了，currentIndexChanged 不触发，
         # _rerender_log 没跑——下拉框显示「全部项目」，日志区却还是那个已经不存在
