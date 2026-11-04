@@ -114,6 +114,30 @@ def main():
     text = ev.read_text(encoding="utf-8", errors="ignore") if ev.exists() else ""
     check("事件已写入 events.jsonl（可事后排查）", "切换空闲开关" in text)
 
+    # 5) 自己发的 GUI 事件不能回流再画一遍（界面里同一行日志出现两次）
+    window.log_view.clear()
+    window.event_buffer.clear()
+    marker = "GUIMARK-" + str(int(time.time() * 1000) % 100000)
+    window._append_log("core", "info", marker)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        window._poll()
+        pump(app, 40)
+    shown = window.log_view.toPlainText().count(marker)
+    print("   同一行日志出现次数 =", shown)
+    check("GUI 自身动作只显示一次（不回声）", shown == 1)
+
+    # 6) 「清空显示」必须真的清空：切过滤下拉框会 _rerender_log 重建视图，
+    #    历史缺陷是只 clear 了控件、event_buffer 还留着，日志又被画回来。
+    window.filter_combo.setCurrentIndex(0)
+    pump(app, 100)
+    window._clear_log()
+    pump(app, 100)
+    check("清空显示后视图为空", window.log_view.document().blockCount() <= 1)
+    window.filter_combo.setCurrentIndex(max(0, window.filter_combo.count() - 1))
+    pump(app, 150)
+    check("清空显示后切过滤不会把日志画回来", window.log_view.document().blockCount() <= 1)
+
     window.hide()
     window._quit()
     config.SETTINGS_YAML = _REAL

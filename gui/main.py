@@ -857,7 +857,14 @@ class MainWindow(QMainWindow):
         self._open_path(out_log if out_log is not None else config.LOGS_DIR)
 
     def _clear_log(self):
+        """清空实时日志显示。
+
+        历史缺陷：只清空了 QPlainTextEdit，event_buffer 里的历史仍留着——用户点
+        「清空显示」后一旦切换过滤下拉框就会触发 _rerender_log，把刚清掉的日志
+        全部重新画回来。清空显示就该是清空。
+        """
         self.log_view.clear()
+        self.event_buffer.clear()
         self._log_line_count = 0
 
     def _project_color(self, project):
@@ -897,6 +904,9 @@ class MainWindow(QMainWindow):
                         "kind": "gui",
                         "level": str(level),
                         "message": str(message),
+                        # origin=gui 让 _poll 认出「这条是本进程自己刚画过的」：
+                        # 事件会经订阅队列回环一次，再渲染一遍就出现两行同样的日志。
+                        "origin": "gui",
                     }
                 )
             except Exception:
@@ -945,6 +955,11 @@ class MainWindow(QMainWindow):
             if event.get("kind") == "post_action" and (event.get("data") or {}).get("action") == "exit":
                 self._append_log("core", "info", "结束后操作：关闭 Auto-AFK")
                 QTimer.singleShot(800, self._quit)
+                continue
+            # origin=gui 的事件是本进程自己刚画到日志区的，订阅队列回流时不能再画一遍，
+            # 否则界面里同一行日志出现两次（用户看到「日志重复」）。仍留在 event_buffer
+            # 里，切过滤下拉框重建视图时它会正常出现一次。
+            if event.get("origin") == "gui":
                 continue
             if self._matches_filter(event, filter_project):
                 self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False, emit_event=False)
