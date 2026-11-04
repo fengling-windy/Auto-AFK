@@ -468,6 +468,25 @@ def test_main_window(app):
             check("导航含项目页 {0}".format(key), window.nav.item_for_key("page:" + key) is not None)
         check("默认显示总览页", window.stack.currentIndex() == 0 and window.nav.active_key() == "overview")
 
+        # 窗口不能在 1366 宽的笔记本上撑出屏幕。历史缺陷：5 张项目卡横排在一个
+        # QHBoxLayout 里，每张卡 minimumSizeHint 约 264px，把最小宽度顶到 1592px，
+        # w.resize(1360, 900) 被 Qt 直接拉回 1592。改用 FlowLayout 折行后回落。
+        min_width = window.minimumSizeHint().width()
+        check("窗口最小宽度不超过 1366（笔记本可完整显示）", min_width <= 1366)
+        window.resize(1360, 900)
+        pump(app, 80)
+        check("resize(1360) 真正生效，不被最小宽度顶回", window.width() <= 1366)
+
+        # 导航指示条必须落在被选中项上，不能在左上角画出孤立的蓝色块。
+        # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中
+        # 之前用 QWidget 默认几何 100x30 @ (0,0)，压住品牌 Logo。
+        overview_item = window.nav.item_for_key("overview")
+        ind = window.nav._indicator
+        check(
+            "导航指示条落在当前选中项上",
+            abs(ind.y() - (overview_item.y() + 8)) <= 2 and ind.height() <= overview_item.height(),
+        )
+
         # spawn 打桩：页面上的「启动界面」不会真的拉起项目 GUI
         spawn_calls = []
         window.supervisor.spawn_project_gui = lambda key, extra_args=None, report_port=None: spawn_calls.append(key) or None
