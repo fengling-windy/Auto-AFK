@@ -604,6 +604,9 @@ class MainWindow(QMainWindow):
         # 但只在点「刷新」时加载又会让用户打开本页看到空列表，误以为没有报告）。
         self._reports_tab = reports_tab
         self._reports_loaded = False
+        # 上次扫盘时报告目录的 mtime：目录没变就不重复扫（每次 200 个目录约 6ms，
+        # 但每次切页都扫一遍没有意义）；变了说明有新报告/被清理，必须重扫。
+        self._reports_mtime = None
         self.report_list.itemDoubleClicked.connect(lambda _item: self.open_selected_report())
         self.tabs.addTab(reports_tab, "错误报告")
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -1278,19 +1281,35 @@ class MainWindow(QMainWindow):
     def _on_change(self):
         pass
 
-    def _on_tab_changed(self, index):
-        """切到「错误报告」页时按需加载一次。
+    def _reports_dir_mtime(self):
+        """错误报告目录的修改时间，用来判断「列表是否需要重扫」。"""
+        try:
+            return config.REPORTS_DIR.stat().st_mtime_ns
+        except OSError:
+            return None
 
-        历史缺陷：报告列表只在点「刷新」时填充，打开程序切到本页永远是空列表，
+    def _on_tab_changed(self, index):
+        """切到「错误报告」页时刷新列表。
+
+        历史缺陷一：报告列表只在点「刷新」时填充，打开程序切到本页永远是空列表，
         用户会以为没有错误报告（实际磁盘上有 44 份）。
+        历史缺陷二：改成「只在第一次进入时加载」之后走向另一个极端——开窗之后
+        才产生的报告（链跑挂了正是这时候生成的）在本进程里永远看不到，切过来
+        仍然是「还没有错误报告」，与磁盘状态相反。现在按报告目录的 mtime 判断：
+        目录没变就直接复用列表（一次 stat，微秒级），变了才重扫。
         """
         if self.tabs.widget(index) is not getattr(self, "_reports_tab", None):
             return
-        if self._reports_loaded:
+        if self._reports_loaded and self._reports_dir_mtime() == self._reports_mtime:
             return
         self.refresh_reports()
 
     def refresh_reports(self):
+        """重扫报告目录并重建列表；尽量保留用户当前选中的报告。"""
+        selected = None
+        current = self.report_list.currentItem()
+        if current is not None:
+            selected = current.data(Qt.UserRole)
         self.report_list.clear()
         for item in report.list_reports(limit=200):
             entry = "{0}  [{1}] {2}".format(item["name"], item.get("project", ""), item.get("reason", ""))
@@ -1298,11 +1317,17 @@ class MainWindow(QMainWindow):
             list_item.setData(Qt.UserRole, item["dir"])
             self.report_list.addItem(list_item)
         self._reports_loaded = True
+        self._reports_mtime = self._reports_dir_mtime()
         if self.report_list.count() == 0:
             placeholder = QListWidgetItem("（还没有错误报告：项目异常退出时才会生成）")
             placeholder.setFlags(Qt.NoItemFlags)
             placeholder.setData(Qt.UserRole, None)
             self.report_list.addItem(placeholder)
+        elif selected:
+            for row in range(self.report_list.count()):
+                if self.report_list.item(row).data(Qt.UserRole) == selected:
+                    self.report_list.setCurrentRow(row)
+                    break
 
     def open_selected_report(self):
         item = self.report_list.currentItem()

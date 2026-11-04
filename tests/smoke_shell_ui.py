@@ -764,6 +764,41 @@ def test_main_window(app):
             )
             check("错误报告页不会是完全空白", window.report_list.count() > 0 or has_placeholder)
 
+        # 开窗之后才产生的报告必须能被看到。
+        # 历史缺陷：「只在第一次进入时扫盘」实现成 _reports_loaded 之后永不重扫，
+        # 链跑挂了生成的报告（正是最需要看的那种）切过来仍然是「还没有错误报告」，
+        # 界面与磁盘状态相反。现在按报告目录 mtime 判断是否需要重扫。
+        if reports_index is not None:
+            # 只数真实报告条目：空目录时会有一条 data 为 None 的占位说明项，
+            # 它会被第一条真报告顶掉，所以不能拿总条数当基线。
+            def _real_reports():
+                return [
+                    window.report_list.item(i).data(Qt.UserRole)
+                    for i in range(window.report_list.count())
+                    if window.report_list.item(i).data(Qt.UserRole) is not None
+                ]
+
+            before = len(_real_reports())
+            new_dir = Path(config.REPORTS_DIR) / "20260101_000000_SmokeProbe"
+            new_dir.mkdir(parents=True, exist_ok=True)
+            (new_dir / "snapshot.json").write_text(
+                '{"project": "SmokeProbe", "reason": "smoke"}', encoding="utf-8"
+            )
+            window.tabs.setCurrentIndex(0)
+            pump(app, 60)
+            window.tabs.setCurrentIndex(reports_index)
+            pump(app, 150)
+            names = _real_reports()
+            check("开窗后新生成的错误报告会出现在列表里", str(new_dir) in names)
+            check("重扫后列表条数增加", len(names) == before + 1)
+            # 目录没变时不该重复扫盘（否则每次切页都要 stat 200 个目录）
+            mtime_before = window._reports_mtime
+            window.tabs.setCurrentIndex(0)
+            pump(app, 60)
+            window.tabs.setCurrentIndex(reports_index)
+            pump(app, 120)
+            check("报告目录没变时不重复扫盘", window._reports_mtime == mtime_before)
+
         # 在「设置」tab 直接改 settings.yaml 保存后，总览页头部的开关必须跟着变。
         # 历史缺陷：_save_text 只重读了 self.settings，头部三个控件（运行前更新 /
         # 定时启动 / 时间）仍是构造时的旧值，界面与文件不一致，用户会以为没保存成功。
