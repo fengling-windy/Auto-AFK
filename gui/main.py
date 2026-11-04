@@ -1476,6 +1476,15 @@ class MainWindow(QMainWindow):
         # 单行高度与行间距交给滚动区，让它在空间不够时把高度吸附到整行，
         # 避免出现「第二行卡片被切在按钮中间」的半行。
         scroll.set_row_metrics(host.single_row_height(), host.flow().v_spacing())
+        # 最小高度至少一整行：CARDS_MIN_HEIGHT(120) 比一行卡片还矮，窗口被压到
+        # 最小时卡片会停在「未运行」那一行，四个按钮全被切掉（截图见
+        # logs/_ui_r14/min_all.png）。这里设最小高度而不是固定高度——固定高度
+        # 会和窗口高度互相反馈（钉高 → 窗口最小高度变大 → 布局撑高 → 再钉更高）。
+        row_height = host.single_row_height()
+        if row_height > 0:
+            floor = max(CARDS_MIN_HEIGHT, row_height)
+            if scroll.minimumHeight() != floor:
+                scroll.setMinimumHeight(floor)
         desired = host.rows_height_for(width)
         if desired <= 0:
             return
@@ -1611,7 +1620,14 @@ class CardsScrollArea(QScrollArea):
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
-        height = max(hint.height(), CARDS_MIN_HEIGHT)
+        # 知道了单行高度以后，最小高度至少得放得下一整行：CARDS_MIN_HEIGHT 只有
+        # 120px，比一行卡片（168px）还矮，窗口被压到最小时卡片会被切在「未运行」
+        # 那一行，四个按钮全看不见（截图见 logs/_ui_r14/min_all.png）。
+        # 留出整行的高度，宁可少放一行也不要把卡片切一半。
+        floor = CARDS_MIN_HEIGHT
+        if self._row_height > 0:
+            floor = max(floor, self._row_height)
+        height = max(hint.height(), floor)
         return QSize(hint.width(), height)
 
 

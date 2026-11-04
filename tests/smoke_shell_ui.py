@@ -623,6 +623,16 @@ def test_main_window(app):
             cards_scroll.content_height() % max(1, host.single_row_height() + host.flow().v_spacing())
             in (0, host.single_row_height()),
         )
+        # 窗口被压到最小高度时，卡片区也必须留得下一整行：CARDS_MIN_HEIGHT(120)
+        # 比一行卡片(=179)矮，否则卡片停在「未运行」那行、四个按钮全被切掉。
+        check(
+            "窗口最小高度下卡片区放得下整行（按钮不被切）",
+            cards_scroll.minimumHeight() >= host.single_row_height(),
+        )
+        check(
+            "窗口最小高度至少是一整行卡片 + 其余控件",
+            window.minimumSizeHint().height() >= cards_scroll.minimumHeight(),
+        )
 
         # 1366x768 笔记本（可用 728）上必须能同时看到两行卡片：历史缺陷是卡片区
         # 只拿到一行高度、第二行卡片被切在按钮中间，看起来像界面画坏了。
