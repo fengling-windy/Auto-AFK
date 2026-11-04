@@ -230,6 +230,9 @@ def test_tray_mode_idle_prompt(app):
         captured["idle_text"] = self._idle_text
         captured["remaining"] = getattr(self, "_remaining", None)
         captured["window_visible"] = window.isVisible()
+        # 历史缺陷：_prompt_idle 只 exec() 不 start_countdown()，倒计时从未跑起来，
+        # 界面写着「30 秒后未选择将自动运行」却会一直等人点按钮。
+        captured["timer_active"] = self._timer.isActive()
         return 0
 
     ip.IdlePromptDialog.exec = spy_exec
@@ -251,6 +254,8 @@ def test_tray_mode_idle_prompt(app):
     check("弹窗那一刻窗口已可见（用户能真正看到）", captured.get("window_visible") is True)
     check("提示框携带了空闲时长文案", "30 分" in str(captured.get("idle_text") or "")
           or "空闲" in str(captured.get("idle_text") or ""))
+    check("提示框进入弹窗时倒计时已在跑（否则永远不会自动开始）",
+          captured.get("timer_active") is True)
     check("托盘图标可用（用户可据此找回窗口）", window.tray is not None and window.tray.isVisible())
     window.hide()
     window._quit()

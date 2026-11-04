@@ -1116,6 +1116,10 @@ class MainWindow(QMainWindow):
         )
         self._idle_dialog = dialog
         self._show_main_window()
+        # 必须启动倒计时：历史缺陷是这里只 exec() 不 start_countdown()，
+        # 定时器从未跑起来，提示框界面上写着「30 秒后未选择将自动运行」，
+        # 实际会一直卡在那里等人点按钮（用户离开电脑就永远挂不上机）。
+        dialog.start_countdown()
         dialog.exec()
         decision = dialog.decision
         if decision == DECISION_NONE:
