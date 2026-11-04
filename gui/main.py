@@ -90,6 +90,18 @@ STATUS_TEXT = {
     "stopped": "已停止",
 }
 
+# 没有 pid/exit/message 可显示时的详情行文案。必须按状态给，不能统一写
+# 「运行中…」，否则排队中的卡片会显示成「等待 / 运行中...」自相矛盾。
+STATUS_DETAIL_FALLBACK = {
+    "running": "运行中…",
+    "success": "已完成",
+    "success_unverified": "已完成（未校验）",
+    "pending": "等待启动",
+    "failed": "已失败",
+    "stopped": "已停止",
+    "hang": "无响应",
+}
+
 PROJECT_COLORS = {
     "March7thAssistant": "#4fc3f7",
     "BAAH": "#81c784",
@@ -281,7 +293,10 @@ class ProjectCard(HoverGlowCard):
             parts.append("exit={0}".format(run["exit_code"]))
         if run.get("last_message"):
             parts.append(run["last_message"][:110])
-        self.detail_label.setText(" | ".join(parts) if parts else "运行中...")
+        # 兜底文案必须跟状态走：历史缺陷是无条件写「运行中...」，于是排队中的
+        # 卡片（status=pending、还没有 pid/exit/message）也显示成「等待 / 运行中...」，
+        # 状态行和详情行互相矛盾，用户以为项目已经在跑。
+        self.detail_label.setText(" | ".join(parts) if parts else STATUS_DETAIL_FALLBACK.get(status, ""))
         self.attempt_label.setText("尝试 {0} 次".format(run.get("attempt", 1)))
 
 

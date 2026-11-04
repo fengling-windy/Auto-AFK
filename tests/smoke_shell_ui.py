@@ -141,13 +141,19 @@ def test_nav_rail(app):
         nav.set_active(key, animate=True)
         pump(app, 20)
     check("连点后仍有动画在跑", nav._anim is not None)
-    deadline = time.monotonic() + 2.0
-    while nav._anim is not None and time.monotonic() < deadline:
+    # 等「动画停 + 指示条真的落到最后选中项」这两个条件同时成立。
+    # 只在固定时限里等 _anim 归零是不够的：整机满载时 220ms 的动画跑到一半
+    # 就被判定超时，紧接着的落位断言会因为指示条还在半路而偶发失败。
+    target_y = nav.item_for_key("page:Alpha").y() + 8
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if nav._anim is None and abs(nav._indicator.y() - target_y) <= 2:
+            break
         pump(app, 20)
     check("动画结束引用被清空（不留孤儿对象）", nav._anim is None)
     check(
         "连点结束后指示条落在最后选中项上",
-        abs(nav._indicator.y() - (nav.item_for_key("page:Alpha").y() + 8)) <= 2,
+        abs(nav._indicator.y() - target_y) <= 2,
     )
 
     # finish() 之后动态追加的导航项，点击只应发出一次 navigate。
@@ -577,6 +583,22 @@ def test_main_window(app):
             check("导航含项目页 {0}".format(key), window.nav.item_for_key("page:" + key) is not None)
         check("默认显示总览页", window.stack.currentIndex() == 0 and window.nav.active_key() == "overview")
 
+        # 卡片的详情行不能跟状态行互相矛盾。历史缺陷：update_state 的兜底文案
+        # 无条件写「运行中...」，排队中的项目（status=pending、还没有 pid/exit/
+        # message）显示成「等待」+「运行中...」，用户以为它已经在跑了。
+        card = window.cards[gui_projects[0]]
+        card.update_state({"status": "pending"})
+        check("排队中的卡片不显示成「运行中」", "运行中" not in card.detail_label.text())
+        card.update_state({"status": "running", "pid": 123})
+        check("运行中的卡片详情显示 pid", "pid=123" in card.detail_label.text())
+        card.update_state({"status": "hang"})
+        check("卡死的卡片不显示成「运行中」", "运行中" not in card.detail_label.text())
+        # 复原：上面改了卡片文案，卡片高度跟着变，会影响后面「整行吸附」那条
+        # 断言的单行高度（同一份 content_height 却按新行高取模）。
+        card.update_state(None)
+        window._sync_cards_height()
+        pump(app, 60)
+
         # 窗口不能在 1366 宽的笔记本上撑出屏幕。历史缺陷：5 张项目卡横排在一个
         # QHBoxLayout 里，每张卡 minimumSizeHint 约 264px，把最小宽度顶到 1592px，
         # w.resize(1360, 900) 被 Qt 直接拉回 1592。改用 FlowLayout 折行后回落。
@@ -626,10 +648,18 @@ def test_main_window(app):
             "卡片区期望高度不超过折行所需高度",
             0 < cards_scroll.content_height() <= host.rows_height_for(host.width()),
         )
+        # 用「实测卡片高度」算行数：CardsScrollArea 内部记的 _row_height 取的是
+        # sizeHint 最大值，和 FlowLayout 排版时用的控件真实高度会差 1px，直接调
+        # rows_for() 会把 538px（三行）算成两行，那不是界面问题而是度量口径问题。
+        row_h = min((c.height() for c in window.cards.values() if c.height() > 0), default=0)
+        vsp = host.flow().v_spacing()
+        step = max(1, row_h + vsp)
+        content = cards_scroll.content_height()
+        snapped_rows = max(1, (content + vsp) // step) if row_h > 0 else 0
+        expected = snapped_rows * step - vsp
         check(
             "卡片区高度按整行吸附（不会切半行卡片）",
-            cards_scroll.content_height() % max(1, host.single_row_height() + host.flow().v_spacing())
-            in (0, host.single_row_height()),
+            snapped_rows >= 1 and abs(content - expected) <= 3,
         )
         # 窗口被压到最小高度时，卡片区也必须留得下一整行：CARDS_MIN_HEIGHT(120)
         # 比一行卡片(=179)矮，否则卡片停在「未运行」那行、四个按钮全被切掉。

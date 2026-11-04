@@ -108,8 +108,12 @@ def run_one(name, timeout):
     if not ok:
         text = (proc.stdout or b"").decode("utf-8", "replace")
         err = (proc.stderr or b"").decode("utf-8", "replace")
-        tail = (text + err).strip().splitlines()[-3:]
-        tail = " | ".join(tail)
+        lines = [line for line in (text + err).strip().splitlines() if line.strip()]
+        # 只留最后 3 行会把「到底哪条断言挂了」这件事丢掉：进程末尾往往是
+        # Qt 离屏插件的噪声（propagateSizeHints / raise 之类），真正的 FAIL
+        # 行在中间。这里优先报 FAIL 行，没有 FAIL 行时再退回尾部。
+        failed = [line.strip() for line in lines if line.lstrip().startswith("FAIL")]
+        tail = " | ".join(failed[:5] if failed else lines[-3:])
     return ("PASS" if ok else "FAIL", elapsed, tail)
 
 

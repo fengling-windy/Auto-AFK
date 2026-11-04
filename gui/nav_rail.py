@@ -214,7 +214,7 @@ class NavRail(QWidget):
         anim.setEndValue(y)
         anim.valueChanged.connect(lambda v: self._move_indicator(float(v)))
         anim.finished.connect(anim.deleteLater)
-        anim.finished.connect(self._clear_indicator_anim)
+        anim.finished.connect(self._snap_indicator_to_active)
         self._anim = anim
         anim.start()
 
@@ -229,6 +229,20 @@ class NavRail(QWidget):
 
     def _clear_indicator_anim(self):
         self._anim = None
+
+    def _snap_indicator_to_active(self):
+        """动画结束时把指示条对齐到当前选中项的**实际**位置。
+
+        valueChanged 的终点是动画启动那一刻记下的 item.y()，而导航项在动画
+        运行期间还会因为布局重排（窗口 resize、分组标题出现）改变位置：实测
+        出现过动画停在 182、选中项实际已在 132——指示条落在两个导航项之间，
+        看起来像「高亮错了」。收尾时按当前几何重新定位一次。
+        """
+        self._clear_indicator_anim()
+        active = self._group.checkedButton()
+        if active is None:
+            return
+        self._move_indicator(float(active.y()))
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
