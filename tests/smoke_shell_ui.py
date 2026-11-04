@@ -250,6 +250,12 @@ def test_settings_page(app):
         page.order_list.item(i).data(Qt.UserRole) for i in range(page.order_list.count())
     ]
     check("reload 后运行顺序列表跟随文件", reloaded_order == ["Gamma", "Beta", "Alpha"])
+    # 历史缺陷：列表高度写死 168px，而 QSS 每行 44px，5 个项目只显示 3 行半，
+    # 第 4 行被切在中间（看起来像画坏了）。高度必须按行数算。
+    row_h = max(1, page.order_list.sizeHintForRow(0))
+    check("运行顺序列表放得下所有行（不切半行）",
+          page.order_list.viewport().height() >= page.order_list.count() * row_h - 4)
+    check("运行顺序列表行多时不再出现滚动条", page.order_list.verticalScrollBar().maximum() == 0)
     page.hide()
 
 

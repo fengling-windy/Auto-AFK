@@ -114,13 +114,13 @@ class SettingsPage(QWidget):
         self.order_list = QListWidget()
         self.order_list.setObjectName("orderList")
         self.order_list.setDragDropMode(QListWidget.InternalMove)
-        self.order_list.setFixedHeight(168)
         enable_smooth_scroll(self.order_list)
         for key in self._ordered_project_keys():
             spec = self._registry["projects"][key]
             item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
             item.setData(Qt.UserRole, key)
             self.order_list.addItem(item)
+        self._fit_order_list_height()
         self.order_list.model().rowsMoved.connect(self._save_order)
         order_row.addWidget(self.order_list, 1)
         btn_col = QVBoxLayout()
@@ -513,6 +513,26 @@ class SettingsPage(QWidget):
         finally:
             self._loading = False
 
+    def _fit_order_list_height(self):
+        """让列表高度正好放下所有行。
+
+        历史缺陷：高度写死 168px，而 QSS 把每行撑到 44px（padding 7px + 字体），
+        5 个项目只能完整显示 3 行，第 4 行被切在中间——看起来像界面画坏了，
+        用户还会以为「绝区零一条龙」后面没有别的内容。这里按行数算高度，
+        项目变多时列表跟着长（页面本来就有滚动区）。
+        """
+        count = self.order_list.count()
+        if count <= 0:
+            return
+        row = self.order_list.sizeHintForRow(0)
+        if row <= 0:
+            # QSS 还没生效时 sizeHintForRow 会返回 -1，先按经验值算，稍后再校准。
+            row = 44
+        frame = self.order_list.frameWidth() * 2
+        # QSS 给 QListWidget 设了 padding: 4px，视口比控件小 8px。
+        padding = 8
+        self.order_list.setFixedHeight(count * row + frame + padding)
+
     def _reload_order_list(self):
         # 只在注册表由外面注入时不动它（测试/预览构造用假注册表），
         # 正常运行时重读一次，让运行中新增的项目也能出现在列表里。
@@ -524,3 +544,4 @@ class SettingsPage(QWidget):
             item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
             item.setData(Qt.UserRole, key)
             self.order_list.addItem(item)
+        self._fit_order_list_height()
