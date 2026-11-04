@@ -21,6 +21,8 @@ from PySide6.QtGui import QColor, QEnterEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QPlainTextEdit, QWidget
 
 from gui.modern import (
+    ASSET_DIR,
+    APP_QSS,
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
@@ -190,6 +192,19 @@ def main():
     card.leaveEvent(QEvent(QEvent.Leave))
     pump(app, 240)
     check("卡片离开后悬停过渡回落到 0", card._hover <= 0.01)
+
+    # -- 9. QSS 箭头资源：原生控件的箭头必须走 SVG，不能退回 Qt 默认浅色块 -----
+    # 历史缺陷：QSpinBox 的上下按钮 / QComboBox 的 drop-down 未写 QSS 时，
+    # Qt 用默认样式绘制，在深色圆角输入框里画出两个越出边界的浅色小方块。
+    # 修法是给按钮设 transparent 背景 + SVG image 箭头（CSS 三角形边框在
+    # QSS 里不生效，只会画出小方块，已实测）。
+    check("QSS 已把占位符替换成实际资源目录", "__ASSET_DIR__" not in APP_QSS)
+    for asset in ("arrow_up.svg", "arrow_down.svg", "chevron.svg"):
+        path = Path(ASSET_DIR) / asset
+        check("箭头资源存在 {0}".format(asset), path.is_file())
+        check("QSS 引用了 {0}".format(asset), asset in APP_QSS)
+    check("QSpinBox 上下按钮背景透明", "QSpinBox::up-button" in APP_QSS and "background: transparent" in APP_QSS)
+    check("QComboBox 下拉箭头有独立样式", "QComboBox::down-arrow" in APP_QSS)
 
     print()
     if FAILURES:

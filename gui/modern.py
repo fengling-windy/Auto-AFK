@@ -13,6 +13,7 @@
 
 import math
 import time
+from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -288,6 +289,33 @@ QPlainTextEdit, QTextEdit {
     selection-background-color: #2b4a7a;
     padding: 6px;
 }
+QLineEdit {
+    background: #151b28;
+    border: 1px solid #242f42;
+    border-radius: 8px;
+    padding: 5px 10px;
+    color: #ccd6ea;
+    selection-background-color: #2b4a7a;
+}
+QLineEdit:hover {
+    border-color: #33415c;
+}
+QLineEdit:focus {
+    border-color: #4c8dff;
+}
+/* 空闲提示框的倒计时条：默认样式是纯蓝色实心方块，与圆角主题不搭 */
+QProgressBar {
+    background: #151b28;
+    border: 1px solid #242f42;
+    border-radius: 4px;
+    color: #ccd6ea;
+    text-align: center;
+    font-size: 11px;
+}
+QProgressBar::chunk {
+    background: #3d7dfa;
+    border-radius: 3px;
+}
 QListWidget {
     background: #0a0c11;
     border: 1px solid #1d2432;
@@ -321,8 +349,17 @@ QComboBox:focus, QTimeEdit:focus {
     border-color: #4c8dff;
 }
 QComboBox::drop-down, QTimeEdit::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: center right;
+    width: 20px;
+    background: transparent;
     border: none;
-    width: 18px;
+    border-left: 1px solid #242f42;
+}
+QComboBox::down-arrow, QTimeEdit::down-arrow {
+    image: url("__ASSET_DIR__/chevron.svg");
+    width: 9px;
+    height: 6px;
 }
 QComboBox QAbstractItemView {
     background: #141a26;
@@ -495,7 +532,44 @@ QSpinBox:hover {
 QSpinBox:focus {
     border-color: #4c8dff;
 }
+/* Qt 默认绘制 QSpinBox 的上下按钮和 QComboBox 的箭头时，会画成浅色立体块，
+ * 在深色圆角输入框里像两个突兀的小方块越出边界（实测见 tools/ui_widget_probe.py）。
+ * 这里把按钮背景设为透明，箭头改用 SVG 资源——CSS 三角形边框技巧在 QSS 里
+ * 不生效（只会画出小方块），必须走 image。 */
+QSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 16px;
+    background: transparent;
+    border: none;
+}
+QSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 16px;
+    background: transparent;
+    border: none;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+QSpinBox::up-arrow {
+    image: url("__ASSET_DIR__/arrow_up.svg");
+    width: 8px;
+    height: 5px;
+}
+QSpinBox::down-arrow {
+    image: url("__ASSET_DIR__/arrow_down.svg");
+    width: 8px;
+    height: 5px;
+}
 """
+
+
+# 箭头图标目录。QSS 的 url() 用绝对路径最稳（相对路径依赖进程工作目录），
+# 且必须 as_posix：Windows 反斜杠在 QSS 里会被当成转义符。
+ASSET_DIR = (Path(__file__).resolve().parent / "assets").as_posix()
+APP_QSS = APP_QSS.replace("__ASSET_DIR__", ASSET_DIR)
 
 
 def apply_palette(app):
