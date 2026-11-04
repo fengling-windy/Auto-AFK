@@ -89,6 +89,7 @@ class NavRail(QWidget):
         self._group.setExclusive(True)
         self._group.buttonClicked.connect(lambda btn: self.navigate.emit(btn.key))
         self._indicator = _NavIndicator(self)
+        self._anim = None
 
     def add_item(self, key, label, section=False):
         """按添加顺序追加导航项；section=True 渲染为分组小标题。"""
@@ -104,8 +105,9 @@ class NavRail(QWidget):
         self._group.addButton(item)
         layout.addWidget(item)
         if self._finished:
-            # finish() 之后动态追加（如运行中注册的新项目）
-            self._group.buttonClicked.connect(lambda btn: self.navigate.emit(btn.key))
+            # finish() 之后动态追加（如运行中注册的新项目）。
+            # 注意这里不能再次 connect buttonClicked：__init__ 里已经连过一次，
+            # 重复连接会让一次点击发出两遍 navigate。
             item_y = float(item.y())
             if self._group.checkedButton() is item:
                 self._move_indicator(item_y)
@@ -155,6 +157,9 @@ class NavRail(QWidget):
         if abs(y - self._indicator_y) < 0.5:
             self._move_indicator(y)
             return
+        # 同一时间只留一个动画：快速连点导航项时，旧动画还在跑并被 valueChanged
+        # 持续推进，新动画也从 _indicator_y 起步，两条交错会让指示条抖动/跳回。
+        self._stop_indicator_anim()
         anim = QVariantAnimation(self)
         anim.setDuration(220)
         anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -162,7 +167,21 @@ class NavRail(QWidget):
         anim.setEndValue(y)
         anim.valueChanged.connect(lambda v: self._move_indicator(float(v)))
         anim.finished.connect(anim.deleteLater)
+        anim.finished.connect(self._clear_indicator_anim)
+        self._anim = anim
         anim.start()
+
+    def _stop_indicator_anim(self):
+        anim = self._anim
+        self._anim = None
+        if anim is not None:
+            anim.stop()
+            # stop() 不会发 finished（finished 只在自然跑到终点时发），
+            # 所以这里要自己回收，否则快速连点会攒下一堆孤儿动画对象。
+            anim.deleteLater()
+
+    def _clear_indicator_anim(self):
+        self._anim = None
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

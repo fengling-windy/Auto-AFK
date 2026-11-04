@@ -111,6 +111,33 @@ def test_nav_rail(app):
     pump(app, 60)
     check("点击导航发出 navigate 信号", got == ["page:Beta"])
     check("点击后高亮跟随", nav.active_key() == "page:Beta")
+
+    # 快速连点：同一时间只能有一个指示条动画在跑。
+    # 历史缺陷：每次 set_active(animate=True) 都新建 QVariantAnimation 且不取消
+    # 上一个，旧动画的 valueChanged 仍在推进，两条交错会让指示条抖动/跳回。
+    for key in ("page:Alpha", "settings", "overview", "page:Beta", "page:Alpha"):
+        nav.set_active(key, animate=True)
+        pump(app, 20)
+    check("连点后仍有动画在跑", nav._anim is not None)
+    deadline = time.monotonic() + 2.0
+    while nav._anim is not None and time.monotonic() < deadline:
+        pump(app, 20)
+    check("动画结束引用被清空（不留孤儿对象）", nav._anim is None)
+    check(
+        "连点结束后指示条落在最后选中项上",
+        abs(nav._indicator.y() - (nav.item_for_key("page:Alpha").y() + 8)) <= 2,
+    )
+
+    # finish() 之后动态追加的导航项，点击只应发出一次 navigate。
+    # 历史缺陷：add_item 在 _finished 分支里又 connect 了一次 buttonClicked，
+    # 而 __init__ 已经连过，一个点击会发出两遍信号。
+    nav.add_item("page:Late", "Late")
+    pump(app, 40)
+    late_got = []
+    nav.navigate.connect(lambda k: late_got.append(k))
+    nav.item_for_key("page:Late").click()
+    pump(app, 60)
+    check("finish 后新增项点击只发一次信号", late_got == ["page:Late"])
     nav.hide()
 
 
