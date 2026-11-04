@@ -529,6 +529,12 @@ class MainWindow(QMainWindow):
         self.settings_edit = QPlainTextEdit()
         self._load_text(self.settings_edit, config.SETTINGS_YAML)
         enable_smooth_scroll(self.settings_edit)
+        # 编辑器只在开窗时读过一次盘。用户在别处改设置（头部开关 / 设置页 / 托盘）
+        # 后回到本页按「保存设置」，会把界面里这份过期文本整份写回，刚改的配置
+        # 就这么被覆盖没了。用「脏标记」区分：用户动过就绝不覆盖，没动过就跟随磁盘。
+        self._settings_edit_dirty = False
+        self._settings_edit_loading = False
+        self.settings_edit.textChanged.connect(self._mark_settings_edit_dirty)
         settings_tab = self._file_tab(self.settings_edit, config.SETTINGS_YAML, "保存设置")
         self.tabs.addTab(settings_tab, "设置")
 
@@ -643,6 +649,7 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(want)
             action.blockSignals(False)
+        self._sync_settings_editor()
 
     def _silent_open_pages(self, keys):
         for key in keys:
@@ -718,9 +725,39 @@ class MainWindow(QMainWindow):
 
     def _load_text(self, edit, path):
         try:
-            edit.setPlainText(Path(path).read_text(encoding="utf-8"))
+            text = Path(path).read_text(encoding="utf-8")
         except Exception as exc:
             edit.setPlainText("# 读取失败: {0}".format(exc))
+            return
+        # 程序化回填不能算「用户编辑」，否则脏标记会一直为真，磁盘改动再也同步不过来
+        if edit is getattr(self, "settings_edit", None):
+            self._settings_edit_loading = True
+            try:
+                edit.setPlainText(text)
+            finally:
+                self._settings_edit_loading = False
+                self._settings_edit_dirty = False
+            return
+        edit.setPlainText(text)
+
+    def _mark_settings_edit_dirty(self):
+        """「设置」tab 的 yaml 编辑器被用户改动过（程序回填不算）。"""
+        if getattr(self, "_settings_edit_loading", False):
+            return
+        self._settings_edit_dirty = True
+
+    def _sync_settings_editor(self):
+        """设置文件在别处被改后，若编辑器没被用户动过就跟着刷新。
+
+        历史缺陷：settings_edit 只在开窗时读一次盘，用户在头部开关或设置页里
+        改了配置，再回到「设置」tab 点「保存设置」，会把过期文本整份写回，
+        刚改的配置被静默覆盖回旧值（实测 pre_run.enabled 改 False 后又被写回
+        True）。用户动过的编辑器不覆盖，避免吃掉他正在写的内容。
+        """
+        edit = getattr(self, "settings_edit", None)
+        if edit is None or getattr(self, "_settings_edit_dirty", False):
+            return
+        self._load_text(edit, config.SETTINGS_YAML)
 
     def _save_text(self, edit, path):
         text = edit.toPlainText()
@@ -739,6 +776,9 @@ class MainWindow(QMainWindow):
                 if getattr(self, "settings_page", None) is not None:
                     self.settings_page.reload_from_disk()
                 self._sync_header_settings()
+                # 刚写进去的就是编辑器里这一份，脏标记清掉，后续外部改动可以再同步
+                if edit is getattr(self, "settings_edit", None):
+                    self._settings_edit_dirty = False
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 
@@ -780,6 +820,7 @@ class MainWindow(QMainWindow):
         schedule["time"] = self.schedule_time.time().toString("HH:mm")
         config.save_yaml(config.SETTINGS_YAML, self.settings)
         self.settings = config.settings()
+        self._sync_settings_editor()
         self._append_log("core", "info", "定时启动: {0} {1}".format("开" if schedule["enabled"] else "关", schedule["time"]))
 
     def _toggle_pre_run(self, checked):
@@ -787,6 +828,7 @@ class MainWindow(QMainWindow):
         pre["enabled"] = bool(checked)
         config.save_yaml(config.SETTINGS_YAML, self.settings)
         self.supervisor.settings = config.settings()
+        self._sync_settings_editor()
         self._append_log("core", "info", "运行前更新: {0}".format("开" if checked else "关"))
 
     def run_updates(self):
@@ -1215,6 +1257,7 @@ class MainWindow(QMainWindow):
         config.save_yaml(config.SETTINGS_YAML, settings)
         self.settings = config.settings()
         self.supervisor.settings = self.settings
+        self._sync_settings_editor()
         return self.settings
 
     def _render_doctor(self, results):

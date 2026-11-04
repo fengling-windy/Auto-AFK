@@ -623,6 +623,34 @@ def test_main_window(app):
             window.schedule_time.time().toString("HH:mm") == "07:30",
         )
 
+        # 「设置」tab 的 yaml 编辑器不能被过期内容覆盖回旧值。
+        # 历史缺陷：settings_edit 只在开窗时读一次盘，用户在头部开关里改了设置，
+        # 再回本页点「保存设置」，会把界面里那份过期文本整份写回，刚改的配置
+        # 被静默覆盖（实测 pre_run.enabled 改成 False 又被写回 True）。
+        window.pre_run_check.setChecked(True)
+        pump(app, 60)
+        editor_cfg = yaml.safe_load(window.settings_edit.toPlainText()) or {}
+        check(
+            "头部开关改动会同步进设置 tab 编辑器",
+            bool((editor_cfg.get("pre_run") or {}).get("enabled")) is True,
+        )
+        window.pre_run_check.setChecked(False)
+        pump(app, 60)
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 60)
+        check(
+            "保存设置 tab 不会把头部刚改的值覆盖回旧值",
+            bool((config.settings().get("pre_run") or {}).get("enabled")) is False,
+        )
+        # 用户手动编辑过编辑器时，程序不得覆盖他正在写的内容
+        window.settings_edit.setPlainText("# user editing\n" + window.settings_edit.toPlainText())
+        pump(app, 60)
+        check("用户编辑后编辑器被标记为脏", window._settings_edit_dirty is True)
+        typed = window.settings_edit.toPlainText()
+        window.settings_page.idle_check.setChecked(not window.settings_page.idle_check.isChecked())
+        pump(app, 60)
+        check("用户正在编辑的内容不会被程序覆盖", window.settings_edit.toPlainText() == typed)
+
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次
         # 整份配置；改成合并到「停下 400ms 后」落盘一次。
