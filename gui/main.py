@@ -776,6 +776,11 @@ class MainWindow(QMainWindow):
                 if getattr(self, "settings_page", None) is not None:
                     self.settings_page.reload_from_disk()
                 self._sync_header_settings()
+                # 托盘勾选、桌面小组件可见性也要跟着文件走。
+                # 历史缺陷：这里原本只同步了头部三个控件，用户在「设置」tab 里把
+                # idle.enabled 改成 false 或 gui.widget_enabled 改成 true 并保存，
+                # 托盘菜单仍显示旧勾选、小组件既不出现也不消失。
+                self._on_settings_changed()
                 # 刚写进去的就是编辑器里这一份，脏标记清掉，后续外部改动可以再同步
                 if edit is getattr(self, "settings_edit", None):
                     self._settings_edit_dirty = False

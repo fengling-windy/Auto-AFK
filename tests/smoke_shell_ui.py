@@ -623,6 +623,23 @@ def test_main_window(app):
             window.schedule_time.time().toString("HH:mm") == "07:30",
         )
 
+        # 保存设置后托盘勾选与桌面小组件可见性也要跟随文件。
+        # 历史缺陷：_save_text 只同步了头部三个控件，用户在「设置」tab 把
+        # idle.enabled 关掉、gui.widget_enabled 打开并保存，托盘菜单仍显示旧勾选，
+        # 小组件既不出现也不消失，用户只能再去点一遍托盘。
+        sync_cfg = dict(window.settings)
+        sync_cfg["idle"] = dict(sync_cfg.get("idle") or {}, enabled=False)
+        sync_cfg["gui"] = dict(sync_cfg.get("gui") or {}, widget_enabled=True)
+        window.settings_edit.setPlainText(yaml.safe_dump(sync_cfg, allow_unicode=True, sort_keys=False))
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 60)
+        check("设置 tab 保存后托盘「空闲自动挂机」跟随文件", window.idle_action.isChecked() is False)
+        check("设置 tab 保存后托盘「桌面小组件」跟随文件", window.widget_action.isChecked() is True)
+        check(
+            "设置 tab 保存后桌面小组件真的显示出来",
+            window.widget is not None and window.widget.isVisible() is True,
+        )
+
         # 「设置」tab 的 yaml 编辑器不能被过期内容覆盖回旧值。
         # 历史缺陷：settings_edit 只在开窗时读一次盘，用户在头部开关里改了设置，
         # 再回本页点「保存设置」，会把界面里那份过期文本整份写回，刚改的配置
@@ -666,9 +683,14 @@ def test_main_window(app):
 
             config.save_yaml = counting_save
             try:
+                # 前面的断言可能刚刚让小组件显示出来、或留下未到期的防抖写盘，
+                # 先把这些残留动作跑干净，再开始计数，否则会把它们算进拖动里。
+                pump(app, 700)
+                write_count.clear()
                 # 离屏下隐藏窗口的 move() 不会产生 moveEvent，必须先 show 出来
                 widget.show()
                 pump(app, 80)
+                write_count.clear()
                 base = widget.current_position()
                 for step in range(20):
                     widget.move(base[0] + step * 3, base[1] + step * 2)
