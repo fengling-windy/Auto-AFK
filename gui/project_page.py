@@ -47,13 +47,14 @@ class ProjectPage(QWidget):
     FALLBACK_FIND_SEC = 15.0  # 上报超时后的回退匹配时长
     WEB_CHECK_EVERY = 10  # tick 间隔约 0.3s，每 ~3s 探测一次网页服务
 
-    def __init__(self, key, spec, color, supervisor, log_fn, parent=None):
+    def __init__(self, key, spec, color, supervisor, log_fn, open_logs_fn=None, parent=None):
         super().__init__(parent)
         self.key = key
         self.spec = spec
         self.color = color
         self.supervisor = supervisor
         self._log_fn = log_fn
+        self._open_logs_fn = open_logs_fn
         self.log_requested.connect(self._on_log_requested)
         self._gui_cfg = spec.get("gui") or {}
         self._is_web = bool(self._gui_cfg.get("web"))
@@ -149,7 +150,30 @@ class ProjectPage(QWidget):
         ) else DOT_OFF
 
     def _open_logs(self):
-        self._log(self.key, "info", "打开项目日志")
+        """打开本项目的日志目录。
+
+        历史缺陷：这里只写了一句「打开项目日志」到实时日志面板，什么也没打开——
+        按钮看起来点了没反应。现在优先调主窗口的开目录回调；没有回调时
+        （单独构造本页的测试/预览场景）退回用系统文件管理器打开日志目录。
+        """
+        handler = self._open_logs_fn
+        if handler is not None:
+            try:
+                handler(self.key)
+                return
+            except Exception as exc:
+                self._log(self.key, "error", "打开日志失败: {0}".format(exc))
+                return
+        from afk_core import config
+
+        target = config.LOGS_DIR / "projects"
+        if not target.exists():
+            target = config.LOGS_DIR
+        try:
+            os.startfile(str(target))
+            self._log(self.key, "info", "已打开日志目录: {0}".format(target))
+        except Exception as exc:
+            self._log(self.key, "error", "打开日志目录失败: {0}".format(exc))
 
     # -- 启动 ------------------------------------------------------------------
     def ensure_started(self, silent=False):

@@ -55,13 +55,17 @@ FAKE_RUNS = {
     "March7thAssistant": {"status": "running", "pid": 22048, "last_message": "开始每日任务：清体力", "attempt": 1},
     "BAAH": {"status": "success", "pid": 10492, "exit_code": 0, "attempt": 1},
     "MaaEnd": {"status": "pending"},
+    "ZenlessZoneZero-OneDragon": {"status": "pending"},
     "BetterGI": {"status": "failed", "pid": 8802, "exit_code": 1, "last_message": "识别超时，等待修复引擎介入", "attempt": 2},
 }
 
+# 必须和 configs/core/afk_projects.yaml 保持 5 个项目：预览图是拿来核对布局的，
+# 少一个项目就看不到 FlowLayout 在 1360 宽度下真实的 3+2 折行（曾漏掉绝区零）。
 FAKE_PROJECTS = {
     "March7thAssistant": {"display_name": "三月七小助手（崩坏：星穹铁道 / 云游戏）", "gui": {"args": ["app.py"]}},
     "BAAH": {"display_name": "BAAH（蔚蓝档案 / MuMu 模拟器 ADB）", "gui": {"args": ["jsoneditor.py"]}},
     "MaaEnd": {"display_name": "MaaEnd（明日方舟：终末地 / 独占前台）", "gui": {"exe": "install\\mxu.exe"}},
+    "ZenlessZoneZero-OneDragon": {"display_name": "绝区零一龙（绝区零 / CLI 独占）", "gui": {"args": ["one_dragon.py"]}},
     "BetterGI": {"display_name": "BetterGI（原神 / 更好的原神）", "gui": {"exe": "publish\\BetterGI.exe"}},
 }
 

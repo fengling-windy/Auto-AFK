@@ -389,7 +389,7 @@ class MainWindow(QMainWindow):
         title_box.setSpacing(0)
         title = QLabel("Auto-AFK")
         title.setObjectName("title")
-        subtitle = QLabel("一键挂机 · 三月七小助手 + BAAH + MaaEnd 统一编排")
+        subtitle = QLabel(self._subtitle_text())
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -567,6 +567,7 @@ class MainWindow(QMainWindow):
             page = ProjectPage(
                 key, spec, self._project_color(key),
                 self.supervisor, self._append_log,
+                open_logs_fn=self._open_project_logs,
             )
             self.project_pages[key] = page
             self.stack.addWidget(page)
@@ -801,6 +802,27 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.stack.widget(0))
         self.nav.set_active("overview", animate=False)
 
+    def _open_project_logs(self, key):
+        """项目页「打开日志」：打开该项目的日志目录（含 .out.log/.err.log）。
+
+        先找本项目最近一次运行的具体日志文件，没有就退到日志根目录。
+        """
+        out_log = None
+        try:
+            run = (self.supervisor.status_snapshot().get("runs") or {}).get(key) or {}
+            candidate = run.get("out_log")
+            if candidate and Path(candidate).exists():
+                out_log = Path(candidate)
+        except Exception:
+            out_log = None
+        if out_log is None:
+            project_dir = config.PROJECT_LOGS
+            if project_dir.exists():
+                matches = sorted(project_dir.glob("{0}_*.out.log".format(key)))
+                if matches:
+                    out_log = matches[-1]
+        self._open_path(out_log if out_log is not None else config.LOGS_DIR)
+
     def _clear_log(self):
         self.log_view.clear()
         self._log_line_count = 0
@@ -862,6 +884,20 @@ class MainWindow(QMainWindow):
         self._log_line_count = len(self.event_buffer)
         if self.autoscroll_check.isChecked():
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+
+    def _subtitle_text(self):
+        """副标题里的项目名单从注册表算出来。
+
+        历史缺陷：写死成「三月七小助手 + BAAH + MaaEnd」，而注册表有 5 个项目，
+        绝区零一龙 和 BetterGI 一直被漏掉，副标题与实际能挂的项目不符。
+        """
+        names = []
+        for key, spec in (config.registry().get("projects", {}) or {}).items():
+            label = str(spec.get("display_name", key))
+            names.append(label.split("（")[0].strip())
+        if not names:
+            return "一键挂机 · 统一编排"
+        return "一键挂机 · {0} 统一编排".format(" + ".join(names))
 
     def _poll(self):
         filter_project = self.filter_combo.currentData() or ""

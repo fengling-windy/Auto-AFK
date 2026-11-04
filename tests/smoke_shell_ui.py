@@ -243,6 +243,13 @@ def test_project_page(app):
     # 0. 导航不自动启动：ensure_started 未调用时不应 spawn
     check("未点击启动时不自动 spawn", sup.spawned == [])
 
+    # 0a. 「打开日志」必须真的打开日志，不能只往实时日志面板写一行。
+    #     历史缺陷：_open_logs 只调 self._log(...)，按钮点了没任何反应。
+    opened = []
+    page._open_logs_fn = lambda key: opened.append(key)
+    page._open_logs()
+    check("打开日志按钮会调起打开动作", opened == ["Alpha"])
+
     # 1. spawn 失败 → failed
     sup.result = None
     page.ensure_started()
