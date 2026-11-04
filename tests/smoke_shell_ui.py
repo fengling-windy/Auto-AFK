@@ -13,6 +13,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -566,6 +568,22 @@ def test_main_window(app):
                 and window.report_list.item(0).data(Qt.UserRole) is None
             )
             check("错误报告页不会是完全空白", window.report_list.count() > 0 or has_placeholder)
+
+        # 在「设置」tab 直接改 settings.yaml 保存后，总览页头部的开关必须跟着变。
+        # 历史缺陷：_save_text 只重读了 self.settings，头部三个控件（运行前更新 /
+        # 定时启动 / 时间）仍是构造时的旧值，界面与文件不一致，用户会以为没保存成功。
+        dirty = dict(window.settings)
+        dirty["pre_run"] = dict(dirty.get("pre_run") or {}, enabled=False)
+        dirty["schedule"] = {"enabled": True, "time": "07:30"}
+        window.settings_edit.setPlainText(yaml.safe_dump(dirty, allow_unicode=True, sort_keys=False))
+        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        pump(app, 60)
+        check("设置 tab 保存后「运行前更新」跟随文件", window.pre_run_check.isChecked() is False)
+        check("设置 tab 保存后「定时启动」跟随文件", window.schedule_check.isChecked() is True)
+        check(
+            "设置 tab 保存后定时时间跟随文件",
+            window.schedule_time.time().toString("HH:mm") == "07:30",
+        )
 
         # 拖动桌面小组件不能逐帧重写 settings.yaml。
         # 历史缺陷：moveEvent 每帧都调 config.save_yaml，实测拖动一次写 59 次

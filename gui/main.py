@@ -733,8 +733,41 @@ class MainWindow(QMainWindow):
                 self.supervisor.settings = self.settings
                 if getattr(self, "settings_page", None) is not None:
                     self.settings_page.reload_from_disk()
+                self._sync_header_settings()
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    def _sync_header_settings(self):
+        """把「设置」tab 里手改 yaml 的结果同步回头部控件。
+
+        历史缺陷：在「设置」tab 直接改 settings.yaml 并保存后，self.settings 会被
+        重读，但总览页头部的「运行前更新 / 定时启动 / 时间」三个控件只在构造时
+        读过一次，界面显示与文件内容不一致——用户会以为改动没生效而去重复操作。
+        阻塞信号避免 setChecked 反过来触发一次写盘。
+        """
+        pre_cfg = self.settings.get("pre_run") or {}
+        schedule_cfg = self.settings.get("schedule") or {}
+        pairs = [
+            (getattr(self, "pre_run_check", None), bool(pre_cfg.get("enabled", True))),
+            (getattr(self, "schedule_check", None), bool(schedule_cfg.get("enabled"))),
+        ]
+        for widget, want in pairs:
+            if widget is None or widget.isChecked() == want:
+                continue
+            widget.blockSignals(True)
+            widget.setChecked(want)
+            widget.blockSignals(False)
+        time_edit = getattr(self, "schedule_time", None)
+        if time_edit is not None:
+            try:
+                hour, minute = [int(x) for x in str(schedule_cfg.get("time", "04:00")).split(":")[:2]]
+            except (TypeError, ValueError):
+                hour, minute = 4, 0
+            target = QTime(hour, minute)
+            if time_edit.time() != target:
+                time_edit.blockSignals(True)
+                time_edit.setTime(target)
+                time_edit.blockSignals(False)
 
     def _toggle_schedule(self, *_):
         schedule = self.settings.setdefault("schedule", {})
