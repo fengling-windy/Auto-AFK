@@ -1073,6 +1073,30 @@ def test_main_window(app):
         pump(app, 300)
         check("还原配色后卡片颜色回到原来", window.cards[color_key].color == color_before)
 
+        # 删掉「当前正被日志过滤器选中的项目」后，日志区要跟着回到全部项目。
+        # 历史缺陷：重建下拉框时 blockSignals 了，currentIndexChanged 不触发，
+        # _rerender_log 没跑——下拉框显示「全部项目」，日志区却还是那个已经不存在
+        # 的项目的过滤结果，其它项目的历史日志一行都不显示。
+        window.event_buffer.append({"project": "core", "level": "info", "message": "SMOKE-FILTER-CORE"})
+        window.event_buffer.append({"project": rename_key, "level": "info", "message": "SMOKE-FILTER-KEEP"})
+        combo = window.filter_combo
+        combo.setCurrentIndex(max(0, combo.findData(rename_key)))
+        pump(app, 150)
+        check("过滤器选中断项目时只剩它的日志", "SMOKE-FILTER-CORE" not in window.log_view.toPlainText())
+        filter_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        filter_registry["projects"].pop(rename_key, None)
+        window.registry_edit.setPlainText(yaml.safe_dump(filter_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("删掉被过滤的项目后下拉框回到全部项目", (combo.currentData() or "") == "")
+        check(
+            "删掉被过滤的项目后日志区恢复全部项目",
+            "SMOKE-FILTER-CORE" in window.log_view.toPlainText(),
+        )
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+
         # 保存「修复规则」后运行中的引擎必须看到新规则。
         # 历史缺陷：RepairEngine 只在构造时读一次 repair_rules.yaml，界面上加
         # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。

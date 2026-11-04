@@ -1046,6 +1046,11 @@ class MainWindow(QMainWindow):
                 idx = combo.findData(current)
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
                 combo.blockSignals(False)
+                # 重建下拉框时是 blockSignals 的，currentIndexChanged 不会触发
+                # _rerender_log。历史缺陷：删掉当前过滤着的项目后，下拉框已回到
+                # 「全部项目」，日志区却还是那份按旧项目过滤过的内容（其它项目的
+                # 历史日志一行都不显示），两处不一致。这里补一次重绘。
+                self._rerender_log()
         settings_page = getattr(self, "settings_page", None)
         if settings_page is not None:
             settings_page.reload_from_disk()
