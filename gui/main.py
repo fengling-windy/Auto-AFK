@@ -1582,7 +1582,17 @@ class MainWindow(QMainWindow):
         self._append_log("core", "info", "桌面小组件: {0}".format("显示" if show else "隐藏"))
 
     def _show_main_window(self):
-        self.showNormal()
+        """把主窗口调回前台（托盘恢复、空闲提示、卡片「界面」按钮都会走这里）。
+
+        历史缺陷：无条件 showNormal()。用户把窗口最大化后最小化到托盘，再点托盘
+        恢复，窗口会退回到「最大化之前的小尺寸」，看起来像被缩小了、还要重新
+        最大化一次（空闲提示弹出时同样会把最大化窗口打回小窗）。这里只解除
+        「最小化」这一位，最大化/全屏原样保留。
+        """
+        state = self.windowState()
+        if state & Qt.WindowMinimized:
+            self.setWindowState(state & ~Qt.WindowMinimized)
+        self.show()
         self.raise_()
         self.activateWindow()
 

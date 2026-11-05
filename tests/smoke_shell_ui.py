@@ -806,6 +806,21 @@ def test_main_window(app):
             (leftover.get("gui") or {}).pop("window_size", None)
             config.save_yaml(config.SETTINGS_YAML, leftover)
 
+        # 历史缺陷：_show_main_window 无条件 showNormal()，最大化后最小化到托盘，
+        # 再点托盘恢复就把窗口打回「最大化之前的小尺寸」，用户还得重新最大化一次
+        # （空闲提示弹出时同样会把最大化窗口打回小窗）。
+        window.showMaximized()
+        pump(app, 150)
+        maximized_before = window.isMaximized()
+        window.hide()
+        pump(app, 100)
+        window._show_main_window()
+        pump(app, 200)
+        check("托盘恢复后仍保持最大化", maximized_before and window.isMaximized())
+        window.showNormal()
+        pump(app, 150)
+        check("取消最大化后恢复普通窗口", not window.isMaximized())
+
         # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中
         # 之前用 QWidget 默认几何 100x30 @ (0,0)，压住品牌 Logo。
         overview_item = window.nav.item_for_key("overview")
