@@ -1,0 +1,23 @@
+# 配置同步失败用例：path 指向一个不存在的盘符，ensure_links 里的
+# link_path.parent.mkdir(parents=True) 会抛 FileNotFoundError。
+groups: []
+
+projects:
+  BrokenPathProject:
+    display_name: Broken Path Project
+    enabled: true
+    launch_type: python
+    path: Z:/definitely/not/here
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py]
+    retry: 0
+    hang_timeout: 60
+    require_finish: false
+    min_runtime_sec: 0
+    config_dir: configs\core
+    links:
+      - link: config
+        store: config
+    success_patterns: []
+    error_patterns: []
+    finish_patterns: []

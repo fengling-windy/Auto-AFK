@@ -494,8 +494,24 @@ class Supervisor:
             run = ProjectRun(key, spec, attempt)
             self.runs[key] = run
 
-        configsync.ensure_links(key, spec)
-        sync_results = configsync.sync_in(key, spec)
+        try:
+            configsync.ensure_links(key, spec)
+            sync_results = configsync.sync_in(key, spec)
+        except Exception as exc:
+            # 配置同步（建 junction / 拷配置）会碰项目目录。项目目录不存在、
+            # 盘没插、路径写错时这里会抛 FileNotFoundError——原来是裸调用，
+            # 异常直接把 afk-start-<key> 线程打死：没有事件、没有日志、卡片永远
+            # 停在「等待 / 等待启动」，用户点「启动」后界面毫无反应，也看不到
+            # 任何原因（只能在 stderr 里看到 traceback）。这里转成一次失败的
+            # run + 明确错误信息，卡片会显示「已失败」并带上原因。
+            run.status = "failed"
+            run.exit_code = -4
+            run.finished_at = time.time()
+            run.last_message = "配置同步失败：{0}".format(exc)
+            run.finished_event.set()
+            self._emit(key, "error", run.last_message, level="error")
+            self._persist()
+            return run
         if sync_results:
             self._emit(key, "config", "; ".join(sync_results))
 
