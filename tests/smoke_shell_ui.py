@@ -747,7 +747,65 @@ def test_main_window(app):
         finally:
             gm.MainWindow.screen = prev_screen
 
-        # 导航指示条必须落在被选中项上，不能在左上角画出孤立的蓝色块。
+        # 窗口尺寸要能记住：历史缺陷是尺寸从不落盘，每次启动都回到首选值，
+        # 用户调好的大小关掉再开又变回去，只能重调一遍。
+        big = _FakeScreen(0, 0, 1920, 1040)
+        prev_screen = gm.MainWindow.screen
+        gm.MainWindow.screen = lambda self, _s=big: _s
+        try:
+            geo_probe = gm.MainWindow()
+            geo_probe.show()
+            pump(app, 200)
+            geo_probe.resize(1240, 860)
+            pump(app, 500)
+            geo_probe._flush_window_geometry()
+            persisted_size = (config.settings().get("gui") or {}).get("window_size")
+            check(
+                "窗口尺寸会写进 settings.yaml{0}".format("" if persisted_size == [1240, 860] else "（实际 {0}）".format(persisted_size)),
+                persisted_size == [1240, 860],
+            )
+            geo_probe.hide()
+            geo_probe._quit()
+            geo_probe.deleteLater()
+            pump(app, 60)
+            restored = gm.MainWindow()
+            restored.show()
+            pump(app, 200)
+            check(
+                "重启后恢复上次窗口尺寸{0}".format(
+                    "" if (restored.width(), restored.height()) == (1240, 860)
+                    else "（实际 {0}x{1}）".format(restored.width(), restored.height())
+                ),
+                (restored.width(), restored.height()) == (1240, 860),
+            )
+            # 换了小屏之后，记住的尺寸必须被夹进新屏幕可用区域（不能沿用大屏尺寸）。
+            small = _FakeScreen(0, 0, 1366, 728)
+            gm.MainWindow.screen = lambda self, _s=small: _s
+            restored.hide()
+            restored._quit()
+            restored.deleteLater()
+            pump(app, 60)
+            clamped = gm.MainWindow()
+            clamped.show()
+            pump(app, 200)
+            check(
+                "换小屏后记住的尺寸被夹进可用区域{0}".format(
+                    "" if (clamped.width() <= 1366 and clamped.height() <= 728)
+                    else "（实际 {0}x{1}）".format(clamped.width(), clamped.height())
+                ),
+                clamped.width() <= 1366 and clamped.height() <= 728,
+            )
+            clamped.hide()
+            clamped._quit()
+            clamped.deleteLater()
+            pump(app, 60)
+        finally:
+            gm.MainWindow.screen = prev_screen
+            # 别把测试期间的窗口尺寸留给后面的用例
+            leftover = config.settings()
+            (leftover.get("gui") or {}).pop("window_size", None)
+            config.save_yaml(config.SETTINGS_YAML, leftover)
+
         # 历史缺陷：_NavIndicator 构造时就 show()，在没有任何导航项被选中
         # 之前用 QWidget 默认几何 100x30 @ (0,0)，压住品牌 Logo。
         overview_item = window.nav.item_for_key("overview")

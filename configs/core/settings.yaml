@@ -58,6 +58,8 @@ gui:
   minimize_to_tray: false
   autostart_chain_on_launch: false
   widget_enabled: false
+  # 上次退出时的窗口尺寸 [宽, 高]，程序自己写回；空表示用屏幕自适应默认值。
+  window_size: []
   widget_pos: []
   project_colors:
     March7thAssistant: '#4fc3f7'

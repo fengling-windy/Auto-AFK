@@ -351,6 +351,8 @@ class MainWindow(QMainWindow):
         # 会矮出屏幕 132px（窗口底边压到任务栏以下，底部按钮点不到），
         # 1280x720/1920x1080+缩放 125% 的机器上同样越界。
         self._initial_geometry_applied = False
+        # 恢复上次窗口尺寸、以及 _fit_to_screen 夹紧的 resizing 期间不要写盘
+        self._geometry_restoring = False
         self.resize(*_preferred_window_size())
         self.setWindowIcon(make_icon())
 
@@ -406,6 +408,13 @@ class MainWindow(QMainWindow):
         self._schedule_timer.setSingleShot(True)
         self._schedule_timer.setInterval(400)
         self._schedule_timer.timeout.connect(self._flush_schedule)
+
+        # 窗口尺寸同样合并落盘：拖边框时 resizeEvent 每帧都触发，逐帧写 yaml
+        # 会有几十次磁盘写入（与小组件拖动、数值框防抖同一套思路）。
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(400)
+        self._geometry_timer.timeout.connect(self._flush_window_geometry)
 
         self.doctor_result.connect(self._render_doctor)
         try:
@@ -1672,6 +1681,13 @@ class MainWindow(QMainWindow):
                 settings_page.flush_pending()
             except Exception as exc:
                 logging.getLogger("afk.gui").warning("flush settings on quit failed: %s", exc)
+        # 窗口尺寸同理：拖完边框立刻关窗口，防抖里的那次写盘就丢了
+        geo_timer = getattr(self, "_geometry_timer", None)
+        if geo_timer is not None and geo_timer.isActive():
+            try:
+                self._flush_window_geometry()
+            except Exception as exc:
+                logging.getLogger("afk.gui").warning("flush window size on quit failed: %s", exc)
         if getattr(self, "scheduler", None) is not None:
             self.scheduler.stop()
         if getattr(self, "idle_watcher", None) is not None:
@@ -1733,13 +1749,25 @@ class MainWindow(QMainWindow):
         extra_h = max(0, frame.height() - self.height())
         avail_w = max(0, avail.width() - extra_w)
         avail_h = max(0, avail.height() - extra_h)
-        want_w, want_h = _preferred_window_size(screen)
-        width = max(want_w, min(self.width(), max(640, int(avail_w * 0.98))))
-        height = max(want_h, min(self.height(), max(480, int(avail_h * 0.98))))
-        width = min(width, max(640, int(avail_w * 0.98)))
-        height = min(height, max(480, int(avail_h * 0.98)))
+        limit_w = max(640, int(avail_w * 0.98))
+        limit_h = max(480, int(avail_h * 0.98))
+        saved = self._saved_window_size()
+        if saved is not None:
+            # 用户上次调过的尺寸优先，只做「不能超出屏幕」的夹紧。
+            width = min(saved[0], limit_w)
+            height = min(saved[1], limit_h)
+        else:
+            want_w, want_h = _preferred_window_size(screen)
+            width = min(max(want_w, self.width()), limit_w)
+            height = min(max(want_h, self.height()), limit_h)
         if (width, height) != (self.width(), self.height()):
-            self.resize(width, height)
+            # 这次 resize 是程序自己做的（夹到屏幕内），不该被当成用户调尺寸
+            # 记进 settings.yaml，否则屏幕切换一次就把用户原来的偏好覆盖掉了。
+            self._geometry_restoring = True
+            try:
+                self.resize(width, height)
+            finally:
+                self._geometry_restoring = False
         # resize 之后重新取一次 frameGeometry：尺寸变了，边框后的实际矩形也变了，
         # 用旧的算居中会偏出屏幕。
         frame = self.frameGeometry()
@@ -1751,9 +1779,60 @@ class MainWindow(QMainWindow):
         y = min(y, avail.top() + max(0, avail.height() - frame.height()))
         self.move(x, y)
 
+    def _saved_window_size(self):
+        """上次退出时的窗口尺寸（settings.yaml 的 gui.window_size）。
+
+        历史缺陷：窗口尺寸从不落盘，每次启动都回到首选值。用户把窗口拖成自己
+        习惯的大小（比如旁边开着模拟器，只占左半屏），关掉再开又变回 1360x900，
+        得重新调一遍。
+        """
+        gui_cfg = self.settings.get("gui") or {}
+        raw = gui_cfg.get("window_size")
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            return None
+        try:
+            width, height = int(raw[0]), int(raw[1])
+        except (TypeError, ValueError):
+            return None
+        # 太小说明是坏数据/被别的程序写坏，按默认尺寸处理，别把窗口开成一个洞。
+        if width < 640 or height < 480:
+            return None
+        return width, height
+
+    def _on_window_resized(self):
+        """尺寸变化后合并落盘（拖动边框时 resizeEvent 会连续触发）。"""
+        if not self._initial_geometry_applied or self._geometry_restoring:
+            return
+        self._geometry_timer.start()
+
+    def _flush_window_geometry(self):
+        """把当前窗口尺寸写进 settings.yaml。
+
+        只记客户区尺寸（self.width()/height()），不记位置：多显示器/改分辨率后
+        记住的坐标很容易落到屏幕外，位置每次按当前屏幕居中更稳（桌面小组件
+        的坐标有 _is_on_some_screen 校验，窗口不必再走一遍那套）。
+        最大化/全屏时不记，否则下次启动会先闪一下最大化尺寸再回到普通尺寸。
+        """
+        self._geometry_timer.stop()
+        if self.isMaximized() or self.isFullScreen() or self.isMinimized():
+            return
+        width, height = self.width(), self.height()
+        if width < 640 or height < 480:
+            return
+        gui_cfg = self.settings.setdefault("gui", {})
+        current = gui_cfg.get("window_size")
+        if list(current or []) == [width, height]:
+            return
+        gui_cfg["window_size"] = [width, height]
+        try:
+            config.save_yaml(config.SETTINGS_YAML, self.settings)
+        except Exception as exc:
+            logging.getLogger("afk.gui").warning("failed to persist window size: %s", exc)
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._sync_cards_height()
+        self._on_window_resized()
 
     def _sync_cards_height(self):
         """按窗口当前宽度重算项目卡区域应有的高度（折成几行就有多高）。
