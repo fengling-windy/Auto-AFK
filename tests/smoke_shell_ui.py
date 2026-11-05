@@ -1285,6 +1285,42 @@ def test_main_window(app):
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
 
+        # 日志自动滚动：只有「本来就在底部」才跟着滚。
+        # 历史缺陷：每来一行都无条件 setValue(maximum)，用户往上翻着看历史
+        # （或正在复制一段报错）时，链还在跑、日志还在刷，视图被不断拽回底部，
+        # 那段历史根本读不了。
+        log_scroll = window.log_view.verticalScrollBar()
+        window.autoscroll_check.setChecked(True)
+        window._clear_log()
+        pump(app, 100)
+        for i in range(200):
+            window._append_log("core", "info", "SMOKE-AUTO-{0}".format(i), emit_event=False)
+        pump(app, 150)
+        check("日志追加到超出视口后停到底部", log_scroll.value() >= log_scroll.maximum() - 4)
+        log_scroll.setValue(0)
+        pump(app, 100)
+        window._append_log("core", "info", "SMOKE-AUTO-HISTORY", emit_event=False)
+        pump(app, 150)
+        check("用户往上翻看历史时新日志不把视图拽回底部", log_scroll.value() == 0)
+        check(
+            "被拽住的日志仍然进了缓冲区",
+            "SMOKE-AUTO-HISTORY" in window.log_view.toPlainText(),
+        )
+        log_scroll.setValue(log_scroll.maximum())
+        pump(app, 100)
+        window._append_log("core", "info", "SMOKE-AUTO-RESUME", emit_event=False)
+        pump(app, 150)
+        check("回到底部后重新开始跟随", log_scroll.value() >= log_scroll.maximum() - 4)
+        window.autoscroll_check.setChecked(False)
+        log_scroll.setValue(0)
+        pump(app, 100)
+        window._append_log("core", "info", "SMOKE-AUTO-OFF", emit_event=False)
+        pump(app, 150)
+        check("关掉自动滚动后不再被拉动", log_scroll.value() == 0)
+        window.autoscroll_check.setChecked(True)
+        window._clear_log()
+        pump(app, 100)
+
         # 保存「修复规则」后运行中的引擎必须看到新规则。
         # 历史缺陷：RepairEngine 只在构造时读一次 repair_rules.yaml，界面上加
         # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。

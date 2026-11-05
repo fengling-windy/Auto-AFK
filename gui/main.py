@@ -1266,7 +1266,19 @@ class MainWindow(QMainWindow):
         index = sum(ord(ch) for ch in str(project)) % len(DEFAULT_PALETTE)
         return DEFAULT_PALETTE[index]
 
+    def _log_at_bottom(self, slack=4):
+        """日志区当前是不是停在最底部（用户在追最新几行）。"""
+        bar = self.log_view.verticalScrollBar()
+        return bar.value() >= bar.maximum() - slack
+
+    def _scroll_log_to_bottom(self):
+        bar = self.log_view.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
     def _append_log(self, project, level, message, autoscroll=True, emit_event=True):
+        # 先记下「追加之前」是不是在底部：一旦 appendHtml 把内容顶上去，
+        # maximum 就变了，那时再判断永远为假。
+        follow = self._log_at_bottom() if autoscroll else False
         ts = time.strftime("%H:%M:%S")
         project_color = self._project_color(project)
         if level == "error":
@@ -1280,8 +1292,12 @@ class MainWindow(QMainWindow):
         )
         self.log_view.appendHtml(html)
         self._log_line_count += 1
-        if autoscroll and self.autoscroll_check.isChecked():
-            self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        # 历史缺陷：只要勾着「自动滚动」，每来一行都强制拉到底。用户往上翻着
+        # 看历史（或正在复制一段报错）时，链还在跑、日志还在刷，视图被不断
+        # 拽回底部，那段历史根本读不了。现在只在「追加前本来就在底部」时才
+        # 跟着滚；用户自己翻上去了就让他停在那里，新内容照样进 event_buffer。
+        if autoscroll and follow and self.autoscroll_check.isChecked():
+            self._scroll_log_to_bottom()
         # 让 GUI 自身的动作也进入事件流（events.jsonl / 报告 / 远程订阅都能看到）。
         # 否则用户开关设置、空闲决策、手动更新等关键动作只留在界面里，
         # 排查问题时「日志里什么都没发生」——这正是之前空闲故障最难看的地方。
@@ -1316,7 +1332,7 @@ class MainWindow(QMainWindow):
                                  event.get("message", ""), autoscroll=False, emit_event=False)
         self._log_line_count = len(self.event_buffer)
         if self.autoscroll_check.isChecked():
-            self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+            self._scroll_log_to_bottom()
 
     def _subtitle_text(self):
         """副标题里的项目名单从注册表算出来。
@@ -1334,6 +1350,7 @@ class MainWindow(QMainWindow):
 
     def _poll(self):
         filter_project = self.filter_combo.currentData() or ""
+        follow = self._log_at_bottom()
         drained = 0
         while drained < 500:
             try:
@@ -1353,8 +1370,8 @@ class MainWindow(QMainWindow):
                 continue
             if self._matches_filter(event, filter_project):
                 self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False, emit_event=False)
-        if drained and self.autoscroll_check.isChecked():
-            self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        if drained and follow and self.autoscroll_check.isChecked():
+            self._scroll_log_to_bottom()
         snapshot = self.supervisor.status_snapshot()
         for key, card in self.cards.items():
             card.update_state(snapshot["runs"].get(key))
