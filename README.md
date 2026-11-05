@@ -54,6 +54,8 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 - 图形界面：双击 `Auto-AFK.bat`（打开界面，不自动开跑）或 `一键挂机.bat`（打开界面并自动一键挂机）。
   **关闭窗口即直接退出**（同时停止正在运行的项目）；
   如需恢复"最小化到托盘"，把 `configs\core\settings.yaml` 的 `gui.minimize_to_tray` 改为 `true`。
+  窗口大小会被记住（`gui.window_size`，程序退出时自己写回）：下次打开沿用上次尺寸，
+  换到更小的屏幕时自动夹进可用区域、不覆盖你调过的尺寸；把该值清空为 `[]` 即恢复按屏幕自适应的默认尺寸。
   - **项目卡片「界面」按钮**：每个挂机项目卡片上点「界面」可打开该项目自己的图形界面
     （三月七小助手=app.py 启动器、BAAH=配置编辑器、MaaEnd=MXU、绝区零=一条龙配置界面、BetterGI=主界面），
     仅打开窗口、**不运行任务也不受监管**，进程独立于 Auto-AFK（关掉 Auto-AFK 后仍保留）；
@@ -342,6 +344,7 @@ pre_run:
 & .venv\Scripts\python.exe tests\smoke_retry_round.py # 链级容错：失败跳过 -> 末尾重跑 -> 单项目最多 3 次
 & .venv\Scripts\python.exe tests\smoke_update_parallel.py  # 项目并行更新（并发度、顺序、失败隔离、停止）
 & .venv\Scripts\python.exe tests\smoke_completion.py  # 今日已完成则跳过空闲自动执行（含跨天失效）
+& .venv\Scripts\python.exe tests\smoke_configsync.py  # 项目路径不存在时配置同步失败要变成「失败运行」而不是卡在等待
 ```
 
 空闲检测 / 桌面小组件 / 开机自启 / 线程安全 / 新外壳的测试需离屏运行：
