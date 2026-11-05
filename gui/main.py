@@ -1048,7 +1048,22 @@ class MainWindow(QMainWindow):
             )
             pages[key] = page
             self.stack.addWidget(page)
-        for key in [k for k in pages if k not in projects or not (projects[k] or {}).get("gui")]:
+        # 正开着的那个项目页即将被删：QStackedWidget 移除当前页会自动切到相邻
+        # 下标——实测从「三月七小助手」页删掉该项目后，界面直接变成「BAAH」的页，
+        # 而左侧导航没有任何高亮项、页头还停在原处，用户看到的是另一个项目的
+        # 界面且不知道自己什么时候切过去的。这里显式退回总览页。
+        viewing_removed = False
+        current_widget = self.stack.currentWidget()
+        doomed = [k for k in pages if k not in projects or not (projects[k] or {}).get("gui")]
+        for key in doomed:
+            if pages[key] is current_widget:
+                viewing_removed = True
+        if viewing_removed:
+            # 先切走再删，别让 QStackedWidget 自己挑相邻页
+            self.stack.setCurrentWidget(self.stack.widget(0))
+            if nav is not None:
+                nav.set_active("overview", animate=False)
+        for key in doomed:
             page = pages.pop(key)
             try:
                 page.shutdown()

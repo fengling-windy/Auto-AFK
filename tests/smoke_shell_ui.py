@@ -1133,6 +1133,24 @@ def test_main_window(app):
         pump(app, 400)
         check("还原 gui 段后「界面」按钮回来", window.cards[gui_key].gui_btn.isVisible())
 
+        # 删掉「正开着的那个项目页」时，界面必须退回总览，而不是自动翻到相邻项目。
+        # 历史缺陷：QStackedWidget 移除当前页会自己切到相邻下标——实测从「三月七
+        # 小助手」页删掉该项目后界面直接变成「BAAH」的页，左侧导航没有任何高亮项，
+        # 用户看到的是另一个项目的界面，还不知道自己什么时候切过去的。
+        window.nav.navigate.emit("page:" + gui_key)
+        pump(app, 300)
+        check("切到项目页后 stack 显示该页", window.stack.currentWidget() is window.project_pages[gui_key])
+        removed_view = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        removed_view["projects"][gui_key]["gui"] = None
+        window.registry_edit.setPlainText(yaml.safe_dump(removed_view, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check("删掉正开着的项目页后退回总览", window.stack.currentWidget() is window.stack.widget(0))
+        check("删掉正开着的项目页后导航高亮回到总览", window.nav.active_key() == "overview")
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+
         # 删掉「当前正被日志过滤器选中的项目」后，日志区要跟着回到全部项目。
         # 历史缺陷：重建下拉框时 blockSignals 了，currentIndexChanged 不触发，
         # _rerender_log 没跑——下拉框显示「全部项目」，日志区却还是那个已经不存在
