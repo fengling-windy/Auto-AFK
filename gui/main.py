@@ -1148,21 +1148,30 @@ class MainWindow(QMainWindow):
         self._schedule_timer.start()
 
     def _flush_schedule(self):
-        """把定时启动开关与时间落盘（合并防抖后的真正写盘动作）。"""
-        schedule = self.settings.setdefault("schedule", {})
-        schedule["enabled"] = bool(self.schedule_check.isChecked())
-        schedule["time"] = self.schedule_time.time().toString("HH:mm")
-        config.save_yaml(config.SETTINGS_YAML, self.settings)
-        self.settings = config.settings()
-        self._sync_settings_editor()
-        self._append_log("core", "info", "定时启动: {0} {1}".format("开" if schedule["enabled"] else "关", schedule["time"]))
+        """把定时启动开关与时间落盘（合并防抖后的真正写盘动作）。
+
+        历史缺陷：这里直接改 `self.settings`（开窗时读进内存的那份）再整份写回。
+        只要期间有别的地方改过 settings.yaml（CLI、另一进程、用户手改文件），
+        这次保存就会把那些改动一起抹掉。改成先重读磁盘再改（与设置页同一套）。
+        """
+        enabled = bool(self.schedule_check.isChecked())
+        when = self.schedule_time.time().toString("HH:mm")
+
+        def mutate(settings):
+            schedule = settings.setdefault("schedule", {})
+            schedule["enabled"] = enabled
+            schedule["time"] = when
+
+        self._mutate_settings(mutate)
+        self._append_log("core", "info", "定时启动: {0} {1}".format("开" if enabled else "关", when))
 
     def _toggle_pre_run(self, checked):
-        pre = self.settings.setdefault("pre_run", {})
-        pre["enabled"] = bool(checked)
-        config.save_yaml(config.SETTINGS_YAML, self.settings)
-        self.supervisor.settings = config.settings()
-        self._sync_settings_editor()
+        def mutate(settings):
+            settings.setdefault("pre_run", {})["enabled"] = bool(checked)
+
+        # 同样先重读磁盘：直接改 self.settings 再整份写回会覆盖掉期间的外部改动
+        # （实测把 idle.minutes 改成 77 后点一下这个开关，文件又变回 30）。
+        self._mutate_settings(mutate)
         self._append_log("core", "info", "运行前更新: {0}".format("开" if checked else "关"))
 
     def run_updates(self):
@@ -1509,8 +1518,12 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     stored = []
             if stored != actual:
-                gui_cfg["widget_pos"] = actual
-                config.save_yaml(config.SETTINGS_YAML, self.settings)
+                # 先重读磁盘再改：这份 settings 是开窗时读进内存的，整份写回会
+                # 抹掉期间由 CLI / 另一进程 / 手改文件写入的内容。
+                def mutate(settings, _actual=actual):
+                    settings.setdefault("gui", {})["widget_pos"] = list(_actual)
+
+                self.settings = self._mutate_settings(mutate)
         except Exception as exc:
             logging.getLogger("afk.gui").warning("failed to heal widget position: %s", exc)
         if bool(gui_cfg.get("widget_enabled", False)):
@@ -1535,9 +1548,22 @@ class MainWindow(QMainWindow):
         self._widget_pos_timer.start()
 
     def _flush_widget_pos(self):
+        """把小组件位置落盘。
+
+        同样先重读磁盘：这份 settings 是开窗时读进内存的，期间 CLI / 另一进程 /
+        用户手改文件写过的内容会在这行整份写回时被抹掉（实测把 idle.minutes
+        改成 77 之后拖一下小组件，文件又变回 30）。
+        """
         self._widget_pos_timer.stop()
+        target = list((self.settings.get("gui") or {}).get("widget_pos") or [])
+        if len(target) != 2:
+            return
+
+        def mutate(settings):
+            settings.setdefault("gui", {})["widget_pos"] = [int(target[0]), int(target[1])]
+
         try:
-            config.save_yaml(config.SETTINGS_YAML, self.settings)
+            self._mutate_settings(mutate)
         except Exception as exc:
             logging.getLogger("afk.gui").warning("failed to persist widget position: %s", exc)
 
@@ -1819,13 +1845,18 @@ class MainWindow(QMainWindow):
         width, height = self.width(), self.height()
         if width < 640 or height < 480:
             return
-        gui_cfg = self.settings.setdefault("gui", {})
+        # 先重读磁盘再改：这份 settings 是开窗时读进内存的，期间 CLI / 另一进程 /
+        # 用户手改文件都会写 settings.yaml，整份写回内存那份等于把它们一起抹掉。
+        settings = config.settings()
+        gui_cfg = settings.setdefault("gui", {})
         current = gui_cfg.get("window_size")
         if list(current or []) == [width, height]:
+            self.settings = settings
             return
         gui_cfg["window_size"] = [width, height]
         try:
-            config.save_yaml(config.SETTINGS_YAML, self.settings)
+            config.save_yaml(config.SETTINGS_YAML, settings)
+            self.settings = settings
         except Exception as exc:
             logging.getLogger("afk.gui").warning("failed to persist window size: %s", exc)
 

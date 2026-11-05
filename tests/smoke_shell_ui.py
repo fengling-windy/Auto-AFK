@@ -948,6 +948,43 @@ def test_main_window(app):
             config.save_yaml = orig_save
             window._append_log = orig_log_fn
 
+        # 界面上的开关写盘时不能整份覆盖掉期间的外部改动。
+        # 历史缺陷：_toggle_pre_run / _flush_schedule / _flush_widget_pos 都是
+        # 「改内存里那份 settings 再整份写回」。只要期间 CLI、另一进程或用户手改
+        # 过 settings.yaml，点一下开关就把那些改动全抹掉了（实测把 idle.minutes
+        # 改成 77 后点一下「运行前更新」，文件又变回 30，chain.order 也回到空）。
+        external = config.settings()
+        external["idle"] = dict(external.get("idle") or {}, minutes=77)
+        external["chain"] = dict(external.get("chain") or {}, order=["BAAH"])
+        config.save_yaml(config.SETTINGS_YAML, external)
+        window.pre_run_check.setChecked(not window.pre_run_check.isChecked())
+        pump(app, 150)
+        after_toggle = config.settings()
+        check(
+            "点开关写盘时保留外部改过的 idle.minutes{0}".format(
+                "" if (after_toggle.get("idle") or {}).get("minutes") == 77
+                else "（实际 {0}）".format((after_toggle.get("idle") or {}).get("minutes"))
+            ),
+            (after_toggle.get("idle") or {}).get("minutes") == 77,
+        )
+        check(
+            "点开关写盘时保留外部改过的 chain.order",
+            ((after_toggle.get("chain") or {}).get("order") or []) == ["BAAH"],
+        )
+        external2 = config.settings()
+        external2["idle"] = dict(external2.get("idle") or {}, minutes=88)
+        config.save_yaml(config.SETTINGS_YAML, external2)
+        window.schedule_check.setChecked(not window.schedule_check.isChecked())
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            pump(app, 30)
+            if (config.settings().get("idle") or {}).get("minutes") == 88:
+                break
+        check(
+            "改定时启动写盘时保留外部改过的 idle.minutes",
+            (config.settings().get("idle") or {}).get("minutes") == 88,
+        )
+
         # 保存设置后托盘勾选与桌面小组件可见性也要跟随文件。
         # 历史缺陷：_save_text 只同步了头部三个控件，用户在「设置」tab 把
         # idle.enabled 关掉、gui.widget_enabled 打开并保存，托盘菜单仍显示旧勾选，
