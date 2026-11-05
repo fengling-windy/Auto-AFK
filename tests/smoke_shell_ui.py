@@ -1321,6 +1321,37 @@ def test_main_window(app):
         window._clear_log()
         pump(app, 100)
 
+        # 长任务按钮只管起线程、不禁用也不去重：连点「环境自检」三次就起三个
+        # 线程同时跑一遍全量自检（更新按钮更糟——实测三个线程并发 clone 同一
+        # 批 git 工作树）。现在运行期间按钮变灰，重复点击被忽略。
+        import gui.main as gm
+
+        doctor_calls = []
+
+        def fake_checks():
+            doctor_calls.append(1)
+            time.sleep(0.6)
+            return [{"status": "ok", "name": "stub", "detail": "stub"}]
+
+        orig_checks = gm.doctor.run_checks
+        gm.doctor.run_checks = fake_checks
+        try:
+            window.doctor_btn.setEnabled(True)
+            window.doctor_btn.click()
+            window.doctor_btn.click()
+            window.doctor_btn.click()
+            pump(app, 150)
+            check("连点环境自检只跑一次", len(doctor_calls) == 1)
+            check("自检运行期间按钮变灰", not window.doctor_btn.isEnabled())
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not window.doctor_btn.isEnabled():
+                pump(app, 50)
+            check("自检结束后按钮恢复可用", window.doctor_btn.isEnabled())
+            check("自检结束后没有多跑一遍", len(doctor_calls) == 1)
+        finally:
+            gm.doctor.run_checks = orig_checks
+            window.doctor_btn.setEnabled(True)
+
         # 保存「修复规则」后运行中的引擎必须看到新规则。
         # 历史缺陷：RepairEngine 只在构造时读一次 repair_rules.yaml，界面上加
         # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。

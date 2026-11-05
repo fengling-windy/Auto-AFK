@@ -336,6 +336,9 @@ class MainWindow(QMainWindow):
     # Qt 的跨线程 signal/slot 会自动排队到接收者所在线程执行，而 QTimer.singleShot
     # 在「没有事件循环的线程」里创建的定时器永远不会触发（这正是空闲挂机空转的根因）。
     idle_triggered = Signal(float)
+    # 后台任务（更新/自检）结束时把按钮恢复可用。worker 在后台线程跑，
+    # 不能直接碰控件，统一用 Signal 排队回 GUI 线程。
+    task_finished = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -417,6 +420,7 @@ class MainWindow(QMainWindow):
         self._geometry_timer.timeout.connect(self._flush_window_geometry)
 
         self.doctor_result.connect(self._render_doctor)
+        self.task_finished.connect(self._end_task)
         try:
             from afk_core.housekeeping import cleanup_logs
 
@@ -1178,13 +1182,23 @@ class MainWindow(QMainWindow):
         from afk_core.emulator import MuMuController
         from afk_core.updater import Updater
 
+        if not self._begin_task("update"):
+            # 历史缺陷：连点「立即更新」会并发起多个更新线程（实测连点三次
+            # 三个线程同时 clone，同一个 git 工作树被三个进程同时操作，报
+            # 「index.lock 存在」；耗时长又看不出在干什么）。现在同一时刻
+            # 只允许一个更新任务，按钮在运行期间变灰。
+            return
+
         def worker():
-            settings = config.settings()
-            pre = settings.get("pre_run") or {}
-            if pre.get("update_emulator", True):
-                MuMuController(self.bus, settings).update_check()
-            if pre.get("update_projects", True):
-                Updater(self.bus, settings).update_all_projects()
+            try:
+                settings = config.settings()
+                pre = settings.get("pre_run") or {}
+                if pre.get("update_emulator", True):
+                    MuMuController(self.bus, settings).update_check()
+                if pre.get("update_projects", True):
+                    Updater(self.bus, settings).update_all_projects()
+            finally:
+                self.task_finished.emit("update")
 
         self._append_log("core", "info", "开始手动更新（项目 + 模拟器）...")
         threading.Thread(target=worker, daemon=True, name="afk-manual-update").start()
@@ -1192,11 +1206,17 @@ class MainWindow(QMainWindow):
     def run_mumu_updater(self):
         from afk_core.emulator import MuMuController
 
+        if not self._begin_task("update"):
+            return
+
         def worker():
-            settings = config.settings()
-            emu_cfg = settings.setdefault("pre_run", {}).setdefault("emulator", {})
-            emu_cfg["updater_mode"] = "gui"
-            MuMuController(self.bus, settings).update_check()
+            try:
+                settings = config.settings()
+                emu_cfg = settings.setdefault("pre_run", {}).setdefault("emulator", {})
+                emu_cfg["updater_mode"] = "gui"
+                MuMuController(self.bus, settings).update_check()
+            finally:
+                self.task_finished.emit("update")
 
         self._append_log("core", "info", "启动 MuMu 更新器...")
         threading.Thread(target=worker, daemon=True, name="afk-mumu-update").start()
@@ -1470,6 +1490,8 @@ class MainWindow(QMainWindow):
         self._open_path(path)
 
     def run_doctor(self):
+        if not self._begin_task("doctor"):
+            return
         self.doctor_view.setPlainText("环境自检运行中...")
         self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
@@ -1479,8 +1501,47 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 results = [{"status": "fail", "name": "doctor", "detail": str(exc)}]
             self.doctor_result.emit(results)
+            self.task_finished.emit("doctor")
 
         threading.Thread(target=worker, daemon=True, name="afk-doctor").start()
+
+    def _begin_task(self, kind):
+        """标记一个长任务开始，期间禁用对应按钮并挡住重复触发。
+
+        历史缺陷：更新 / 自检 / MuMu 更新按钮点下去只是起一个后台线程，
+        按钮不禁用也不去重。连点三下就起三个线程，同一批 git 工作树被并发
+        操作（实测三线程并发 clone/pull 同一目录），用户还看不出它到底在
+        干什么、点了有没有反应。
+        """
+        buttons = {
+            "update": ("update_btn", "mumu_btn"),
+            "doctor": ("doctor_btn",),
+        }.get(kind, ())
+        running = getattr(self, "_running_tasks", None)
+        if running is None:
+            running = self._running_tasks = set()
+        if kind in running:
+            self._append_log("core", "info", "已有同类任务在运行，忽略这次点击")
+            return False
+        running.add(kind)
+        for name in buttons:
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(False)
+        return True
+
+    def _end_task(self, kind):
+        running = getattr(self, "_running_tasks", None)
+        if running is not None:
+            running.discard(kind)
+        buttons = {
+            "update": ("update_btn", "mumu_btn"),
+            "doctor": ("doctor_btn",),
+        }.get(kind, ())
+        for name in buttons:
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(True)
 
     def _chain_is_busy(self):
         """链或任一项目正在跑时，空闲检测不弹提示框。"""
