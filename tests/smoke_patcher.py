@@ -27,13 +27,17 @@
 3. apply 幂等：连打三次内容不变、状态是 unchanged；
 4. 写入是原子的：落盘后没有残留的 `.afk-tmp`，且写入失败不会留下空文件；
 5. 语法守卫会拦住会毁掉文件的补丁，且**不落盘**；
-6. verify 对「补丁在位但文件语法已坏」报 syntax-broken，doctor 报 fail。
+6. verify 对「补丁在位但文件语法已坏」报 syntax-broken，doctor 报 fail；
+7. 多线程同时 revert+apply 同一个文件不报错、不留临时文件、最终内容完整
+   （固定名 `.afk-tmp` 会被两个线程抢，实测 8 线程 8/8 抛
+   `另一个程序正在使用此文件`）。
 """
 
 import importlib.util
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -250,6 +254,45 @@ def main():
         check("doctor：补丁在位但源文件语法坏了要报 fail", item.get("status") == "fail", item)
         check("doctor：fail 的说明里指出源文件语法损坏",
               "语法" in str(item.get("detail", "")), item.get("detail"))
+
+        # 并发写：临时文件名是固定的 `<名字>.afk-tmp` 时，两个线程会抢同一个
+        # tmp —— 一方刚 os.replace 完、另一方 open 又把它建回来，于是 os.replace
+        # 撞上 WinError 32/5。实测 8 线程并发 revert+apply 真实 BAAH/main.py 时
+        # 8/8 报「另一个程序正在使用此文件」。
+        race_dir = tmp / "RaceProject"
+        race_dir.mkdir()
+        _write(race_dir / "main.py", SAMPLE)
+        module.PATCHES = {"RaceProject": {"path": "RaceProject", "blocks": [BLOCK]}}
+        try:
+            expected, _ = module.apply_block(SAMPLE, BLOCK)
+            errors = []
+
+            def _churn():
+                try:
+                    for _ in range(4):
+                        module.cmd_revert(tmp, ["RaceProject"])
+                        module.cmd_apply(tmp, ["RaceProject"])
+                except Exception as exc:  # noqa: BLE001 - 这里就是要捕获一切并发异常
+                    errors.append(repr(exc))
+
+            threads = [threading.Thread(target=_churn) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            # 收尾打一次，确保停在「已打补丁」这个确定状态上再断言
+            module.cmd_apply(tmp, ["RaceProject"])
+        finally:
+            module.PATCHES = original_patches
+        check("并发写：多线程 revert+apply 不抛异常（原子替换不能被抢 tmp）",
+              not errors, errors[:3])
+        final = _read(race_dir / "main.py")
+        check("并发写：最终内容就是一次干净 apply 的结果", final == expected,
+              "长度 {0} != {1}".format(len(final), len(expected)))
+        ok, detail = _compile_ok(final, "RaceProject/main.py")
+        check("并发写：最终文件仍能编译", ok, detail)
+        races = [p.name for p in race_dir.iterdir() if p.name.endswith(".afk-tmp")]
+        check("并发写：不残留临时文件", not races, races)
 
         # 真实项目：现有补丁全部落到位、且对应文件都能编译（防止仓库里的补丁定义漂移）
         real_report = module.cmd_verify(ROOT)
