@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -29,9 +31,27 @@ REPAIR_YAML = CORE_CONFIG_DIR / "repair_rules.yaml"
 
 def load_yaml(path, default=None):
     fallback = default if default is not None else {}
+    # 读盘也要能扛住「正好有别人在写这份文件」。GUI 里设置页保存与窗口尺寸保存
+    # 会并发，os.replace 完成那一瞬目标文件被短暂占用，open() 会抛
+    # PermissionError [Errno 13]。如果这里直接回落到默认值，调用方拿到空配置、
+    # 再原样写回去，用户的设置就被抹掉了——所以先退避重试，实在读不到才回落。
+    data = None
+    last_error = None
+    for attempt in range(12):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except FileNotFoundError:
+            return fallback
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.01 * (attempt + 1))
+            continue
+        break
+    if data is None and last_error is not None:
+        logging.getLogger("afk.config").warning("failed to parse %s: %s (falling back to defaults)", path, last_error)
+        return fallback
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
         if data is None:
             return fallback
         # 配置文件都是映射（section: value）。有人手工把整份文件改成标量或列表
@@ -44,19 +64,63 @@ def load_yaml(path, default=None):
             )
             return fallback
         return data
-    except FileNotFoundError:
-        return fallback
     except Exception as exc:
         logging.getLogger("afk.config").warning("failed to parse %s: %s (falling back to defaults)", path, exc)
         return fallback
 
 
-def save_yaml(path, data):
+# 保存配置文件用同一个锁：GUI 里设置页的合并落盘和窗口尺寸保存会并发写同一个文件
+_WRITE_LOCK = threading.Lock()
+
+
+def _write_atomic(path, text):
+    """把 text 写进 path，尽量做到「要么是旧内容，要么是新内容」。
+
+    历史缺陷（2026-11-06 发现）：这里原本用固定的 `<文件名>.tmp` 做中转，
+    GUI 里两处同时保存（设置页的 400ms 合并落盘 + 拖动窗口时写 window_size）
+    就会抢同一个 tmp：实测 8 线程 × 30 次保存有 7 路抛
+    `PermissionError [WinError 32] ... settings.yaml.tmp -> settings.yaml`。
+    另一种情况是目标文件正被别的句柄开着（设置页的 yaml 编辑器、杀软扫描、
+    用户用编辑器打开着 settings.yaml），Windows 上 os.replace 需要目标文件的
+    DELETE 权限 → `WinError 5 拒绝访问`，保存直接失败。
+
+    所以：唯一 tmp 名 + 线程锁 + 退避重试，实在替换不了就退回原地重写
+    （原地重写只要写权限，不需要 DELETE 权限）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
-    os.replace(tmp, path)
+    payload = text.encode("utf-8")
+    with _WRITE_LOCK:
+        tmp = path.with_name("{0}.{1}.{2}.tmp".format(path.name, os.getpid(), threading.get_ident()))
+        try:
+            with open(tmp, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            last = None
+            for attempt in range(20):
+                try:
+                    os.replace(tmp, path)
+                    return
+                except OSError as exc:
+                    last = exc
+                    time.sleep(0.02 * (attempt + 1))
+            # 目标被别的句柄占着：退回原地重写（不留 .tmp 垃圾）
+            with open(path, "r+b") as f:
+                f.seek(0)
+                f.write(payload)
+                f.truncate(len(payload))
+            logging.getLogger("afk.config").debug(
+                "%s 无法原子替换（%s），已就地重写", path, last)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+
+def save_yaml(path, data):
+    _write_atomic(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
 
 
 def settings():
