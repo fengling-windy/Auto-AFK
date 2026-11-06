@@ -18,6 +18,11 @@ class MuMuController:
         self.settings = settings or config.settings()
         # 最近一次启动流程里 adb 是否真的连上（进程起来不等于设备可用）
         self._adb_ok = False
+        # 是否「我们」发过启动指令（MuMuManager launch 或直接拉 Device）。
+        # ready 超时时 started 会报 False，但模拟器其实正在后台起来，上层必须
+        # 依据这个标记决定要不要关它——否则它会自己跑起来，下一轮变成
+        # 「already running + adb 连不上」的循环报错。
+        self._launch_requested = False
 
     def _cfg(self):
         return ((self.settings.get("pre_run") or {}).get("emulator") or {})
@@ -266,6 +271,10 @@ class MuMuController:
                 code, out = self._run([manager, "control", "-v", self._vmindex(), "launch"], timeout=120)
                 if code == 0 and '"errcode": 0' in out:
                     launched = True
+                    # 记一笔：即使后面 ready 超时，模拟器也是「我们叫起来的」，
+                    # 上层失败返回时必须负责把它关掉，否则它会自己在后台起来，
+                    # 下一轮就变成「already running」接着 adb 连不上。
+                    self._launch_requested = True
                     self._emit("MuMu player launch requested via MuMuManager")
                     break
                 time.sleep(5)
@@ -284,6 +293,7 @@ class MuMuController:
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
                 )
+                self._launch_requested = True
             except Exception as exc:
                 self._emit("failed to start MuMu: {0}".format(exc), level="error")
                 return False
@@ -502,6 +512,7 @@ class MuMuController:
                 "ready": bool(adb_ok),
                 "adb_ok": bool(adb_ok),
                 "main_started": False,
+                "launch_requested": False,
             }
         started = self.start()
         if started:
@@ -512,6 +523,9 @@ class MuMuController:
             "ready": started,
             "adb_ok": bool(getattr(self, "_adb_ok", False)) if started else False,
             "main_started": bool(getattr(self, "_main_started_by_us", False)),
+            # start() 超时返回 False，但模拟器可能已经被我们叫起来了
+            # （MuMuManager 发过 launch）。上层要据此决定失败时是否收尾关闭。
+            "launch_requested": bool(getattr(self, "_launch_requested", False)),
         }
 
     def _show_then_minimize(self):

@@ -583,7 +583,13 @@ class Supervisor:
             try:
                 controller = MuMuController(self.bus, self.settings)
                 result = controller.ensure_running()
-                run.managed_emulator = bool(result.get("started"))
+                # launch_requested：启动指令已经发出去但 ready 超时（started=False）。
+                # 模拟器这时会自己慢慢起来，如果不记成「我们管理的」，失败返回时
+                # 就没人关它，下一轮又走「already running」分支继续报 adb 连不上。
+                launched = bool(result.get("launch_requested"))
+                run.managed_emulator = bool(result.get("started") or launched)
+                # main_started 用 emulator 自己记的「主程序是不是我拉起的」，
+                # 超时路径同样可靠，不要用 launched 推导（否则会关掉用户手动开的窗口）
                 run.managed_main = bool(result.get("main_started"))
                 if not result.get("ready"):
                     run.status = "failed"

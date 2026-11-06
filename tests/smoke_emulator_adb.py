@@ -29,7 +29,10 @@
 6. `ensure_running()` 在模拟器已运行、adb 连不上时 `ready` 必须是 False；
 7. adb 正常时 `ready` 是 True；
 8. supervisor 拿到 adb 失败时把 run 判成 failed/-3，并说清是 adb 的问题
-   （而不是把子项目拉起来让它自己报错）。
+   （而不是把子项目拉起来让它自己报错）；
+9. 启动指令已发出但 ready 超时时，supervisor 仍要把它记成「我们管理的」，
+   并在失败返回前关掉——否则模拟器会自己在后台起来，下一轮变成
+   「already running + adb 连不上」的循环报错。
 """
 
 import sys
@@ -328,6 +331,44 @@ def _check_supervisor_uses_adb_flag():
         if run is not None:
             run.finished_event.wait(timeout=10)
         check("不是我们启动的模拟器失败时不去关它", calls["stop"] == 0, calls)
+    finally:
+        emulator_mod.MuMuController = original
+        supervisor.stop_all()
+
+    # ready 超时：started=False 但启动指令已发出（模拟器正在后台起来）
+    bus = FakeBus()
+    supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
+    calls = {"stop": 0, "close_main": None}
+
+    class StubTimeout:
+        def __init__(self, bus_arg, settings_arg=None):
+            self.bus = bus_arg
+
+        def adb_port(self):
+            return 16384
+
+        def ensure_running(self):
+            return {
+                "started": False,
+                "was_running": False,
+                "ready": False,
+                "adb_ok": False,
+                "main_started": False,
+                "launch_requested": True,
+            }
+
+        def stop(self, close_main=None):
+            calls["stop"] += 1
+            calls["close_main"] = close_main
+
+    emulator_mod.MuMuController = StubTimeout
+    try:
+        run = supervisor.start_project("EmuAdbProject")
+        if run is not None:
+            run.finished_event.wait(timeout=10)
+            check("ready 超时也算我们启动了模拟器", run.managed_emulator is True, run.managed_emulator)
+        check("ready 超时同样要把模拟器关掉（否则下一轮已在运行）", calls["stop"] == 1, calls)
+        check("ready 超时不去关用户手动开的窗口", calls["close_main"] is False, calls)
     finally:
         emulator_mod.MuMuController = original
         supervisor.stop_all()
