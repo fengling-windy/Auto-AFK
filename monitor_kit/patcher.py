@@ -151,8 +151,30 @@ def _read(path):
 
 
 def _write(path, text):
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
+    """原子替换写盘。
+
+    历史缺陷：这里原来是 `open(path, "w")` —— 先把目标文件截断到 0 再逐块写。
+    更新流程（afk_core/updater.py 先 cmd_revert、pull 完再 cmd_apply）与手工
+    的 apply/verify 可以同时在跑，另一路在这个窗口里 _read 就会读到半截文件；
+    再基于半截内容 apply 并写回，落盘结果是「打好补丁的前半段 + 残留的旧
+    尾部」。实测 BAAH/main.py 就是这样长出一段 `re_process` 垃圾、变成
+    IndentationError，项目再也起不来（logs/reports/20261106_075601_BAAH）。
+
+    改为同目录临时文件 + os.replace：要么是完整旧文件，要么是完整新文件，
+    读的一方永远看不到中间态。
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".afk-tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _prefix_for(file_name):
@@ -164,9 +186,21 @@ def _markers(block):
     return BEGIN.format(prefix, block["id"]), END.format(prefix, block["id"])
 
 
-def _block_text(block):
+def _dominant_newline(text):
+    """目标文件的主体行尾。
+
+    为什么需要：补丁块原来一律用 "\\n" 拼。插进 CRLF 的 Windows 源码后，
+    文件变成混合行尾，`git diff` 里整块都是 LF 噪声，也容易被编辑器的
+    「统一行尾」二次改写。这里跟随文件本身的风格。
+    """
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def _block_text(block, newline="\n"):
     begin, end = _markers(block)
-    return begin + "\n" + block["insert"] + end + "\n"
+    return begin + newline + block["insert"].replace("\n", newline) + end + newline
 
 
 def _find_block(text, block):
@@ -182,12 +216,19 @@ def _find_block(text, block):
         stop = text.find(end, start)
         if stop < 0:
             continue
-        return start, stop + len(end) + 1
+        stop += len(end)
+        # 吃掉标记行自身的行尾：CRLF 是 2 个字符，LF 是 1 个
+        if text.startswith("\r\n", stop):
+            stop += 2
+        elif text.startswith("\n", stop):
+            stop += 1
+        return start, stop
     return None
 
 
 def apply_block(text, block):
-    expected = _block_text(block)
+    newline = _dominant_newline(text)
+    expected = _block_text(block, newline)
     found = _find_block(text, block)
     if found:
         start, stop = found
@@ -216,7 +257,7 @@ def revert_block(text, block):
 
 
 def verify_block(text, block):
-    expected = _block_text(block)
+    expected = _block_text(block, _dominant_newline(text))
     found = _find_block(text, block)
     if found:
         current = text[found[0]:found[1]]
@@ -294,6 +335,27 @@ def _targets(root, only=None):
         yield name, spec, root / spec["path"]
 
 
+def _syntax_error(path, text):
+    """打补丁后先编译一遍，语法不通过就不要落盘。
+
+    历史缺陷：补丁把 `sys.exit(1)` 插在 `input("Error, Enter to exit/...")`
+    之后，只要插入点算错一位（行尾是 CRLF 还是 LF、标记有没有吃掉换行），
+    写出去的文件就是 IndentationError —— 而 apply 仍然报 "applied"，于是
+    更新流程愉快地留下一个起不来的项目，直到用户点「启动」才炸
+    （logs/reports/20261106_075601_BAAH，BAAH/main.py line 52）。
+    这里在写盘之前编译一次，出问题就保留原文件并把错误报出去。
+    """
+    if Path(path).suffix.lower() != ".py":
+        return None
+    try:
+        compile(text, str(path), "exec")
+    except SyntaxError as exc:
+        return "{0}: {1} (line {2})".format(type(exc).__name__, exc.msg, exc.lineno)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def cmd_apply(root, only=None, dry_run=False):
     kit_dir = Path(__file__).resolve().parent
     report = {}
@@ -314,7 +376,12 @@ def cmd_apply(root, only=None, dry_run=False):
             try:
                 text = _read(path)
                 new_text, state = apply_block(text, block)
-                if state != "unchanged":
+                if new_text != text:
+                    broken = _syntax_error(path, new_text)
+                    if broken:
+                        results.append((block["file"] + ":" + block["id"],
+                                        "error: 语法检查失败，未写入 ({0})".format(broken)))
+                        continue
                     _write(path, new_text)
                 results.append((block["file"] + ":" + block["id"], state))
             except Exception as exc:
