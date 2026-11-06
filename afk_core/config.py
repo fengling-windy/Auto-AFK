@@ -66,6 +66,8 @@ def settings():
 # 已经就「gui 不是映射」告警过的项目（registry() 每次刷新都会重读，逐次告警会
 # 把日志刷满——实测开一次窗口就重复 8 遍）。
 _WARNED_GUI = set()
+# 同理，注册表结构问题也只告警一次（键是位置，不是项目名）
+_WARNED_SHAPE = set()
 
 
 def _normalize_gui(spec, key=""):
@@ -95,11 +97,94 @@ def _normalize_gui(spec, key=""):
     return None
 
 
+def _normalize_projects(raw, data, warned):
+    """把 registry()['projects'] 归一成 {项目名: 规格映射}。
+
+    历史缺陷：`load_yaml` 只保证顶层是映射，`afk_projects.yaml` 里的
+    `projects` / `groups` 是什么形状完全没管。于是手写错误会一路传到运行时：
+      * `projects: [a, b]` → Supervisor.start_project 的
+        `self._projects().get(key)` 抛 `AttributeError: 'list' object has no
+        attribute 'get'`，用户点「启动」失败且界面无提示；
+      * `groups: hello` 或 `groups: [hello]` → background_group_ids() 抛
+        `'str' object has no attribute 'get'`（空闲自动挂机会在后台线程里
+        静默失败）；`_chain_worker` 里 `[g.get("id") for g in groups]` 也炸，
+        链线程直接死掉，界面停在「运行中」。
+      * `projects: {A: hello}` → 单项目规格不是映射，project_dir() 就炸。
+    这里在唯一读取入口统一归一，坏条目丢掉并留一条 warning（同 _normalize_gui
+    的思路）。丢掉是安全的：坏条目的项目本来也无法运行。
+    """
+    if not isinstance(raw, dict):
+        if warned is not None and "projects" not in warned:
+            warned.add("projects")
+            logging.getLogger("afk.config").warning(
+                "afk_projects.yaml 的 projects 不是映射（读到 %s），已按空注册表处理；"
+                "请把项目写成「项目名: {规格}」的形式",
+                type(raw).__name__,
+            )
+        data["projects"] = {}
+        return
+    cleaned = {}
+    dropped = []
+    for key, spec in raw.items():
+        if isinstance(spec, dict):
+            cleaned[key] = spec
+        else:
+            dropped.append(str(key))
+    if dropped and warned is not None and "projects:spec" not in warned:
+        warned.add("projects:spec")
+        logging.getLogger("afk.config").warning(
+            "afk_projects.yaml 里这些项目的规格不是映射，已忽略：%s", ", ".join(dropped)
+        )
+    data["projects"] = cleaned
+
+
+def _normalize_groups(raw, data, warned):
+    """把 registry()['groups'] 归一成 [{...}]，坏条目丢掉。
+
+    分组直接决定链怎么跑：组不是列表、组不是映射、members 不是列表都会让
+    链线程或空闲自动挂机抛 AttributeError。这里一并归一，并把 members 里
+    非字符串的成员丢掉（成员名必须是项目名）。
+    """
+    if not isinstance(raw, list):
+        if warned is not None and "groups" not in warned:
+            warned.add("groups")
+            logging.getLogger("afk.config").warning(
+                "afk_projects.yaml 的 groups 不是列表（读到 %s），已按「没有分组」处理",
+                type(raw).__name__,
+            )
+        data["groups"] = []
+        return
+    cleaned = []
+    dropped = 0
+    for group in raw:
+        if not isinstance(group, dict):
+            dropped += 1
+            continue
+        members = group.get("members")
+        if isinstance(members, str):
+            # "members: A" 是常见的手写让步（单个成员忘了写列表），能救就救
+            group["members"] = [members]
+        elif isinstance(members, list):
+            group["members"] = [m for m in members if isinstance(m, str)]
+        elif members is not None:
+            group["members"] = []
+        cleaned.append(group)
+    if dropped and warned is not None and "groups:item" not in warned:
+        warned.add("groups:item")
+        logging.getLogger("afk.config").warning(
+            "afk_projects.yaml 里有 %d 个分组不是映射，已忽略", dropped
+        )
+    data["groups"] = cleaned
+
+
 def registry():
     data = load_yaml(PROJECTS_YAML, {})
+    warned = _WARNED_SHAPE
     data.setdefault("projects", {})
     data.setdefault("groups", [])
     data.setdefault("reserved", [])
+    _normalize_projects(data.get("projects"), data, warned)
+    _normalize_groups(data.get("groups"), data, warned)
     projects = data.get("projects")
     if isinstance(projects, dict):
         for key, spec in projects.items():
