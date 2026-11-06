@@ -43,7 +43,10 @@ def find_recent(signature, hours=20):
                 entry = json.loads(line)
             except Exception:
                 continue
-            if entry.get("signature") == signature and float(entry.get("ts", 0) or 0) >= cutoff:
+            # 坏行可能是数组/字符串：直接跳过，不能让后面的好记录一起被放弃
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("signature") == signature and _safe_float(entry.get("ts")) >= cutoff:
                 return entry.get("dir")
     except Exception:
         return None
@@ -184,6 +187,23 @@ def list_reports(limit=100):
     return items
 
 
+def _safe_float(value, default=0.0):
+    """durations.jsonl 是外部可写的文本文件，数值字段什么形状都可能出现。
+
+    历史缺陷（2026-11-06）：`duration_stats` 直接 `float(i.get("runtime_sec") or 0)`，
+    一行 `{"runtime_sec": "abc"}` 就让 `afk_core.cli stats` 与 GUI 统计页抛
+    `ValueError: could not convert string to float: 'abc'` 整块打不开。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def duration_stats(limit=500):
     """Per-project run duration stats from logs/durations.jsonl.
 
@@ -199,9 +219,12 @@ def duration_stats(limit=500):
                     if not line:
                         continue
                     try:
-                        entries.append(json.loads(line))
+                        entry = json.loads(line)
                     except Exception:
                         continue
+                    # 条目可能是数组/字符串/数字，只有映射才有 project/runtime_sec
+                    if isinstance(entry, dict):
+                        entries.append(entry)
     except OSError:
         return {}
     by_project = {}
@@ -209,7 +232,7 @@ def duration_stats(limit=500):
         by_project.setdefault(str(entry.get("project")), []).append(entry)
     result = {}
     for project, items in by_project.items():
-        durs = [float(i.get("runtime_sec") or 0) for i in items]
+        durs = [_safe_float(i.get("runtime_sec")) for i in items]
         result[project] = {
             "runs": len(durs),
             "avg_sec": round(sum(durs) / len(durs), 1),
