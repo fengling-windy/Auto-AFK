@@ -1,5 +1,4 @@
 import logging
-import os
 import shutil
 import time
 
@@ -33,6 +32,40 @@ def _is_rolling_project_log(path):
     return path.suffix == ".log" and "_" not in path.stem
 
 
+def _keep_tail(path, keep_bytes):
+    """把文件内容换成「尾部 keep_bytes 字节，从一个整行开始」，返回是否真的截了。
+
+    为什么不用「写临时文件 + os.replace」：events.jsonl / durations.jsonl /
+    每个项目的滚动日志在本进程里都长期开着追加句柄（EventBus 为每个项目
+    保留一个 buffering=1 的 fh，GUI 进程整个生命周期不关）。Windows 上
+    os.replace 需要对目标文件的 DELETE 权限，只要还有别的句柄打开着就报
+    WinError 5「拒绝访问」——实测 42 MB 的 events.jsonl 一次都没截断成功，
+    每次还在 logs/ 里多留一个 .tmp 垃圾，只能等进程退出才有机会生效。
+    原地重写不需要替换文件：把尾部搬到文件开头再 truncate，打开着的追加
+    句柄（O_APPEND）会继续在**新的**文件末尾写，双方互不影响。
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size <= keep_bytes or keep_bytes <= 0:
+        return False
+    try:
+        tail = path.read_bytes()[-keep_bytes:]
+    except OSError:
+        return False
+    newline = tail.find(b"\n")
+    if newline >= 0:
+        tail = tail[newline + 1:]
+    if not tail:
+        return False
+    with open(path, "r+b") as f:
+        f.seek(0)
+        f.write(tail)
+        f.truncate(len(tail))
+    return True
+
+
 def cleanup_logs(bus=None, settings=None):
     cfg = ((settings or config.settings()).get("housekeeping") or {})
     if not cfg.get("enabled", True):
@@ -58,12 +91,8 @@ def cleanup_logs(bus=None, settings=None):
                 continue
             try:
                 if path.stat().st_size > PROJECT_LOG_MAX_BYTES:
-                    tail = path.read_bytes()[-PROJECT_LOG_KEEP_BYTES:]
-                    newline = tail.find(b"\n")
-                    if newline >= 0:
-                        tail = tail[newline + 1:]
-                    path.write_bytes(tail)
-                    _emit(bus, "project log truncated: {0}".format(path.name))
+                    if _keep_tail(path, PROJECT_LOG_KEEP_BYTES):
+                        _emit(bus, "project log truncated: {0}".format(path.name))
             except OSError:
                 pass
 
@@ -71,15 +100,8 @@ def cleanup_logs(bus=None, settings=None):
     try:
         events = config.EVENTS_FILE
         if events.exists() and events.stat().st_size > max_bytes:
-            tail = events.read_bytes()[-max_bytes // 2:]
-            newline = tail.find(b"\n")
-            if newline >= 0:
-                tail = tail[newline + 1:]
-            # 原子替换：先写临时文件再 os.replace，避免写到一半被截断成损坏状态
-            tmp = events.with_name(events.name + ".tmp")
-            tmp.write_bytes(tail)
-            os.replace(tmp, events)
-            _emit(bus, "events.jsonl truncated to last {0} MB".format(max_bytes // 2 // 1024 // 1024))
+            if _keep_tail(events, max_bytes // 2):
+                _emit(bus, "events.jsonl truncated to last {0} MB".format(max_bytes // 2 // 1024 // 1024))
     except OSError as exc:
         log.warning("events.jsonl truncation failed: %s", exc)
 
@@ -87,14 +109,20 @@ def cleanup_logs(bus=None, settings=None):
     try:
         durations = config.DURATIONS_FILE
         if durations.exists() and durations.stat().st_size > durations_max:
-            tail = durations.read_bytes()[-durations_max // 2:]
-            newline = tail.find(b"\n")
-            if newline >= 0:
-                tail = tail[newline + 1:]
-            durations.write_bytes(tail)
-            _emit(bus, "durations.jsonl truncated")
+            if _keep_tail(durations, durations_max // 2):
+                _emit(bus, "durations.jsonl truncated")
     except OSError:
         pass
+
+    # 旧版本用 os.replace 截断 events.jsonl，失败时会把 .tmp 留在 logs/ 里。
+    # 现在改成原地重写，这些残留没有用处了，顺手清掉（只清自己的命名，别乱删）。
+    for name in ("events.jsonl.tmp", "durations.jsonl.tmp"):
+        stale = config.LOGS_DIR / name
+        try:
+            if stale.exists():
+                stale.unlink()
+        except OSError:
+            pass
 
     if config.REPORTS_DIR.exists():
         for path in config.REPORTS_DIR.iterdir():
