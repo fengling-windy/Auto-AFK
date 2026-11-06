@@ -24,6 +24,11 @@ def _server_info():
         info = json.loads((config.LOGS_DIR / "event_server.json").read_text(encoding="utf-8"))
     except Exception:
         return None
+    # 这个文件是 EventBus 写的，但磁盘写满/断电/手工编辑都可能留下非映射内容。
+    # 实测 [1,2] / "hello" / 12345 / null 都在下一行 `info.get` 抛 AttributeError，
+    # 直接把 `stop` / `status` 这类 CLI 命令带崩，而它们本该只是「没找到实例」。
+    if not isinstance(info, dict):
+        return None
     pid = info.get("pid")
     if pid:
         try:
