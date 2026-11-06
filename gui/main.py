@@ -49,6 +49,7 @@ from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
+    ElidedLabel,
     FlowHost,
     HoverGlowCard,
     StatusDot,
@@ -230,7 +231,10 @@ class ProjectCard(HoverGlowCard):
         head.setSpacing(8)
         self.dot = StatusDot(STATUS_COLORS["pending"])
         display_name = str(spec.get("display_name", key))
-        self.name_label = QLabel(display_name.split("（")[0])
+        # 用 ElidedLabel 而不是 QLabel：QLabel 的 minimumSizeHint 等于整段文字宽度，
+        # 注册表里写个长 display_name（实测 128 字 → 1232px）会把项目卡和整个窗口
+        # 的最小宽度一起顶出去。
+        self.name_label = ElidedLabel(display_name.split("（")[0], min_width=72)
         self.name_label.setObjectName("cardName")
         if display_name != self.name_label.text():
             self.name_label.setToolTip(display_name)
@@ -499,8 +503,11 @@ class MainWindow(QMainWindow):
         title_box.setSpacing(0)
         title = QLabel("Auto-AFK")
         title.setObjectName("title")
-        subtitle = QLabel(self._subtitle_text())
+        # 副标题列出全部项目名，注册表里名字一长就把窗口最小宽度顶出去
+        # （实测 1409px）；用 ElidedLabel 让它按可用宽度裁，完整文本进 tooltip。
+        subtitle = ElidedLabel(self._subtitle_text(), min_width=120)
         subtitle.setObjectName("subtitle")
+        subtitle.setToolTip(self._subtitle_text())
         # 存引用：注册表改过之后副标题要跟着重新生成（项目数量变了）
         self._subtitle_label = subtitle
         title_box.addWidget(title)
@@ -1115,7 +1122,9 @@ class MainWindow(QMainWindow):
             settings_page.reload_from_disk()
         label = getattr(self, "_subtitle_label", None)
         if label is not None:
-            label.setText(self._subtitle_text())
+            text = self._subtitle_text()
+            label.setText(text)
+            label.setToolTip(text)
         self._sync_cards_height()
         self._append_log(
             "core", "info", "项目注册表已重新加载：{0} 个项目".format(len(projects))

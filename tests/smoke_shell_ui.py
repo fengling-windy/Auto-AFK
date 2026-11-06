@@ -205,6 +205,25 @@ def test_nav_rail(app):
     check("选回顶部项时滚动区跟着回到顶部", first_top >= 0 and first_top < viewport.height())
     tall.hide()
 
+    # 长项目名不能把侧栏最小宽度顶掉。历史缺陷：NavItem 是 QPushButton，
+    # minimumSizeHint 等于整段文字宽度——注册表里写一个长 display_name，
+    # 侧栏最小宽度实测 1176px，整个窗口最小宽度跟着爆到 1927px（1920 屏都放不下）。
+    long_rail = NavRail()
+    long_rail.resize(196, 320)
+    long_name = "超长项目名与显示名测试" * 6
+    long_rail.add_item("overview", "总览")
+    long_rail.add_item("page:Long", long_name)
+    long_rail.add_item("settings", "设置")
+    long_rail.finish()
+    long_rail.show()
+    pump(app, 80)
+    long_item = long_rail.item_for_key("page:Long")
+    check("超长导航项不把侧栏最小宽度顶出去", long_item.minimumSizeHint().width() <= 120)
+    check("超长导航项在界面上被省略号裁掉", long_item.display_text() != long_name)
+    check("超长导航项保留完整名称", long_item.text() == long_name)
+    check("超长导航项把完整名称放进 tooltip", long_item.toolTip() == long_name)
+    long_rail.hide()
+
 
 def test_settings_page(app):
     # 干净起点
@@ -1196,6 +1215,40 @@ def test_main_window(app):
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
+
+        # 长 display_name 不能把窗口最小宽度顶出去。历史缺陷：三处文本控件
+        # （卡片标题 QLabel#cardName、头部副标题 QLabel#subtitle、导航项
+        # QPushButton#navItem）的 minimumSizeHint 都等于整段文字宽度，注册表里
+        # 写个长名字后分别爆到 1232 / 1409 / 1176px，窗口最小宽度实测 1927px
+        # ——1920 的屏幕都放不下，窗口被 Qt 强行拉宽，右侧一整截跑到屏幕外。
+        long_name = "超长项目名与显示名测试" * 6
+        long_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        long_registry["projects"][rename_key]["display_name"] = long_name
+        window.registry_edit.setPlainText(yaml.safe_dump(long_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        long_card = window.cards[rename_key]
+        check("超长显示名不把窗口最小宽度顶出 1366", window.minimumSizeHint().width() <= 1366)
+        check(
+            "超长显示名在卡片上被省略号裁掉",
+            long_card.name_label.display_text() != long_name,
+        )
+        check("超长显示名保留完整文本", long_card.name_label.text() == long_name)
+        check("超长显示名把完整文本放进 tooltip", long_card.name_label.toolTip() == long_name)
+        check(
+            "超长显示名下副标题不撑宽头部",
+            window._subtitle_label.minimumSizeHint().width() <= 200,
+        )
+        if rename_key in window.project_pages:
+            page_label = window.project_pages[rename_key].name_label
+            check("超长显示名在嵌入页页头也被裁掉", page_label.display_text() != long_name)
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        check(
+            "还原显示名后卡片标题回到原名",
+            window.cards[rename_key].name_label.text() == str(original_registry["projects"][rename_key].get("display_name", rename_key)).split("（")[0],
+        )
 
         # 改 gui.project_colors 后卡片色条与嵌入页指示灯要跟着变。
         # 历史缺陷：project_colors 只在 MainWindow.__init__ 读过一次，改完保存后

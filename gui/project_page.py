@@ -19,7 +19,7 @@ from PySide6.QtGui import QWindow
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from gui import winembed
-from gui.modern import AnimatedButton, StatusDot
+from gui.modern import AnimatedButton, ElidedLabel, StatusDot
 from afk_core.supervisor import is_admin
 
 # 侧栏指示灯：绿=界面已启动（含启动中/后台），灰=未启动
@@ -87,8 +87,10 @@ class ProjectPage(QWidget):
         bar_layout.setContentsMargins(14, 10, 14, 10)
         bar_layout.setSpacing(10)
         self.dot = StatusDot(color)
-        self.name_label = QLabel(str(spec.get("display_name", key)).split("（")[0])
+        # ElidedLabel：长显示名不能把页面顶栏和整个窗口的最小宽度一起撑开
+        self.name_label = ElidedLabel(str(spec.get("display_name", key)).split("（")[0], min_width=80)
         self.name_label.setObjectName("pageTitle")
+        self.name_label.setToolTip(str(spec.get("display_name", key)))
         self.state_label = QLabel("未启动")
         self.state_label.setObjectName("pageState")
         self.start_btn = AnimatedButton("启动界面", variant="primary")

@@ -1,6 +1,6 @@
 """左侧导航栏：滑动指示条 + 分组导航项。"""
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 class NavItem(QPushButton):
     def __init__(self, key, label, parent=None):
-        super().__init__(label, parent)
+        super().__init__("", parent)
         self.key = key
         self.setObjectName("navItem")
         self.setCheckable(True)
@@ -25,6 +25,41 @@ class NavItem(QPushButton):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(38)
         self._dot = None
+        # 文本自己裁：QPushButton 的 minimumSizeHint 等于整段文字宽度，注册表里
+        # 写一个长 display_name，侧栏最小宽度就被顶到 1176px（实测），整个窗口
+        # 的最小宽度跟着爆到 1927px。这里把 minimumSizeHint 压到下限，显示时
+        # 按当前宽度加省略号，完整文本留在 text()/tooltip 里。
+        self._full_label = ""
+        self.setText(label)
+
+    def setText(self, text):
+        self._full_label = str(text)
+        self.setToolTip(self._full_label)
+        self._apply_elide()
+
+    def text(self):
+        return self._full_label
+
+    def display_text(self):
+        """屏幕上真正画出来的那段（可能带省略号）。测试用它判断有没有裁。"""
+        return super().text()
+
+    def _apply_elide(self):
+        # QSS 里 QPushButton#navItem 的左右内边距是 18px / 14px
+        width = self.width() - 18 - 14 - 8
+        if width <= 0 or not self._full_label:
+            super().setText(self._full_label)
+            return
+        metrics = self.fontMetrics()
+        super().setText(metrics.elidedText(self._full_label, Qt.ElideRight, width))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._apply_elide()
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(64, hint.height())
 
     def set_dot(self, color):
         """右侧状态点（None 隐藏）。"""

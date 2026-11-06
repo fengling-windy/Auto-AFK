@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QGraphicsOpacityEffect,
     QFrame,
+    QLabel,
     QLayout,
     QPushButton,
     QSizePolicy,
@@ -48,6 +49,82 @@ from PySide6.QtWidgets import (
 )
 
 ACCENT = "#4c8dff"
+
+
+class ElidedLabel(QLabel):
+    """文本过长时用省略号裁掉显示，但不把窗口最小宽度一起顶出去。
+
+    真实缺陷（2026-11-06 实测）：在「项目注册表」里给某个 project 写了长
+    display_name，三处标签的最小宽度一起爆掉——
+        项目卡标题 QLabel#cardName   minimumSizeHint 1232px
+        头部副标题 QLabel#subtitle    minimumSizeHint 1409px
+        左侧导航项 QPushButton#navItem minimumSizeHint 1176px
+    叠加后 MainWindow.minimumSizeHint().width() 变成 1927px：1920 的屏幕都
+    放不下，窗口被 Qt 强行拉宽，右侧一整截跑到屏幕外，按钮点不到。
+    QLabel 的 minimumSizeHint 默认等于整段文字宽度，所以只能靠自己把它压住：
+    minimumSizeHint 只报一个下限宽度，实际显示时按当前宽度裁。完整文本留在
+    tooltip / full_text() 里。
+    """
+
+    def __init__(self, text="", min_width=56, max_hint_width=260, parent=None):
+        super().__init__(parent)
+        self._full_text = str(text)
+        self._min_width = int(min_width)
+        # sizeHint 的上限：想让标签「尽量显示完整、放不下才裁」，sizeHint 就得
+        # 报完整文本的宽度；但对卡片标题这类被放进 FlowLayout 的控件，sizeHint
+        # 一大就等于告诉布局「这张卡必须这么宽」，折行算法会把整屏挤成一张卡。
+        # 所以给一个上限，既能让副标题这种长文本拿到足够宽度，又不会反噬布局。
+        self._max_hint_width = int(max_hint_width) or 0
+        # 调用方显式设过的 tooltip（例如注册表里的完整 display_name）。
+        # 显式设过就优先用；设成空串表示「交回给自动省略逻辑」。
+        self._explicit_tooltip = ""
+        super().setText(self._full_text)
+
+    def setToolTip(self, text):
+        self._explicit_tooltip = str(text or "")
+        self._apply_elide()
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self._apply_elide()
+
+    def text(self):
+        return self._full_text
+
+    def full_text(self):
+        return self._full_text
+
+    def display_text(self):
+        """屏幕上真正画出来的那段（可能带省略号）。测试用它判断有没有裁。"""
+        return QLabel.text(self)
+
+    def _apply_elide(self):
+        width = self.width()
+        if width <= 0 or not self._full_text:
+            QLabel.setText(self, self._full_text)
+            return
+        metrics = self.fontMetrics()
+        shown = metrics.elidedText(self._full_text, Qt.ElideRight, max(0, width - 2))
+        QLabel.setText(self, shown)
+        # tooltip 优先用调用方显式给的那段（注册表里的完整 display_name）；被裁掉
+        # 又没人给过，就把完整文本补上，否则用户没法看到全名。
+        tip = self._explicit_tooltip
+        if not tip and shown != self._full_text:
+            tip = self._full_text
+        QLabel.setToolTip(self, tip)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._apply_elide()
+
+    def minimumSizeHint(self):
+        return QSize(self._min_width, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self._max_hint_width > 0 and hint.width() > self._max_hint_width:
+            return QSize(self._max_hint_width, hint.height())
+        return hint
 
 
 class FlowLayout(QLayout):
