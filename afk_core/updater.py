@@ -175,8 +175,13 @@ class Updater:
         try:
             apply_report = patcher.cmd_apply(config.ROOT, [key])
             states = [state for _, state in apply_report.get(key, [])]
-            if any(str(state).startswith("error") or state in ("anchor-missing", "file-missing") for state in states):
-                self._emit(key, "patch re-apply has issues: {0}".format(states), level="warn")
+            # syntax-broken 也在这里：补丁把文件写成语法错误时 cmd_apply 已经
+            # 拒绝落盘（原文件保留），但必须让用户知道这次补丁没生效，
+            # 否则项目会带着「旧补丁」继续跑，问题在下一次启动才炸。
+            fatal = [s for s in states if str(s).startswith("error")
+                     or s in ("anchor-missing", "file-missing", "syntax-broken")]
+            if fatal:
+                self._emit(key, "patch re-apply has issues: {0}".format(states), level="error")
         except Exception as exc:
             self._emit(key, "patch re-apply failed: {0}".format(exc), level="error")
 

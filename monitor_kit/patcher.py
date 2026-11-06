@@ -424,7 +424,18 @@ def cmd_verify(root, only=None):
             if not path.exists():
                 results.append((block["file"], "file-missing"))
                 continue
-            results.append((block["file"] + ":" + block["id"], verify_block(_read(path), block)))
+            text = _read(path)
+            state = verify_block(text, block)
+            # 关键：补丁块「在位」不等于文件能用。2026-11-06 那次事故里
+            # BAAH/main.py 的三个补丁块都还在、verify 全 ok，文件却是
+            # IndentationError —— 光看标记发现不了，得编译一次。
+            if state == "ok":
+                broken = _syntax_error(path, text)
+                if broken:
+                    state = "syntax-broken"
+                    results.append((block["file"] + ":" + block["id"] + " (" + broken + ")", state))
+                    continue
+            results.append((block["file"] + ":" + block["id"], state))
         manifest = _load_manifest(project_dir)
         for drop in spec.get("drops", []):
             dst = project_dir / drop["dst"]
@@ -461,7 +472,10 @@ def main(argv=None):
             for item, state in results:
                 print("  {0:<55} {1}".format(item, state))
     failed = any(
-        state.startswith("error") or state in ("anchor-missing", "file-missing", "drifted", "missing", "drop-missing", "drop-drifted")
+        state.startswith("error") or state in (
+            "anchor-missing", "file-missing", "drifted", "missing",
+            "drop-missing", "drop-drifted", "syntax-broken",
+        )
         for results in report.values()
         for _, state in results
     )

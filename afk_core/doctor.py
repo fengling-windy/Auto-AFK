@@ -101,20 +101,31 @@ def _venv_check(project_dir, python_rel):
         return {"status": "fail", "detail": str(exc)}
 
 
-def _patch_check(project):
+def _patch_check(project, patcher=None, root=None):
     try:
-        spec = importlib.util.spec_from_file_location("afk_patcher", config.MONITOR_KIT / "patcher.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = patcher
+        if module is None:
+            spec = importlib.util.spec_from_file_location("afk_patcher", config.MONITOR_KIT / "patcher.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
         if project not in getattr(module, "PATCHES", {}):
             return {"status": "ok", "detail": "log-based monitoring (no source patch needed)"}
-        report = module.cmd_verify(config.ROOT, [project])
-        states = [state for _, state in report.get(project, [])]
+        report = module.cmd_verify(root or config.ROOT, [project])
+        states = [(item, state) for item, state in report.get(project, [])]
         if not states:
             return {"status": "warn", "detail": "no patch definitions"}
-        if all(s == "ok" for s in states):
+        # syntax-broken：补丁块都在位，但打完补丁的源文件编译不过。2026-11-06
+        # 那次 BAAH 起不来就是这个状态，而旧检查只看标记在不在、报的是 ok，
+        # 体检完全没提示。项目直接起不来，必须报 fail 并把行号带出来。
+        broken = [(item, state) for item, state in states if state == "syntax-broken"]
+        if broken:
+            return {
+                "status": "fail",
+                "detail": "源文件语法已损坏，项目起不来：" + "; ".join(item for item, _ in broken),
+            }
+        if all(state == "ok" for _, state in states):
             return {"status": "ok", "detail": "{0}/{0} blocks ok".format(len(states))}
-        return {"status": "warn", "detail": ", ".join(sorted(set(states)))}
+        return {"status": "warn", "detail": ", ".join(sorted({s for _, s in states}))}
     except Exception as exc:
         return {"status": "warn", "detail": str(exc)}
 

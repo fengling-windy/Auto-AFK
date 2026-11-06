@@ -10,20 +10,24 @@
     re_process                      <- 半截垃圾，后面又重复了一整段旧代码
 
 `IndentationError: unexpected indent (main.py, line 52)`，BAAH 直接起不来，
-用户点「启动」只看到卡片变成「失败」。两个根因：
+用户点「启动」只看到卡片变成「失败」。三个根因：
 
 1. `_write()` 用 `open(path, "w")` 先把文件截断到 0 再写 —— 更新线程（revert →
    git pull → apply）和手工 apply/verify 同时在跑时，另一路读到的就是半截
    文件，再基于半截内容 apply 写回，结果就是「新前半段 + 旧尾部」。
 2. 补丁块一律用 "\\n" 拼行尾、`_find_block` 也只吃 1 个字符的行尾，插进
    CRLF 文件后行尾混乱，`sys.exit(1)` 这类插入点算错一位就毁掉缩进。
+3. apply / verify / doctor 全程不看文件本身是否还能编译：写坏了照报
+   "applied"，标记块都在位时 verify 全报 ok，体检也报 ok —— 问题只能等
+   用户点「启动」才暴露。
 
-判据（这四条各自对应上面的一条根因，任一回归都会让本测试失败）：
+判据（每几条对应上面一条根因，任一回归都会让本测试失败）：
 1. 打补丁后文件仍然能编译（语法守卫）；
 2. 打补丁 → 还原，文件字节完全回到原样（含 CRLF 文件）；
 3. apply 幂等：连打三次内容不变、状态是 unchanged；
 4. 写入是原子的：落盘后没有残留的 `.afk-tmp`，且写入失败不会留下空文件；
-5. 语法守卫会拦住会毁掉文件的补丁，且**不落盘**。
+5. 语法守卫会拦住会毁掉文件的补丁，且**不落盘**；
+6. verify 对「补丁在位但文件语法已坏」报 syntax-broken，doctor 报 fail。
 """
 
 import importlib.util
@@ -211,6 +215,41 @@ def main():
         check("cmd_apply：补丁确实写进了文件", "AFK-MONITOR:smoke-entry" in written)
         ok, detail = _compile_ok(written, "GuardProject/main.py")
         check("cmd_apply：写完之后文件仍能编译", ok, detail)
+
+        # verify 必须能看穿「补丁块在位但文件本身已经坏了」——2026-11-06 事故里
+        # BAAH/main.py 的三个标记块都还在、旧 verify 全报 ok，文件却是
+        # IndentationError，用户只能等到点「启动」才发现。
+        broken_project = tmp / "BrokenProject"
+        broken_project.mkdir()
+        # 先打上补丁（标记块都在位），再往末尾塞一段缩进错乱的残留
+        patched_sample, _ = module.apply_block(SAMPLE, BLOCK)
+        corrupted = patched_sample + "re_process\n\n        # 残留的旧尾巴\n        do_work()\n"
+        _write(broken_project / "main.py", corrupted)
+        module.PATCHES = {"BrokenProject": {"path": "BrokenProject", "blocks": [BLOCK]}}
+        try:
+            report = module.cmd_verify(tmp, ["BrokenProject"])
+        finally:
+            module.PATCHES = original_patches
+        states = [state for _, state in report.get("BrokenProject", [])]
+        check("verify：补丁在位但文件语法坏了要报 syntax-broken",
+              states == ["syntax-broken"], states)
+        detail_text = " ".join(item for item, _ in report.get("BrokenProject", []))
+        check("verify：syntax-broken 带上具体行号方便定位",
+              "line" in detail_text.lower(), detail_text)
+        # 磁盘上的文件必须保持原样（verify 是只读的）
+        check("verify：不改动被检查的文件", _read(broken_project / "main.py") == corrupted)
+
+        # 体检（doctor）必须把「补丁在位但文件坏了」报成 fail 而不是 ok ——
+        # 用户点「环境体检」就是这个入口，2026-11-06 事故时它报的是 ok。
+        from afk_core import doctor as _doctor
+        module.PATCHES = {"BrokenProject": {"path": "BrokenProject", "blocks": [BLOCK]}}
+        try:
+            item = _doctor._patch_check("BrokenProject", patcher=module, root=tmp)
+        finally:
+            module.PATCHES = original_patches
+        check("doctor：补丁在位但源文件语法坏了要报 fail", item.get("status") == "fail", item)
+        check("doctor：fail 的说明里指出源文件语法损坏",
+              "语法" in str(item.get("detail", "")), item.get("detail"))
 
         # 真实项目：现有补丁全部落到位、且对应文件都能编译（防止仓库里的补丁定义漂移）
         real_report = module.cmd_verify(ROOT)
