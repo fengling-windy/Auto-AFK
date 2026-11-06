@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from . import config
-from .proc import popen as proc_popen, run as proc_run
+from .proc import host_env, popen as proc_popen, run as proc_run
 
 log = logging.getLogger("afk.emulator")
 
@@ -78,6 +78,7 @@ class MuMuController:
                 encoding="utf-8",
                 errors="ignore",
                 timeout=timeout,
+                env=host_env(),
             )
             return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
         except Exception as exc:
@@ -274,6 +275,7 @@ class MuMuController:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
+                env=host_env(),
             )
         except Exception as exc:
             self._emit("failed to start MuMu main app: {0}".format(exc), level="warn")
@@ -320,6 +322,7 @@ class MuMuController:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
+                    env=host_env(),
                 )
                 self._launch_requested = True
             except Exception as exc:
@@ -668,7 +671,7 @@ class MuMuController:
             main_was_running = self._main_app_running()
             self._emit("launching MuMu updater UI (--manual-check), waiting up to {0}s".format(timeout))
             try:
-                proc = proc_popen([str(exe), "--manual-check"], cwd=str(exe.parent))
+                proc = proc_popen([str(exe), "--manual-check"], cwd=str(exe.parent), env=host_env())
                 try:
                     code = proc.wait(timeout=timeout)
                     self._emit("MuMu updater closed (code {0})".format(code))

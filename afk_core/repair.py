@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 from . import config
-from .proc import popen as proc_popen, run as proc_run
+from .proc import host_env, popen as proc_popen, run as proc_run
 
 
 class RepairEngine:
@@ -160,7 +160,7 @@ class RepairEngine:
         path = Path(target)
         if not path.exists():
             return False, "path not found: {0}".format(path)
-        proc_popen([str(path)], close_fds=True)
+        proc_popen([str(path)], close_fds=True, env=host_env())
         return True, "started {0}".format(path)
 
     def _action_run_script(self, project, action, match):

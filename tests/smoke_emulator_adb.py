@@ -35,6 +35,7 @@
    「already running + adb 连不上」的循环报错。
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -486,6 +487,54 @@ def _check_info_shapes():
             check(label, False, "{0}: {1}".format(type(exc).__name__, exc))
 
 
+def _check_qt_env_isolated():
+    """起 MuMu 的 Qt 前端时必须摘掉 QT_*，否则它们 qFatal -> 0xC0000409。
+
+    真实事故（2026-11-06，Windows 事件日志 12 小时内 56 次）：MuMuManager.exe
+    以 `Exception code: 0xc0000409` / `Faulting module: Qt5Core.dll` 崩掉，用户
+    看到的是 MuMu 的「no Qt platform plugin could be initialized」错误框，而且
+    框会挂着不退出，我们这边只能等 `_run` 超时。
+
+    根因：MuMu 的前端全是 Qt5 程序，一旦继承了 `QT_QPA_PLATFORM=offscreen`
+    （我们的冒烟/离屏预览脚本会设它），就找不到 windows 平台插件。
+    实测：干净环境 exit=0；`QT_QPA_PLATFORM=offscreen` exit=0xC0000409。
+    """
+    from afk_core import proc
+
+    saved = {k: os.environ.get(k) for k in list(os.environ) if k.upper().startswith("QT_")}
+    try:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["QT_QPA_PLUGIN_PATH"] = r"C:\bogus\plugins"
+
+        env = proc.host_env()
+        check("起第三方 Qt 程序时会摘掉 QT_QPA_PLATFORM", "QT_QPA_PLATFORM" not in env, env.get("QT_QPA_PLATFORM"))
+        check("起第三方 Qt 程序时会摘掉全部 QT_*", not any(k.upper().startswith("QT_") for k in env), sorted(env))
+        check("摘变量不影响其它环境变量", os.environ.get("PATH", "") == env.get("PATH", "x"))
+
+        kept = proc.host_env(drop_prefix=None)
+        check("显式要求保留时原样返回", kept.get("QT_QPA_PLATFORM") == "offscreen", kept.get("QT_QPA_PLATFORM"))
+
+        # 子进程真的收不到：拿 python 自己打印一次环境
+        import subprocess
+
+        out = subprocess.run(
+            [sys.executable, "-c", "import os;print(os.environ.get('QT_QPA_PLATFORM',''))"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=60,
+            env=env,
+        )
+        check("子进程里确实看不到 QT_QPA_PLATFORM", out.stdout.strip() == "", out.stdout.strip())
+    finally:
+        for key in [k for k in os.environ if k.upper().startswith("QT_")]:
+            os.environ.pop(key, None)
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+
+
 def main():
     from tests import smoke_isolation
 
@@ -497,6 +546,7 @@ def main():
         _check_ensure_running()
         _check_supervisor_uses_adb_flag()
         _check_info_shapes()
+        _check_qt_env_isolated()
     finally:
         smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()

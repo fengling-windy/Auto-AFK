@@ -13,7 +13,7 @@ import psutil
 
 from . import config, configsync, monitor, notify, report
 from .ansi import strip_ansi
-from .proc import popen as proc_popen, run as proc_run
+from .proc import host_env, popen as proc_popen, run as proc_run
 
 
 def is_admin():
@@ -421,7 +421,7 @@ class Supervisor:
         UnicodeDecodeError inside ``_readerthread`` -> empty version ->
         ZZZ shows "原始启动器 未安装". PYTHONIOENCODING is unrelated to that
         path (it only sets sys.std* encoding), so it is safe to pin to utf-8."""
-        env = os.environ.copy()
+        env = host_env()
         for name in list(env):
             if name.startswith("AFK_"):
                 env.pop(name, None)
@@ -501,7 +501,9 @@ class Supervisor:
         return self.spawn_project_gui(key) is not None
 
     def _build_env(self, key, run, project):
-        env = os.environ.copy()
+        # 子项目里也有 Qt 程序（三月七是 PyQt、MuMu 前端是 Qt5）。父进程若带着
+        # QT_QPA_PLATFORM=offscreen（冒烟脚本会设），它们会 qFatal → 0xC0000409。
+        env = host_env()
         env["AFK_MONITOR"] = "1"
         env["AFK_PROJECT"] = key
         env["AFK_RUN_ID"] = run.run_id

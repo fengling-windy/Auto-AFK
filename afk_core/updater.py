@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import config
-from .proc import run as proc_run
+from .proc import host_env, run as proc_run
 
 
 class Updater:
@@ -27,7 +27,9 @@ class Updater:
         )
 
     def _env(self):
-        env = os.environ.copy()
+        # 更新钩子会跑子项目自己的脚本（其中也有 Qt 程序）；父进程带的
+        # QT_QPA_PLATFORM=offscreen 会让它们 qFatal → 0xC0000409，先摘掉。
+        env = host_env()
         extra = []
         for candidate in (Path(r"C:\Program Files\Go\bin"), Path(os.environ.get("APPDATA", "")) / "npm"):
             try:
