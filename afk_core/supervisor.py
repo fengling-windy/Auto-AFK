@@ -12,6 +12,7 @@ from pathlib import Path
 import psutil
 
 from . import config, configsync, monitor, notify, report
+from .ansi import strip_ansi
 from .proc import popen as proc_popen, run as proc_run
 
 
@@ -71,7 +72,9 @@ class FileTailer:
         self.partial = ""
         if not data.endswith(("\n", "\r")):
             self.partial = lines.pop() if lines else ""
-        return [line for line in lines if line.strip()]
+        # 在这里就抹掉 ANSI：读取流只有这一个出口，下游（模式匹配、GUI 日志区、
+        # 错误报告、events.jsonl）全都自动干净，不必每处各写一遍。
+        return [clean for clean in (strip_ansi(line) for line in lines) if clean.strip()]
 
 
 class ProjectRun:

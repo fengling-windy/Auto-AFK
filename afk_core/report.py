@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from . import config
+from .ansi import strip_ansi
 
 log = logging.getLogger("afk.report")
 
@@ -23,7 +24,9 @@ def _mask(value, key=""):
 
 
 def error_signature(text):
-    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    # 先抹掉 ANSI 颜色：同一条错误带上 \x1b[31m 和不带颜色必须是同一个签名，
+    # 否则 find_recent() 的去重失效，同一错误在几小时内会重复生成报告。
+    normalized = re.sub(r"\s+", " ", strip_ansi(text or "").strip().lower())
     normalized = re.sub(r"\d+", "N", normalized)
     normalized = re.sub(r"0x[0-9a-f]+", "H", normalized)
     return hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -71,7 +74,10 @@ def _tail(path: Path, lines=200):
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             data = f.readlines()
-        return "".join(data[-lines:])
+        # 子项目输出带 ANSI 颜色（MaaEnd 的 [ERR] 行就是 \x1b[31m…\x1b[0m），
+        # 原样写进报告的话用户看到的是 `[31m` 这种垃圾，而且颜色码会混进
+        # error_signature() 的关键字，让同一条错误算成两种、去重失效。
+        return strip_ansi("".join(data[-lines:]))
     except Exception:
         return ""
 
