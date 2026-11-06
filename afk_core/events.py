@@ -251,7 +251,9 @@ class EventBus:
     def _write_server_info(self, host):
         try:
             info = {"port": self._port, "pid": os.getpid(), "token": self._token, "host": host, "ts": time.time()}
-            self._server_info_path().write_text(json.dumps(info), encoding="utf-8")
+            # CLI 的 stop/status 随时可能在读这份文件；直接 write_text 先截断再写，
+            # 对方会读到空内容（json 解析失败 → CLI 报「没找到实例」）。
+            config.write_text_atomic(self._server_info_path(), json.dumps(info))
         except Exception as exc:
             # 写入失败会导致 GUI/CLI 找不到事件服务端口，必须留痕而不是静默
             logging.getLogger("afk.events").warning("failed to write event server info: %s", exc)

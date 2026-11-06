@@ -889,7 +889,10 @@ class MainWindow(QMainWindow):
 
     def _load_text(self, edit, path):
         try:
-            text = Path(path).read_text(encoding="utf-8")
+            # config.read_text 会退避重试：别的线程刚做了原子替换时目标文件会被
+            # 短暂占用，直接 read_text 会抛 PermissionError，界面就显示
+            # 「# 读取失败: …」——用户以为文件坏了，其实只是撞了一下。
+            text = config.read_text(Path(path))
         except Exception as exc:
             edit.setPlainText("# 读取失败: {0}".format(exc))
             return
@@ -956,7 +959,9 @@ class MainWindow(QMainWindow):
                 )
                 return
         try:
-            Path(path).write_text(text, encoding="utf-8")
+            # 原子写：设置页的合并落盘、窗口尺寸保存、这里的手工编辑保存都可能
+            # 撞在同一份文件上；write_text 先截断再写，另一边正读就会拿到空文件。
+            config.write_text_atomic(Path(path), text)
             self._append_log("core", "info", "已保存 {0}".format(path))
             saved = Path(path)
             if saved == Path(config.SETTINGS_YAML):

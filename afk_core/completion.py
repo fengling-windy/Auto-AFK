@@ -43,7 +43,11 @@ def mark_chain_success(projects=None, when=None):
         path = marker_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK:
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            # 用原子写：GUI 的「今日已完成」标签与空闲判定会在别的线程读这个文件，
+            # 直接 write_text 先截断再写，对方能读到空文件 → 被当成「今天还没完成」，
+            # 空闲自动挂机会在刚跑完时又来一次。
+            config.write_text_atomic(
+                path, json.dumps(payload, ensure_ascii=False, indent=2))
         # 立即失效缓存，避免同一进程内先前的「未完成」被继续返回
         _CACHE["key"] = None
         _CACHE["value"] = False
@@ -58,7 +62,7 @@ def load_marker():
         path = marker_path()
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(config.read_text(path))
         return data if isinstance(data, dict) else None
     except Exception:
         return None
