@@ -16,6 +16,8 @@ class MuMuController:
     def __init__(self, bus, settings=None):
         self.bus = bus
         self.settings = settings or config.settings()
+        # 最近一次启动流程里 adb 是否真的连上（进程起来不等于设备可用）
+        self._adb_ok = False
 
     def _cfg(self):
         return ((self.settings.get("pre_run") or {}).get("emulator") or {})
@@ -132,16 +134,95 @@ class MuMuController:
                 return str(candidate)
         return shutil.which("adb")
 
-    def adb_connect(self, port=None):
+    def _adb_target(self, port=None):
+        return "127.0.0.1:{0}".format(port or self.adb_port())
+
+    def _adb_devices(self):
+        """解析 `adb devices`，返回 {序列号: 状态}；取不到时返回空字典。"""
+        adb = self.adb_exe()
+        if not adb:
+            return {}
+        code, out = self._run([adb, "devices"], timeout=30)
+        if code != 0:
+            return {}
+        states = {}
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("list of devices"):
+                continue
+            if line.startswith("*"):
+                # "* daemon not running; starting now at tcp:5037"
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                states[parts[0]] = parts[1]
+        return states
+
+    def adb_online(self, port=None):
+        """目标端口是否真的以 device 状态出现在 `adb devices` 里。"""
+        return self._adb_devices().get(self._adb_target(port)) == "device"
+
+    def _adb_connect_via_manager(self, port=None):
+        """兜底：用 MuMuManager 自己的 adb 通道连接（不依赖我们这份 adb 版本）。"""
+        manager = str(self._cfg().get("manager_exe", "") or "")
+        if not manager or not Path(manager).exists():
+            return False
+        code, out = self._run([manager, "adb", "-v", self._vmindex(), "-c", "connect"], timeout=60)
+        if code != 0:
+            return False
+        if self.adb_online(port):
+            return True
+        text = (out or "").lower()
+        return "connected to" in text and "cannot" not in text
+
+    def adb_connect(self, port=None, attempts=None):
+        """连接 adb，并确认设备真的进了 device 状态。
+
+        历史缺陷：原来只判断 `code == 0 and "cannot" not in out and "failed"
+        not in out`，这是「有输出就算成功」——`error: device offline` 和纯中文
+        报错都能通过，日志写 ok、后面 BAAH/子项目一连就失败。而且 MuMu 刚开机
+        时 adb 端口要等几秒才监听（日志里反复出现 10061「目标计算机积极拒绝」），
+        单次尝试必然失败，于是每次启动都先报一串错。这里改成「重试 + 正向校验」：
+        必须能在 `adb devices` 里看到该端口且状态是 device，才算连上。
+        """
         adb = self.adb_exe()
         if not adb:
             self._emit("adb executable not found, skip adb connect", level="warn")
             return False
         port = port or self.adb_port()
-        code, out = self._run([adb, "connect", "127.0.0.1:{0}".format(port)], timeout=60)
-        ok = code == 0 and "cannot" not in out.lower() and "failed" not in out.lower()
-        self._emit("adb connect 127.0.0.1:{0}: {1}".format(port, "ok" if ok else out.strip()[:200]), level="info" if ok else "warn")
-        return ok
+        target = self._adb_target(port)
+        cfg = self._cfg()
+        if attempts is None:
+            attempts = int(cfg.get("adb_connect_retries", 6) or 1)
+        interval = float(cfg.get("adb_connect_interval_sec", 5.0) or 0)
+        attempts = max(1, attempts)
+        last = ""
+        for attempt in range(1, attempts + 1):
+            code, out = self._run([adb, "connect", target], timeout=60)
+            last = (out or "").strip()
+            states = self._adb_devices()
+            if states:
+                ok = states.get(target) == "device"
+            else:
+                # devices 也取不到时退回文本判断，但要求正向的 connected 字样
+                text = (out or "").lower()
+                ok = code == 0 and ("connected to" in text or "already connected" in text) and "cannot" not in text and "offline" not in text
+            if ok:
+                if attempt > 1:
+                    self._emit("adb connect {0}: ok（第 {1} 次尝试）".format(target, attempt))
+                else:
+                    self._emit("adb connect {0}: ok".format(target))
+                return True
+            if attempt < attempts and interval > 0:
+                time.sleep(interval)
+        if self._adb_connect_via_manager(port):
+            self._emit("adb connect {0}: ok（经 MuMuManager）".format(target))
+            return True
+        self._emit(
+            "adb connect {0}: {1}".format(target, (last or "adb 未就绪")[:200]),
+            level="warn",
+        )
+        return False
 
     def _ensure_main_app(self):
         if self._main_app_running():
@@ -213,7 +294,9 @@ class MuMuController:
             if self.is_running():
                 self._emit("MuMu android started, waiting for adb")
                 time.sleep(5)
-                self.adb_connect()
+                # 记下 adb 是否真的连上：模拟器进程起来不等于设备可用，
+                # 端口还没监听时 adb 会失败，这时 ready 不能报真。
+                self._adb_ok = self.adb_connect()
                 return True
         self._emit("MuMu did not become ready within {0}s".format(timeout), level="error")
         return False
@@ -408,9 +491,18 @@ class MuMuController:
         if self.is_running():
             version = self.version()
             self._emit("MuMu already running ({0}), adb port {1}".format(version or "unknown", self.adb_port()))
-            self.adb_connect()
+            # adb 连不上时不能报 ready：模拟器进程在、端口没监听，是日志里最常见
+            # 的那种形态（MuMu 刚开、adb 还没起）。原来无条件 ready=True，于是
+            # 子项目照常启动、进去就连不上设备，用户只看到子项目自己报错。
+            adb_ok = self.adb_connect()
             self._show_then_minimize()
-            return {"started": False, "was_running": True, "ready": True, "main_started": False}
+            return {
+                "started": False,
+                "was_running": True,
+                "ready": bool(adb_ok),
+                "adb_ok": bool(adb_ok),
+                "main_started": False,
+            }
         started = self.start()
         if started:
             self._show_then_minimize()
@@ -418,6 +510,7 @@ class MuMuController:
             "started": started,
             "was_running": False,
             "ready": started,
+            "adb_ok": bool(getattr(self, "_adb_ok", False)) if started else False,
             "main_started": bool(getattr(self, "_main_started_by_us", False)),
         }
 

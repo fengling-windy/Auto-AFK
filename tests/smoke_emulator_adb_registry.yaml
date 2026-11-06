@@ -1,0 +1,22 @@
+# adb 连接判定用例：项目带 manage_emulator: true，模拟器由编排器接管。
+# 测试里把 MuMuController 打桩，不碰真实 MuMu。
+groups: []
+
+projects:
+  EmuAdbProject:
+    display_name: Emulator Adb Project
+    enabled: true
+    launch_type: python
+    path: .
+    python: .venv\Scripts\python.exe
+    args: [tests\smoke_proj_ok.py, E, "1"]
+    retry: 0
+    hang_timeout: 120
+    require_admin: false
+    require_finish: false
+    min_runtime_sec: 0
+    manage_emulator: true
+    config_dir: configs\core
+    success_patterns: [done]
+    error_patterns: []
+    finish_patterns: []

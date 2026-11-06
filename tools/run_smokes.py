@@ -66,6 +66,7 @@ SUITE = [
     ("smoke_startup_update", "core", "启动时更新项目 + 链跳过重复更新"),
     ("smoke_update_parallel", "core", "项目并行更新"),
     ("smoke_configsync", "core", "配置同步失败变成失败运行"),
+    ("smoke_emulator_adb", "core", "模拟器 adb 连接判定（重试 + 正向校验 + 兜底）"),
     ("smoke_patcher", "core", "监测补丁引擎（原子写 + 语法守卫 + 幂等）"),
     ("smoke_repair_patch", "core", "补丁把源文件写坏后由修复引擎自愈"),
     ("smoke_close_exit", "core", "完成后退出"),

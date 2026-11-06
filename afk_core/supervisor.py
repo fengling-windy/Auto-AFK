@@ -581,7 +581,8 @@ class Supervisor:
             from .emulator import MuMuController
 
             try:
-                result = MuMuController(self.bus, self.settings).ensure_running()
+                controller = MuMuController(self.bus, self.settings)
+                result = controller.ensure_running()
                 run.managed_emulator = bool(result.get("started"))
                 run.managed_main = bool(result.get("main_started"))
                 if not result.get("ready"):
@@ -589,6 +590,21 @@ class Supervisor:
                     run.exit_code = -3
                     run.finished_at = time.time()
                     run.last_message = "MuMu emulator not ready"
+                    run.finished_event.set()
+                    self._emit(key, "error", run.last_message, level="error")
+                    self._persist()
+                    return run
+                if result.get("adb_ok") is False:
+                    # 模拟器进程起来了但 adb 连不上：子项目（BAAH）进去就会卡在
+                    # 「adb 与模拟器连接」这一步，用户只看到子项目自己的报错，
+                    # 看不出根因在模拟器/adb。这里提前判失败并说清原因与排查项。
+                    run.status = "failed"
+                    run.exit_code = -3
+                    run.finished_at = time.time()
+                    run.last_message = (
+                        "MuMu 已启动但 adb 连不上 127.0.0.1:{0}：请检查模拟器是否卡在启动界面、"
+                        "adb 端口是否被别的实例占用，或 pre_run.emulator.adb_port 是否与实际端口一致"
+                    ).format(controller.adb_port())
                     run.finished_event.set()
                     self._emit(key, "error", run.last_message, level="error")
                     self._persist()

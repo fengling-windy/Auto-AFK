@@ -96,6 +96,12 @@ pre_run:
     vmindex: 0
     adb_port: 16384
     ready_timeout_sec: 240
+    # MuMu 刚开机时 adb 端口要过几秒才开始监听，单次 `adb connect` 必然被
+    # 「积极拒绝 (10061)」，日志里就会反复出现启动报错。这里给重试窗口：
+    # 每次间隔 adb_connect_interval_sec，最多试 adb_connect_retries 次；
+    # 全失败后再用 MuMuManager 自带的 adb 通道兜底一次。
+    adb_connect_retries: 6
+    adb_connect_interval_sec: 5.0
     close_after_run: true
     minimize_window: true
     show_before_minimize: true
