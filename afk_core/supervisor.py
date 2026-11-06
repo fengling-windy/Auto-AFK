@@ -592,6 +592,7 @@ class Supervisor:
                     run.last_message = "MuMu emulator not ready"
                     run.finished_event.set()
                     self._emit(key, "error", run.last_message, level="error")
+                    self._abandon_emulator(controller, run, key)
                     self._persist()
                     return run
                 if result.get("adb_ok") is False:
@@ -607,6 +608,7 @@ class Supervisor:
                     ).format(controller.adb_port())
                     run.finished_event.set()
                     self._emit(key, "error", run.last_message, level="error")
+                    self._abandon_emulator(controller, run, key)
                     self._persist()
                     return run
             except Exception as exc:
@@ -983,6 +985,26 @@ class Supervisor:
 
         run.finished_event.set()
         self._persist()
+
+    def _abandon_emulator(self, controller, run, key):
+        """启动阶段就失败时，把「我们刚拉起来的模拟器」关掉。
+
+        真实事故：`ensure_running()` 把模拟器启动起来但没 ready（或 adb 连不上）
+        时，`start_project` 直接失败返回，没人执行收尾里的
+        `MuMuController.stop()`——模拟器就这么挂在后台。下一次启动它会走
+        「已在运行」那条分支，重试轮里反复出现 adb 10061 的报错，用户看到的就是
+        「模拟器启动一直报错」。这里按收尾同样的条件（我们启动的 + close_after_run）
+        补上关闭动作。
+        """
+        if not run.managed_emulator:
+            return
+        emu_cfg = (self.settings.get("pre_run") or {}).get("emulator") or {}
+        if not emu_cfg.get("close_after_run", True):
+            return
+        try:
+            controller.stop(close_main=run.managed_main)
+        except Exception as exc:
+            self._emit(key, "error", "emulator shutdown failed: {0}".format(exc), level="warn")
 
     def _make_report(self, key, reason, run, watcher, repair_attempts):
         error_text = watcher.error_text() if watcher else ""

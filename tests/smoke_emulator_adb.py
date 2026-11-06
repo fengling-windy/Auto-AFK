@@ -256,6 +256,7 @@ def _check_supervisor_uses_adb_flag():
     bus = FakeBus()
     supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
     original = emulator_mod.MuMuController
+    calls = {"stop": 0, "close_main": None}
 
     class StubController:
         def __init__(self, bus_arg, settings_arg=None):
@@ -273,6 +274,10 @@ def _check_supervisor_uses_adb_flag():
                 "main_started": True,
             }
 
+        def stop(self, close_main=None):
+            calls["stop"] += 1
+            calls["close_main"] = close_main
+
     emulator_mod.MuMuController = StubController
     try:
         run = supervisor.start_project("EmuAdbProject")
@@ -287,6 +292,42 @@ def _check_supervisor_uses_adb_flag():
             check("不会真把子项目进程拉起来", run.process is None)
             errors = [e for e in bus.events if e.get("project") == "EmuAdbProject" and e.get("level") == "error"]
             check("事件流里有 error 级事件", bool(errors), bus.messages())
+            check("启动阶段失败也要把刚拉起的模拟器关掉", calls["stop"] == 1, calls)
+            check("关闭模拟器时一并收掉主程序", calls["close_main"] is True, calls)
+    finally:
+        emulator_mod.MuMuController = original
+        supervisor.stop_all()
+
+    # 不是我们启动的模拟器（was_running）失败时不能去关别人的东西
+    bus = FakeBus()
+    supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
+    calls = {"stop": 0}
+
+    class StubRunning:
+        def __init__(self, bus_arg, settings_arg=None):
+            self.bus = bus_arg
+
+        def adb_port(self):
+            return 16384
+
+        def ensure_running(self):
+            return {
+                "started": False,
+                "was_running": True,
+                "ready": False,
+                "adb_ok": False,
+                "main_started": False,
+            }
+
+        def stop(self, close_main=None):
+            calls["stop"] += 1
+
+    emulator_mod.MuMuController = StubRunning
+    try:
+        run = supervisor.start_project("EmuAdbProject")
+        if run is not None:
+            run.finished_event.wait(timeout=10)
+        check("不是我们启动的模拟器失败时不去关它", calls["stop"] == 0, calls)
     finally:
         emulator_mod.MuMuController = original
         supervisor.stop_all()
