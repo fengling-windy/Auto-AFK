@@ -217,7 +217,9 @@ class Supervisor:
         # 现在逐项校验类型，任何一项不对就退回默认值并留一条 warning。
         try:
             if config.STATE_FILE.exists():
-                data = json.loads(config.STATE_FILE.read_text(encoding="utf-8"))
+                # 用 config.read_text：原子替换的瞬间目标文件会被短暂占用，
+                # 直接 read_text 会抛 PermissionError 被误判成「状态文件损坏」。
+                data = json.loads(config.read_text(config.STATE_FILE))
                 if not isinstance(data, dict):
                     raise ValueError("顶层不是映射（读到 {0}）".format(type(data).__name__))
                 status = data.get("chain_status", "idle")
@@ -347,7 +349,12 @@ class Supervisor:
                 "project_status": {k: v.status for k, v in self.runs.items()},
             }
             config.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            config.STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            # 不能直接用 write_text：这会先截断再写，而 CLI 的 status 与 GUI 的
+            # 面板随时可能在读这个文件，实测并发下读到空文件 / 半截 JSON
+            # （JSONDecodeError: Expecting value: line 1 column 1），然后就被
+            # _restore_state 当成「状态文件损坏」按全新状态处理。
+            config.write_text_atomic(
+                config.STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2))
         except Exception as exc:
             # 状态持久化失败不能中断监督线程，但必须留痕，否则 state.json 会悄悄停止更新
             logging.getLogger("afk.supervisor").warning("failed to persist supervisor state: %s", exc)

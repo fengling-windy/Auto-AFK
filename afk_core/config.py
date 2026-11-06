@@ -123,6 +123,30 @@ def save_yaml(path, data):
     _write_atomic(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
 
 
+def write_text_atomic(path, text):
+    """公开的原子写文本（state.json / 标记文件等不能用 write_text 直接覆盖）。"""
+    _write_atomic(Path(path), text)
+
+
+def read_text(path, attempts=12):
+    """读文本，扛住「正好有别人在原子替换这份文件」。
+
+    Windows 上 os.replace 完成那一瞬目标文件会被短暂占用：`read_text` 会抛
+    `PermissionError: [Errno 13]`，而替换过程中目标可能短暂不存在，抛
+    `FileNotFoundError`。实测 state.json 并发读（CLI status / GUI 面板）能读到
+    空文件或直接抛 PermissionError，于是被当成「状态文件损坏」按全新状态处理。
+    这里和 load_yaml 一样退避重试，实在读不到才把异常抛给调用方。
+    """
+    last = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            last = exc
+            time.sleep(0.01 * (attempt + 1))
+    raise last
+
+
 def settings():
     return load_yaml(SETTINGS_YAML, {})
 

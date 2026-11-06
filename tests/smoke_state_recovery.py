@@ -163,6 +163,12 @@ def _run(tmp):
     finally:
         bus.close_handles()
 
+    # 4. 并发读：state.json 一直被原子替换时，读取方不能读到空文件/半截 JSON
+    #    （历史缺陷：_persist 用 write_text 先截断再写，CLI status / GUI 面板能读到
+    #     空文件 → JSONDecodeError: Expecting value: line 1 column 1，然后被
+    #     _restore_state 当成「状态文件损坏」按全新状态处理，用户看到链状态丢失）
+    _check_concurrent_read(config)
+
     print()
     if FAILS:
         print("FAILED {0}: {1}".format(len(FAILS), "; ".join(FAILS)))
@@ -170,6 +176,52 @@ def _run(tmp):
         return 1
     print("STATE RECOVERY PASS")
     return 0
+
+
+def _check_concurrent_read(config):
+    import json
+    import threading
+
+    path = config.STATE_FILE
+    path.write_text(json.dumps({"chain_status": "idle", "runs": {}}), encoding="utf-8")
+    failures = []
+    stop = threading.Event()
+
+    def writer(n):
+        for i in range(120):
+            payload = json.dumps(
+                {"chain_status": "running",
+                 "runs": {"P{0}".format(n): {"status": "running", "attempt": i}},
+                 "pad": "x" * 3000},
+                indent=2,
+            )
+            try:
+                config.write_text_atomic(path, payload)
+            except Exception as exc:
+                failures.append("写 {0}: {1}".format(type(exc).__name__, exc))
+                return
+
+    def reader():
+        while not stop.is_set():
+            try:
+                data = json.loads(config.read_text(path))
+            except Exception as exc:
+                failures.append("读 {0}: {1}".format(type(exc).__name__, exc))
+                return
+            if not isinstance(data, dict):
+                failures.append("读到非映射内容：{0!r}".format(data))
+                return
+
+    watchers = [threading.Thread(target=reader) for _ in range(2)]
+    writers = [threading.Thread(target=writer, args=(n,)) for n in range(3)]
+    for t in watchers + writers:
+        t.start()
+    for t in writers:
+        t.join()
+    stop.set()
+    for t in watchers:
+        t.join()
+    check("并发替换 state.json 时读取方不会读到空/半截文件", not failures, failures[:3])
 
 
 if __name__ == "__main__":
