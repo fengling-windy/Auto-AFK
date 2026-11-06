@@ -51,6 +51,7 @@ SUITE = [
     ("smoke_supervisor", "core", "Supervisor 基础编排"),
     ("smoke_state_recovery", "core", "state.json 被写坏后仍能启动"),
     ("smoke_registry_shape", "core", "注册表结构写坏后链/启动不炸"),
+    ("smoke_settings_shape", "core", "设置节写坏后界面仍能打开"),
     ("smoke_report", "core", "报告/统计对脏 JSONL 不崩"),
     ("smoke_ansi", "core", "子项目输出带 ANSI 颜色时界面/报告要干净"),
     ("smoke_config_save", "core", "保存配置（并发/被占用时不丢设置）"),

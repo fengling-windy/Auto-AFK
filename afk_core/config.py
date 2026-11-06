@@ -148,7 +148,71 @@ def read_text(path, attempts=12):
 
 
 def settings():
-    return load_yaml(SETTINGS_YAML, {})
+    data = load_yaml(SETTINGS_YAML, {})
+    return _normalize_settings(data, _WARNED_SETTINGS)
+
+
+# 已经就「某个设置节不是映射」告警过的节名。settings() 每次调用都会重读文件，
+# 逐次告警会把日志刷满（一次开窗就能重复几十遍）。
+_WARNED_SETTINGS = set()
+
+# settings.yaml 里应当是「键: 值」映射的节。写成标量或列表时，所有
+# `settings.get("x") or {}` 之后的 `.get(...)` 都会 AttributeError。
+_SETTINGS_SECTIONS = (
+    "event",
+    "housekeeping",
+    "configsync",
+    "chain",
+    "idle",
+    "repair",
+    "notifications",
+    "post_actions",
+    "doctor",
+    "gui",
+    "schedule",
+    "pre_run",
+)
+
+
+def _normalize_settings(data, warned=None):
+    """把 settings.yaml 里应当是映射的节归一成映射。
+
+    历史缺陷（2026-11-06 发现）：``load_yaml`` 只保证顶层是映射，节本身的形状
+    完全没管。在「设置」tab 把手改的 ``schedule: true``（或 ``pre_run: abc``、
+    ``chain: [1, 2]``、``gui: 7`` …）保存下去，程序下次就再也打不开：
+
+        gui/main.py:353  (self.settings.get("gui") or {}).get(...)
+            → AttributeError: 'bool' object has no attribute 'get'
+        gui/main.py:555  schedule  → 同
+        gui/main.py:549  pre_run   → 同
+        gui/settings_page.py:142  post_actions → 同
+        gui/settings_page.py:168  idle         → 同
+        gui/settings_page.py:297  chain        → 同
+        afk_core/housekeeping.py:40  housekeeping → 同（后台清理线程）
+
+    用户在界面上根本没法把它改回来（界面自己起不来），只能手工编辑 yaml。
+    这里在唯一读取入口统一归一：不是映射的节按空映射处理（各处的默认值兜底），
+    并留一条 warning 指明是哪一节、读到了什么类型。
+    """
+    if warned is None:
+        warned = set()
+    for section in _SETTINGS_SECTIONS:
+        if section not in data:
+            continue
+        value = data.get(section)
+        if value is None or isinstance(value, dict):
+            continue
+        if section not in warned:
+            warned.add(section)
+            logging.getLogger("afk.config").warning(
+                "settings.yaml 的 %s 不是映射（读到 %s），已按默认值处理；"
+                "请把它写成「%s:\n  key: value」缩进形式",
+                section,
+                type(value).__name__,
+                section,
+            )
+        data[section] = {}
+    return data
 
 
 # 已经就「gui 不是映射」告警过的项目（registry() 每次刷新都会重读，逐次告警会
