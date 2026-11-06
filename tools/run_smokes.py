@@ -63,6 +63,7 @@ SUITE = [
     ("smoke_update_parallel", "core", "项目并行更新"),
     ("smoke_configsync", "core", "配置同步失败变成失败运行"),
     ("smoke_patcher", "core", "监测补丁引擎（原子写 + 语法守卫 + 幂等）"),
+    ("smoke_repair_patch", "core", "补丁把源文件写坏后由修复引擎自愈"),
     ("smoke_close_exit", "core", "完成后退出"),
     ("smoke_cleanup", "cleanup", "进程清理"),    ("smoke_idle_flow", "cleanup", "空闲到点 -> 提示 -> 启动任务"),
     ("smoke_gui", "ui", "GUI 离屏冒烟"),

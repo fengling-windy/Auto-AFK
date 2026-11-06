@@ -1,4 +1,12 @@
 rules:
+  - id: patch-syntax-broken
+    description: 补丁把源文件写成语法错误（项目直接起不来），用 git 还原该文件后按当前定义重打补丁
+    match: "(IndentationError|TabError|SyntaxError)"
+    actions:
+      - type: restore_patch_source
+        safe: true
+    max_attempts: 1
+
   - id: hang-detected
     description: 项目长时间无输出（卡任务），进程已被清理，自动重试一次
     match: "(hang detected|no activity for [0-9]+s)"
