@@ -618,7 +618,19 @@ class Supervisor:
                     self._persist()
                     return run
             except Exception as exc:
-                self._emit(key, "error", "emulator setup failed: {0}".format(exc), level="warn")
+                # 模拟器准备阶段自己出错（MuMuManager 返回怪字段、adb 可执行文件缺失、
+                # 端口读不出来……）时不能只 warn 一句就继续：子项目照样被拉起来，
+                # 进去必然卡在「adb 与模拟器连接」，用户看到的就是「模拟器启动一直
+                # 报错」，而真正的异常只躺在日志里一条 warn。这里直接判失败并说清原因。
+                if run.status == "pending":
+                    run.status = "failed"
+                    run.exit_code = -3
+                    run.finished_at = time.time()
+                    run.last_message = "模拟器准备失败：{0}".format(exc)
+                run.finished_event.set()
+                self._emit(key, "error", run.last_message or "emulator setup failed: {0}".format(exc), level="error")
+                self._persist()
+                return run
         env = self._build_env(key, run, project)
         flags = 0
         if os.name == "nt":

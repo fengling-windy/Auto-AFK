@@ -373,6 +373,81 @@ def _check_supervisor_uses_adb_flag():
         emulator_mod.MuMuController = original
         supervisor.stop_all()
 
+    # 模拟器准备阶段自己抛异常（MuMuManager 字段畸形、adb 缺失……）
+    bus = FakeBus()
+    supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
+
+    class StubRaises:
+        def __init__(self, bus_arg, settings_arg=None):
+            self.bus = bus_arg
+
+        def adb_port(self):
+            return 16384
+
+        def ensure_running(self):
+            raise ValueError("invalid literal for int() with base 10: 'abc'")
+
+        def stop(self, close_main=None):
+            return None
+
+    emulator_mod.MuMuController = StubRaises
+    try:
+        run = supervisor.start_project("EmuAdbProject")
+        if run is not None:
+            run.finished_event.wait(timeout=10)
+            check("模拟器准备抛异常时 run 判为失败", run.status == "failed", run.status)
+            check("模拟器准备抛异常时退出码是 -3", run.exit_code == -3, run.exit_code)
+            message = run.last_message or ""
+            check("模拟器准备抛异常时原因写明是模拟器准备失败", "模拟器准备失败" in message, message)
+            check("模拟器准备抛异常时带上原始错误便于排查", "invalid literal" in message, message)
+            check("模拟器准备抛异常时不再拉起子项目", run.process is None)
+            errors = [e for e in bus.events if e.get("level") == "error"]
+            check("模拟器准备抛异常要走 error 级（不是只 warn）", bool(errors), bus.messages())
+    finally:
+        emulator_mod.MuMuController = original
+        supervisor.stop_all()
+
+
+def _check_info_shapes():
+    """MuMuManager 的 JSON 字段形状不受我们控制，别让它们把启动流程带崩。"""
+    from afk_core.emulator import MuMuController
+
+    bus = FakeBus()
+    controller = MuMuController(bus, config.settings())
+    controller._cfg = lambda: dict(controller.settings["pre_run"]["emulator"], manager_exe=str(Path(sys.executable)))
+    controller._vmindex = lambda: "0"
+
+    def _info(raw):
+        controller._run = lambda cmd, timeout=60, cwd=None: (0, raw)
+        return controller.info()
+
+    for raw, label, expected in [
+        ('{"adb_port": "16384"}', "端口是字符串时也能读出来", 16384),
+        ('{"adb_port": 16384}', "端口是数字时照常读", 16384),
+        ('{"adb_port": null}', "端口是 null 时退回配置值", 16384),
+        ('{"adb_port": "abc"}', "端口是乱码时不抛异常", 16384),
+    ]:
+        _info(raw)
+        try:
+            got = controller.adb_port()
+            check(label, got == expected, got)
+        except Exception as exc:
+            check(label, False, "{0}: {1}".format(type(exc).__name__, exc))
+
+    for raw, label, expected in [
+        ('{"is_android_started": "false"}', "布尔被写成字符串 false 时不算在跑", False),
+        ('{"is_android_started": "true"}', "布尔被写成字符串 true 时算在跑", True),
+        ('{"is_android_started": 0}', "布尔被写成 0 时不算在跑", False),
+        ('{"is_android_started": 1}', "布尔被写成 1 时算在跑", True),
+        ('{"is_process_started": true}', "只有进程起来时也算在跑", True),
+        ('{}', "字段缺失时算没在跑", False),
+    ]:
+        _info(raw)
+        try:
+            check(label, controller.is_running() is expected, controller.info())
+        except Exception as exc:
+            check(label, False, "{0}: {1}".format(type(exc).__name__, exc))
+
 
 def main():
     from tests import smoke_isolation
@@ -384,6 +459,7 @@ def main():
         _check_manager_fallback()
         _check_ensure_running()
         _check_supervisor_uses_adb_flag()
+        _check_info_shapes()
     finally:
         smoke_isolation.wait_supervise_threads(timeout=30)
         guard.restore()

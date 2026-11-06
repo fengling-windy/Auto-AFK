@@ -12,6 +12,34 @@ from .proc import popen as proc_popen, run as proc_run
 log = logging.getLogger("afk.emulator")
 
 
+def _as_int(value, default=0):
+    """MuMuManager 的 JSON 字段形状不受我们控制。
+
+    真实形态：`adb_port` 可能是 16384、"16384"、null、甚至别的字符串；
+    `is_android_started` 可能是 true、0、"false"。直接 int()/bool() 会把
+    「已在运行」误判成真（"false" 是真值），`adb_port` 更会直接抛
+    ValueError 把整个启动流程带崩。
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return number
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in ("1", "true", "yes", "on", "running", "started")
+
+
 class MuMuController:
     def __init__(self, bus, settings=None):
         self.bus = bus
@@ -120,14 +148,14 @@ class MuMuController:
 
     def is_running(self):
         info = self.info()
-        return bool(info.get("is_android_started") or info.get("is_process_started"))
+        return _as_bool(info.get("is_android_started")) or _as_bool(info.get("is_process_started"))
 
     def adb_port(self):
         info = self.info()
-        port = info.get("adb_port")
+        port = _as_int(info.get("adb_port"))
         if port:
-            return int(port)
-        return int(self._cfg().get("adb_port", 16384))
+            return port
+        return _as_int(self._cfg().get("adb_port")) or 16384
 
     def adb_exe(self):
         candidates = [
