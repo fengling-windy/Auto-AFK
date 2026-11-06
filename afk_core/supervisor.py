@@ -133,6 +133,10 @@ def apply_chain_order(members, order):
 
 
 class Supervisor:
+    # chain_status 只可能是这五种；state.json 里读到别的东西（比如被手改成数字）
+    # 一律当 idle 处理，避免界面上出现无法比较的状态。
+    CHAIN_STATUSES = ("idle", "running", "stopped", "success", "failed")
+
     def __init__(self, bus, settings=None, repair=None, on_change=None):
         self.bus = bus
         self.settings = settings or config.settings()
@@ -202,13 +206,44 @@ class Supervisor:
                 logging.getLogger("afk.supervisor").warning("on_change callback failed: %s", exc)
 
     def _restore_state(self):
+        # state.json 是上一次运行留下的快照，用户/杀毒/断电都可能把它写坏。
+        # 恢复时不能假设结构正确：以前只判断「json.loads 成功」，于是
+        #   * `"runs": [1,2,3]` → _orphan_runs 变成 list，
+        #     cleanup_orphans() 里 `self._orphan_runs.keys()` 抛
+        #     AttributeError: 'list' object has no attribute 'keys' ——
+        #     而这发生在 start_project() 里，用户点「启动」直接炸；
+        #   * `"runs": {"BAAH": "x"}` → run.get 抛 'str' has no attribute 'get'；
+        #   * `"chain_status": 123` → 界面上链状态变成数字，所有比较都失效。
+        # 现在逐项校验类型，任何一项不对就退回默认值并留一条 warning。
         try:
             if config.STATE_FILE.exists():
                 data = json.loads(config.STATE_FILE.read_text(encoding="utf-8"))
-                self.chain_status = data.get("chain_status", "idle")
-                self._orphan_runs = data.get("runs", {}) or {}
-        except Exception:
+                if not isinstance(data, dict):
+                    raise ValueError("顶层不是映射（读到 {0}）".format(type(data).__name__))
+                status = data.get("chain_status", "idle")
+                if isinstance(status, str) and status in self.CHAIN_STATUSES:
+                    self.chain_status = status
+                else:
+                    logging.getLogger("afk.supervisor").warning(
+                        "state.json 的 chain_status 不可用（%r），按 idle 处理", status)
+                    self.chain_status = "idle"
+                orphans = data.get("runs", {}) or {}
+                if not isinstance(orphans, dict):
+                    logging.getLogger("afk.supervisor").warning(
+                        "state.json 的 runs 不是映射（读到 %s），忽略残留进程记录",
+                        type(orphans).__name__)
+                    orphans = {}
+                # 值必须是映射才有 .get；逐条过滤，坏条目只丢自己
+                self._orphan_runs = {k: v for k, v in orphans.items() if isinstance(v, dict)}
+                dropped = len(orphans) - len(self._orphan_runs)
+                if dropped:
+                    logging.getLogger("afk.supervisor").warning(
+                        "state.json 里有 %d 条残留进程记录格式不对，已忽略", dropped)
+        except Exception as exc:
+            logging.getLogger("afk.supervisor").warning(
+                "state.json 读取失败，按全新状态启动：%s", exc)
             self.chain_status = "idle"
+            self._orphan_runs = {}
 
     def _handle_command(self, payload):
         action = (payload or {}).get("action")
@@ -265,11 +300,17 @@ class Supervisor:
             logging.getLogger("afk.supervisor").warning("spool drain failed: %s", exc)
 
     def cleanup_orphans(self, keys=None):
+        # _restore_state() 已经把 state.json 里的坏条目过滤掉了，这里再兜一层：
+        # cleanup_orphans 是在 start_project() 里被调用的，一旦抛异常，用户点
+        # 「启动」就直接失败，没有任何界面提示。所以这里对我们自己持有的数据
+        # 也只做「能处理就处理，不能就跳过」。
+        if not isinstance(self._orphan_runs, dict):
+            self._orphan_runs = {}
         for key in list(self._orphan_runs.keys()) if keys is None else list(keys):
             run = self._orphan_runs.get(key)
-            if not run:
-                continue
             self._orphan_runs.pop(key, None)
+            if not isinstance(run, dict) or not run:
+                continue
             pid = run.get("pid")
             if run.get("status") != "running" or not pid:
                 continue

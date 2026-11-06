@@ -48,6 +48,7 @@ def _use_utf8_stdout():
 SUITE = [
     ("smoke_bus", "core", "事件总线与监测注入"),
     ("smoke_supervisor", "core", "Supervisor 基础编排"),
+    ("smoke_state_recovery", "core", "state.json 被写坏后仍能启动"),
     ("smoke_chain", "core", "并行组 + 独占组编排"),
     ("smoke_sequential", "core", "组内串行顺序"),
     ("smoke_classify", "core", "完成/失败判定"),
