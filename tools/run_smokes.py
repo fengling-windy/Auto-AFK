@@ -46,6 +46,7 @@ def _use_utf8_stdout():
 
 # (测试名, 分组, 说明)
 SUITE = [
+    ("smoke_isolation_guard", "core", "测试隔离本身（不写脏仓库配置）"),
     ("smoke_bus", "core", "事件总线与监测注入"),
     ("smoke_supervisor", "core", "Supervisor 基础编排"),
     ("smoke_state_recovery", "core", "state.json 被写坏后仍能启动"),

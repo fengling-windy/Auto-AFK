@@ -40,6 +40,17 @@ _TRACKED = (
     "DURATIONS_FILE",
 )
 
+# 配置文件同样要隔离：MainWindow 在关闭/拖动时会把自己的窗口尺寸和小组件位置
+# 写回 settings.yaml（`_save_window_size` / `_flush_widget_pos`），而 save_yaml
+# 会抹掉注释、重排缩进。实测 smoke_gui 跑一遍就把仓库里真实的
+# configs/core/settings.yaml 重写了一遍（注释全丢、widget_pos 变成 [543, 96]），
+# 用户下次打开程序看到的是测试留下的窗口位置。
+_CONFIG_FILES = (
+    ("SETTINGS_YAML", "settings.yaml"),
+    ("PROJECTS_YAML", "afk_projects.yaml"),
+    ("REPAIR_YAML", "repair_rules.yaml"),
+)
+
 
 class _Guard:
     def __init__(self, tmp, original, original_env=None, had_env=False):
@@ -66,6 +77,47 @@ class _Guard:
         return False
 
 
+def _isolate_configs(target_dir, original):
+    """把还指向仓库真实文件的配置文件改成临时副本。
+
+    只接管「仍然指向 configs/core 真文件」的那几个属性：很多冒烟自己在模块级
+    就把 config.SETTINGS_YAML 换成了自己的临时副本（smoke_shell_ui、
+    smoke_user_flow 等），那些已经隔离好了，这里不能抢过来覆盖。
+
+    还有一种情况要救：同一个进程里反复调用 isolate_runtime() 却不 restore() 的
+    （smoke_completion 就是这样，每段用 shutil.rmtree 清临时目录），上一轮的
+    临时配置路径已经随目录一起消失。此时 current 指向一个不存在的文件，
+    若照抄它就整段失败（实测 FileNotFoundError），所以这种情况按真文件处理。
+    """
+    target_dir = Path(target_dir)
+    for attr, filename in _CONFIG_FILES:
+        current = getattr(config, attr, None)
+        if current is None:
+            continue
+        real = Path(config.CORE_CONFIG_DIR) / filename
+        try:
+            same = Path(current).resolve() == real.resolve()
+        except OSError:
+            same = False
+        stale = False
+        if not same:
+            # 上一轮隔离留下的临时副本已经没了 -> 当作「还没隔离」重新做一次
+            stale = not Path(current).exists()
+            if not stale:
+                continue
+        if not real.exists():
+            continue
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / filename
+            shutil.copy(real, target)
+        except OSError:
+            continue
+        # restore 时回到真文件（stale 情况回到的是一个已删除的路径，没意义）
+        original[attr] = real if stale else current
+        setattr(config, attr, target)
+
+
 def isolate_runtime(prefix="afk_test_"):
     """把运行数据目录指向临时目录，返回一个 restore()/with 用的 guard。
 
@@ -74,6 +126,11 @@ def isolate_runtime(prefix="afk_test_"):
     临时根，而不是用户真实 logs。缺了这一步会出现跨进程路径不一致——
     例如 tests/smoke_gui_entry.py 写的 marker 落到真实 logs，而父测试在
     临时目录里等不到，表现为测试失败（实测 smoke_guiopen 即如此）。
+
+    配置文件（settings.yaml / afk_projects.yaml / repair_rules.yaml）也会换成
+    临时副本：MainWindow 关窗和拖动小组件时会把窗口尺寸、widget_pos 写回
+    settings.yaml，而 save_yaml 会抹掉注释、重排缩进。实测 smoke_gui 跑一遍
+    就把仓库里真实的 configs/core/settings.yaml 重写了一遍。
     """
     original = {name: getattr(config, name) for name in _TRACKED}
     original_env = os.environ.get("AFK_ROOT")
@@ -91,6 +148,7 @@ def isolate_runtime(prefix="afk_test_"):
 
     config.PROJECT_LOGS.mkdir(parents=True, exist_ok=True)
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    _isolate_configs(tmp / "_configs", original)
     return _Guard(tmp, original, original_env, had_env)
 
 

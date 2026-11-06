@@ -335,6 +335,43 @@ def _check_supervisor_uses_adb_flag():
         emulator_mod.MuMuController = original
         supervisor.stop_all()
 
+    # 「没就绪」的失败原因要说人话：卡片上就显示这一句，得能照着排查
+    timeout_sec = int(
+        ((config.settings().get("pre_run") or {}).get("emulator") or {}).get("ready_timeout_sec", 240)
+    )
+    bus = FakeBus()
+    supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))
+    not_ready_messages = []
+
+    class StubNotReady:
+        def __init__(self, bus_arg, settings_arg=None):
+            self.bus = bus_arg
+
+        def adb_port(self):
+            return 16384
+
+        def ensure_running(self):
+            return {"started": False, "was_running": True, "ready": False, "adb_ok": False, "main_started": False}
+
+        def stop(self, close_main=None):
+            return None
+
+    emulator_mod.MuMuController = StubNotReady
+    try:
+        run = supervisor.start_project("EmuAdbProject")
+        if run is not None:
+            run.finished_event.wait(timeout=10)
+            not_ready_messages.append(run.last_message or "")
+    finally:
+        emulator_mod.MuMuController = original
+        supervisor.stop_all()
+
+    message = not_ready_messages[0] if not_ready_messages else ""
+    check("没就绪时的失败原因不再是英文占位串", "emulator not ready" not in message, message)
+    check("没就绪原因写明是 MuMu 模拟器", "MuMu" in message, message)
+    check("没就绪原因带上超时秒数", str(timeout_sec) in message, message)
+    check("没就绪原因给出排查方向", "路径" in message or "手动" in message, message)
+
     # ready 超时：started=False 但启动指令已发出（模拟器正在后台起来）
     bus = FakeBus()
     supervisor = Supervisor(bus, settings=config.settings(), repair=RepairEngine(bus, config.settings()))

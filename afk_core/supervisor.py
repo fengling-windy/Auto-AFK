@@ -595,7 +595,13 @@ class Supervisor:
                     run.status = "failed"
                     run.exit_code = -3
                     run.finished_at = time.time()
-                    run.last_message = "MuMu emulator not ready"
+                    # 卡片上直接显示这句话，必须是人能看懂、能照着排查的中文；
+                    # 原来的 "MuMu emulator not ready" 既不说是哪个模拟器、也不说怎么办。
+                    run.last_message = (
+                        "MuMu 模拟器没有在 {0} 秒内就绪（进程没起来或 Android 没启动完成）："
+                        "请确认 pre_run.emulator.main_exe / device_exe 路径正确，"
+                        "或手动打开一次 MuMu 看是否卡在启动界面"
+                    ).format(int(((self.settings.get("pre_run") or {}).get("emulator") or {}).get("ready_timeout_sec", 240)))
                     run.finished_event.set()
                     self._emit(key, "error", run.last_message, level="error")
                     self._abandon_emulator(controller, run, key)
