@@ -226,8 +226,8 @@ def _normalize_gui(spec, key=""):
     """把项目规格里的 ``gui`` 归一成「映射」或 None。
 
     历史缺陷：注册表里手写 ``gui: true``（最自然的一句「这个项目有界面」）会让
-    整个程序打不开——gui/project_page.py:60 与 supervisor._build_gui_command 都
-    直接对它调 ``.get()``，于是 MainWindow 构造时抛
+    整个程序打不开——supervisor._build_gui_command 与界面调用方都直接对它调
+    ``.get()``，于是 MainWindow 构造时抛
     ``AttributeError: 'bool' object has no attribute 'get'``，用户连界面都进不去，
     也没法把配置改回来（只能手工编辑 yaml）。这里在唯一读取入口归一：真值但
     不是映射的按「有界面但没写具体入口」处理（None），并留一条 warning 说明
