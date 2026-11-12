@@ -82,13 +82,12 @@ SUITE = [
     ("smoke_guiopen", "ui", "打开项目 GUI（模拟入口）"),
     ("smoke_idle", "ui", "空闲阈值/武装冷却/小组件"),
     ("smoke_thread_qt", "ui", "后台线程经 Signal 投递到 GUI 线程"),
-    ("smoke_shell_ui", "ui", "新外壳（导航栏/设置页/嵌入页）"),
+    ("smoke_shell_ui", "ui", "新外壳（导航栏/设置页/项目卡）"),
     ("smoke_modern_ui", "ui", "主题与动效组件"),
     ("smoke_user_flow", "ui", "端到端用户流程"),
     # 需要真实环境，默认不跑
     ("smoke_emulator", "real", "会真的启动并关闭本机 MuMu 模拟器"),
     ("smoke_guiopen_real", "real", "会真实打开 BAAH 编辑器窗口"),
-    ("smoke_embed_real", "real", "真实嵌入窗口"),
     ("smoke_real_launch", "real", "真实 fork GUI 进程"),
     ("smoke_baah", "real", "需在 BAAH 自己的 venv 里跑，依赖 cv2"),
 ]

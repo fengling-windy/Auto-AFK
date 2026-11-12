@@ -1,4 +1,4 @@
-"""新外壳（导航栏/设置页/嵌入页）与 supervisor 扩展的功能性冒烟测试。
+"""新外壳（导航栏/设置页/项目卡）与 supervisor 扩展的功能性冒烟测试。
 
 离屏运行；设置页测试使用临时 YAML，不触碰真实 configs/core/settings.yaml。
 
@@ -48,9 +48,7 @@ from PySide6.QtWidgets import QApplication
 from afk_core.events import EventBus
 from afk_core.supervisor import Supervisor, apply_chain_order
 from gui.nav_rail import NavRail
-from gui.project_page import ProjectPage
 from gui.settings_page import SettingsPage
-from gui import winembed
 
 FAILURES = []
 
@@ -95,13 +93,11 @@ class FakeSupervisor:
     def __init__(self):
         self.spawned = []
         self.extra_args = []
-        self.report_ports = []
         self.result = None  # None / Popen-like
 
-    def spawn_project_gui(self, key, extra_args=None, report_port=None):
+    def spawn_project_gui(self, key, extra_args=None):
         self.spawned.append(key)
         self.extra_args.append(list(extra_args or []))
-        self.report_ports.append(report_port)
         return self.result
 
 
@@ -329,245 +325,6 @@ def test_settings_page(app):
     page.hide()
 
 
-def test_project_page(app):
-    sup = FakeSupervisor()
-    logs = []
-    page = ProjectPage("Alpha", FAKE_REGISTRY["projects"]["Alpha"], "#4fc3f7", sup, lambda *a, **k: logs.append(a))
-    page.show()
-    pump(app, 40)
-
-    # 嵌入与窗口相关的原生调用全部替换为桩
-    recorded = {}
-    import gui.project_page as pp
-
-    check("初始状态点为灰色（未启动）", page.dot_state() == pp.DOT_OFF)
-
-    orig_find = pp.winembed.find_window_for_spawn
-    orig_alive = pp.winembed.window_alive
-    orig_show = pp.winembed.show_hwnd
-    orig_matches = pp.winembed.window_matches
-    orig_is_admin = pp.is_admin
-    orig_embed = page._embed
-
-    def fake_find(**kw):
-        recorded.setdefault("find_kw", kw)
-        if sup.result is None:
-            return None, "界面进程已退出（code 0），未出现窗口"
-        return 0x1234, None
-
-    pp.winembed.find_window_for_spawn = fake_find
-    pp.winembed.window_alive = lambda hwnd: recorded.setdefault("alive", True)
-    pp.winembed.show_hwnd = lambda hwnd, show=True: recorded.setdefault("show", []).append((hwnd, show))
-    pp.winembed.window_matches = lambda hwnd, pids=None, title_keywords=None: recorded.setdefault(
-        "validated", (hwnd, set(pids or set()), list(title_keywords or []))
-    ) or True
-    pp.is_admin = lambda: True
-
-    def fake_embed(hwnd):
-        recorded["embedded"] = hwnd
-        page._set_state(ProjectPage.STATE_EMBEDDED, "已嵌入（测试桩）")
-
-    page._embed = fake_embed
-
-    # 0. 导航不自动启动：ensure_started 未调用时不应 spawn
-    check("未点击启动时不自动 spawn", sup.spawned == [])
-
-    # 0a. 「打开日志」必须真的打开日志，不能只往实时日志面板写一行。
-    #     历史缺陷：_open_logs 只调 self._log(...)，按钮点了没任何反应。
-    opened = []
-    page._open_logs_fn = lambda key: opened.append(key)
-    page._open_logs()
-    check("打开日志按钮会调起打开动作", opened == ["Alpha"])
-
-    # 1. spawn 失败 → failed
-    sup.result = None
-    page.ensure_started()
-    pump(app, 200)
-    check("spawn 失败进入 failed 状态", page._state == ProjectPage.STATE_FAILED)
-
-    # 2. spawn 成功 + 找到窗口（页面可见）→ 嵌入；查找参数为进程树/标题关键词
-    page.REPORT_WAIT_SEC = 0.4  # 缩短上报等待（测试无真实引导上报，走回退匹配）
-    sup.result = FakeProc(4321)
-    sup.spawned.clear()
-    recorded.clear()
-    page.ensure_started()
-    pump(app, 1200)
-    check("点击启动后调用 spawn_project_gui", sup.spawned == ["Alpha"])
-    check("python GUI 以引导上报端口启动", isinstance(sup.report_ports[-1], int))
-    check("找到窗口后调用嵌入", recorded.get("embedded") == 0x1234)
-    check("嵌入后状态为 embedded", page._state == ProjectPage.STATE_EMBEDDED)
-    find_kw = recorded.get("find_kw") or {}
-    check("回退匹配传入 spawn 进程树", 4321 in (find_kw.get("pids") or set()))
-    check("回退匹配传入标题关键词参数", "title_keywords" in find_kw)
-    check("嵌入前做了归属校验", recorded.get("validated", (None, None, None))[0] == 0x1234)
-    check("嵌入后状态点为绿色", page.dot_state() == pp.DOT_ON)
-
-    # 2a. 引导脚本上报 HWND → 嵌入（不经回退匹配）
-    import socket as _socket
-
-    real_spawn = sup.spawn_project_gui
-
-    def fake_spawn_with_report(key, extra_args=None, report_port=None):
-        # 模拟引导脚本：UDP 上报 HWND，再走真实记录桩
-        if report_port:
-            _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM).sendto(
-                "HWND 43210".encode("ascii"), ("127.0.0.1", report_port)
-            )
-        return real_spawn(key, extra_args, report_port)
-
-    sup.spawn_project_gui = fake_spawn_with_report
-    pp.winembed.window_matches = lambda hwnd, pids=None, title_keywords=None: recorded.setdefault(
-        "validated2", (hwnd, set(pids or set()))
-    ) or True
-    page2 = ProjectPage("BetaPy", {"display_name": "BetaPy（纯 python GUI）", "gui": {"args": ["app.py"]}}, "#81c784", sup, lambda *a, **k: None)
-    page2.show()
-    pump(app, 30)
-    page2.REPORT_WAIT_SEC = 5.0
-
-    def fake_embed2(hwnd):
-        recorded["embedded"] = hwnd
-
-    page2._embed = fake_embed2
-    sup.result = FakeProc(4322)
-    recorded.clear()
-    page2.ensure_started()
-    pump(app, 3600)  # 首次上报后有 2.5s 的收集窗（取最新 HWND）
-    check("引导上报的 HWND 触发嵌入", recorded.get("embedded") == 43210)
-    check("上报窗口经过归属校验", recorded.get("validated2", (None, None))[0] == 43210)
-    sup.spawn_project_gui = real_spawn
-    page2.hide()
-
-    # 2b. 归属校验不通过 → 拒绝嵌入
-    pp.winembed.window_matches = lambda hwnd, pids=None, title_keywords=None: False
-    recorded.clear()
-    sup.result = FakeProc(4325)
-    page._set_state(ProjectPage.STATE_IDLE, "未启动")
-    page.ensure_started()
-    pump(app, 900)  # 引导路径含 0.4s 上报等待，再走回退匹配
-    check("非本项目窗口被拒绝嵌入", page._state == ProjectPage.STATE_FAILED and "embedded" not in recorded)
-    check("拒绝时提示归属不符", "不属于本项目" in (page.state_label.text()))
-    pp.winembed.window_matches = lambda hwnd, pids=None, title_keywords=None: True
-
-    # 2c. require_admin + 非管理员：直接提示，不 spawn
-    admin_spec = {"display_name": "Admin（需提权）", "require_admin": True, "gui": {"args": ["app.py"]}}
-    apage = ProjectPage("Admin", admin_spec, "#ffb74d", sup, lambda *a, **k: None)
-    apage.show()
-    pump(app, 30)
-    pp.is_admin = lambda: False
-    sup.spawned.clear()
-    apage.ensure_started()
-    pump(app, 200)
-    check("非管理员下需提权项目直接失败", apage._state == ProjectPage.STATE_FAILED and not sup.spawned)
-    check("提示需要管理员权限", "管理员" in apage.state_label.text())
-    pp.is_admin = lambda: True
-    apage.hide()
-
-    # 3. 静默模式：页面不可见时找到窗口 → 隐藏而非嵌入
-    page2 = ProjectPage("Beta", FAKE_REGISTRY["projects"]["Beta"], "#81c784", sup, lambda *a, **k: None)
-
-    def fake_embed2(hwnd):
-        recorded["embedded2"] = hwnd
-
-    page2._embed = fake_embed2
-    # page2 不 show() → isVisible() False
-    sup.result = FakeProc(4322)
-    recorded.clear()
-    page2.ensure_started(silent=True)
-    pump(app, 200)
-    check("静默模式隐藏窗口而非嵌入", recorded.get("show") == [(0x1234, False)] and "embedded2" not in recorded)
-    check("静默模式状态为 hidden", page2._state == ProjectPage.STATE_HIDDEN)
-
-    # 4. 静默隐藏后用户切进该页 → 嵌入
-    page2.ensure_started()
-    pump(app, 80)
-    check("进入页面时嵌入已隐藏窗口", recorded.get("embedded2") == 0x1234)
-
-    # 5. tick：嵌入窗口被关闭 → 回到 idle（显式置为 embedded，不依赖前面状态）
-    recorded["alive"] = True
-    page._hwnd = 0x1234
-    page._set_state(ProjectPage.STATE_EMBEDDED, "已嵌入（测试桩）")
-    pump(app, 30)
-    recorded["alive"] = False
-    page.tick()
-    pump(app, 40)
-    check("窗口关闭后 tick 回到 idle", page._state == ProjectPage.STATE_IDLE and page._hwnd is None)
-    check("关闭后状态点回到灰色", page.dot_state() == pp.DOT_OFF)
-
-    # 5b. shutdown：关闭嵌入窗口 + 结束界面进程树
-    close_calls = []
-    kill_calls = []
-    orig_close = pp.winembed.close_hwnd
-    orig_kill = pp.winembed.kill_tree
-    pp.winembed.close_hwnd = lambda hwnd: close_calls.append(hwnd)
-    pp.winembed.kill_tree = lambda pid: kill_calls.append(pid)
-    page._hwnd = 0x1234
-    recorded["alive"] = True
-    page._proc = FakeProc(4321)
-    page.shutdown()
-    pump(app, 30)
-    check("退出时向嵌入窗口投递 WM_CLOSE", close_calls == [0x1234])
-    check("退出时结束界面进程树", kill_calls == [4321])
-    pp.winembed.close_hwnd = orig_close
-    pp.winembed.kill_tree = orig_kill
-
-    # 6. 网页模式（BAAH）：真实本地 HTTP 服务验证端口/参数/就绪探测
-    import http.server
-    import socketserver
-    import threading
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-
-        def log_message(self, *args):
-            pass
-
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
-    real_port = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-
-    web_spec = {"display_name": "WebProj（网页示例）", "gui": {"args": ["editor.py"], "web": True, "port_arg": "--port", "no_show_arg": "--no-show"}}
-    wpage = ProjectPage("WebProj", web_spec, "#ffb74d", sup, lambda *a, **k: None)
-    wpage.show()
-    pump(app, 40)
-    pp.winembed.pick_free_port = lambda: real_port
-
-    def fake_embed_web(port):
-        recorded["embedded_web"] = port
-        wpage._set_state(ProjectPage.STATE_EMBEDDED, "已嵌入（测试桩）")
-
-    wpage._embed_web = fake_embed_web
-    sup.result = FakeProc(4323)
-    recorded.clear()
-    wpage.ensure_started()
-    pump(app, 400)
-    check("网页模式传入 --no-show", "--no-show" in (sup.extra_args[-1] if sup.extra_args else []))
-    check("网页模式传入固定端口", str(real_port) in (sup.extra_args[-1] if sup.extra_args else []))
-    check("HTTP 就绪后触发网页嵌入", recorded.get("embedded_web") == real_port)
-    check("网页模式状态为 embedded", wpage._state == ProjectPage.STATE_EMBEDDED)
-    check("网页模式状态点为绿色", wpage.dot_state() == pp.DOT_ON)
-
-    # 7. 网页服务停止 → tick 探测后回 idle
-    httpd.shutdown()
-    for _ in range(ProjectPage.WEB_CHECK_EVERY * 4 + 2):
-        wpage.tick()
-        pump(app, 5)
-    pump(app, 40)
-    check("网页服务停止后 tick 回到 idle", wpage._state == ProjectPage.STATE_IDLE and wpage._port is None)
-
-    pp.winembed.find_window_for_spawn = orig_find
-    pp.winembed.window_alive = orig_alive
-    pp.winembed.show_hwnd = orig_show
-    pp.winembed.window_matches = orig_matches
-    pp.is_admin = orig_is_admin
-    page._embed = orig_embed
-    page.hide()
-    page2.hide()
-    wpage.hide()
-
-
 def test_supervisor_extensions():
     # 运行顺序排序：列出的按优先级，未列出的保持原相对顺序垫底
     ordered = apply_chain_order(["A", "B", "C", "D"], ["C", "A"])
@@ -596,17 +353,6 @@ def test_supervisor_extensions():
     bus.stop_server()
 
 
-def test_winembed_sanity():
-    # 验证 EnumWindows 机制本身可用：可见窗口数随桌面上开着什么而变（可能只有几个），
-    # 所以断言「至少能枚举到窗口」而不是一个会随环境漂移的具体数量。
-    windows = winembed.list_windows()
-    check("EnumWindows 枚举到可见窗口", len(windows) >= 1)
-    check("窗口条目结构完整", all(len(w) == 4 and w[0] for w in windows[:20]))
-    # include_hidden 应当比默认（仅可见）枚举到更多窗口，说明过滤逻辑生效
-    all_windows = winembed.list_windows(include_hidden=True)
-    check("include_hidden 枚举到不少于可见窗口", len(all_windows) >= len(windows))
-
-
 def test_main_window(app):
     """完整实例化 MainWindow（隔离：临时 settings/日志目录，spawn 打桩）。"""
     config.save_yaml(
@@ -633,10 +379,12 @@ def test_main_window(app):
 
     gui_projects = [k for k, s in (config.registry().get("projects", {}) or {}).items() if s.get("gui")]
     try:
-        check("页面数 = 总览 + 项目页 + 设置页", window.stack.count() == 1 + len(gui_projects) + 1)
+        # 页面只有「总览 + 设置」：项目界面不再嵌入本窗口（历史实现是给每个带
+        # gui 段的项目建一个嵌入页，用 QWindow.fromWinId 把项目窗口抓进来）。
+        check("页面数 = 总览 + 设置页", window.stack.count() == 2)
         check("导航含总览/设置项", window.nav.item_for_key("overview") is not None and window.nav.item_for_key("settings") is not None)
-        for key in gui_projects:
-            check("导航含项目页 {0}".format(key), window.nav.item_for_key("page:" + key) is not None)
+        check("导航不再有项目嵌入页",
+              not [k for k in window.nav.item_keys() if str(k).startswith("page:")])
         check("默认显示总览页", window.stack.currentIndex() == 0 and window.nav.active_key() == "overview")
 
         # 卡片的详情行不能跟状态行互相矛盾。历史缺陷：update_state 的兜底文案
@@ -849,17 +597,13 @@ def test_main_window(app):
             abs(ind.y() - (overview_item.y() + 8)) <= 2 and ind.height() <= overview_item.height(),
         )
 
-        # spawn 打桩：页面上的「启动界面」不会真的拉起项目 GUI
+        # 「界面」按钮走原生独立打开：只 spawn 一个进程，不再嵌入本窗口
         spawn_calls = []
-        window.supervisor.spawn_project_gui = lambda key, extra_args=None, report_port=None: spawn_calls.append(key) or None
-        window._navigate("page:March7thAssistant")
-        pump(app, 300)
-        page = window.project_pages["March7thAssistant"]
-        check("导航切到项目页", window.stack.currentWidget() is page)
-        check("导航不自动启动项目界面", page._state == ProjectPage.STATE_IDLE and not spawn_calls)
-        page.ensure_started()
-        pump(app, 300)
-        check("点击启动后进入失败态（桩返回 None）", page._state == ProjectPage.STATE_FAILED)
+        window.supervisor.spawn_project_gui = lambda key, extra_args=None: spawn_calls.append(key) or None
+        window._open_project_gui(gui_projects[0])
+        pump(app, 400)
+        check("「界面」按钮拉起项目自己的进程", spawn_calls == [gui_projects[0]])
+        check("打开界面失败时写告警日志", "无法打开" in window.log_view.toPlainText())
         window._navigate("settings")
         pump(app, 60)
         check("导航切到设置页", window.stack.currentWidget() is window.settings_page)
@@ -1179,17 +923,9 @@ def test_main_window(app):
         if dropped_gui:
             check("保存注册表后删掉项目的静默勾选项消失",
                   dropped_gui not in window.settings_page.silent_checks)
-        if (mutated["projects"][extra_key] or {}).get("gui"):
-            nav_widgets = [
-                window.nav._layout().itemAt(i).widget()
-                for i in range(window.nav._layout().count())
-            ]
-            check("保存注册表后新项目出现在导航", window.nav.item_for_key("page:" + extra_key) is not None)
-            check(
-                "导航项排在「设置」前面",
-                nav_widgets.index(window.nav.item_for_key("page:" + extra_key))
-                < nav_widgets.index(window.nav.item_for_key("settings")),
-            )
+        # 嵌入页已经整体移除，注册表里再多带 gui 段的项目也不会长出导航项。
+        check("保存注册表后不会新增项目导航项",
+              not [k for k in window.nav.item_keys() if str(k).startswith("page:")])
         check("保存注册表后副标题跟随项目数量", "冒烟新增项目" in window._subtitle_label.text())
         # 还原：把注册表写回原样，后续断言依赖原来的 5 个项目
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
@@ -1197,9 +933,9 @@ def test_main_window(app):
         pump(app, 400)
         check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
 
-        # 改已存在项目的显示名，卡片和嵌入页页头都要跟着变。
-        # 历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片/页一直
-        # 用构造时的 spec，导航和副标题都改了名字，卡片标题还是旧的。
+        # 改已存在项目的显示名，卡片标题要跟着变。
+        # 历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一直
+        # 用构造时的 spec，副标题都改了名字，卡片标题还是旧的。
         rename_key = next(iter(original_registry["projects"]))
         renamed = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         renamed["projects"][rename_key]["display_name"] = "冒烟改名项目（测试）"
@@ -1207,11 +943,6 @@ def test_main_window(app):
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("改显示名后项目卡标题跟随", window.cards[rename_key].name_label.text() == "冒烟改名项目")
-        if rename_key in window.project_pages:
-            check(
-                "改显示名后嵌入页页头跟随",
-                window.project_pages[rename_key].name_label.text() == "冒烟改名项目",
-            )
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
@@ -1239,9 +970,6 @@ def test_main_window(app):
             "超长显示名下副标题不撑宽头部",
             window._subtitle_label.minimumSizeHint().width() <= 200,
         )
-        if rename_key in window.project_pages:
-            page_label = window.project_pages[rename_key].name_label
-            check("超长显示名在嵌入页页头也被裁掉", page_label.display_text() != long_name)
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
@@ -1250,9 +978,9 @@ def test_main_window(app):
             window.cards[rename_key].name_label.text() == str(original_registry["projects"][rename_key].get("display_name", rename_key)).split("（")[0],
         )
 
-        # 改 gui.project_colors 后卡片色条与嵌入页指示灯要跟着变。
+        # 改 gui.project_colors 后卡片色条与日志前缀要跟着变。
         # 历史缺陷：project_colors 只在 MainWindow.__init__ 读过一次，改完保存后
-        # 卡片顶部色条、嵌入页指示灯、日志前缀颜色全是开窗时那份旧配色。
+        # 卡片顶部色条、日志前缀颜色全是开窗时那份旧配色。
         color_key = rename_key
         color_before = window.cards[color_key].color
         probe_color = "#ff00aa"
@@ -1267,11 +995,6 @@ def test_main_window(app):
             "改项目配色后卡片色条跟随",
             probe_color in window.cards[color_key].accent.styleSheet(),
         )
-        if color_key in window.project_pages:
-            check(
-                "改项目配色后嵌入页指示灯跟随",
-                window.project_pages[color_key].color == probe_color,
-            )
         check("改项目配色后日志前缀用新颜色", window._project_color(color_key) == probe_color)
         # 还原配色，避免影响后面的断言
         mutated_settings["gui"]["project_colors"] = {}
@@ -1296,20 +1019,18 @@ def test_main_window(app):
         pump(app, 400)
         check("还原 gui 段后「界面」按钮回来", window.cards[gui_key].gui_btn.isVisible())
 
-        # 删掉「正开着的那个项目页」时，界面必须退回总览，而不是自动翻到相邻项目。
-        # 历史缺陷：QStackedWidget 移除当前页会自己切到相邻下标——实测从「三月七
-        # 小助手」页删掉该项目后界面直接变成「BAAH」的页，左侧导航没有任何高亮项，
-        # 用户看到的是另一个项目的界面，还不知道自己什么时候切过去的。
-        window.nav.navigate.emit("page:" + gui_key)
+        # 注册表里删掉某个项目时，界面不能因为 QStackedWidget 移除页面而乱翻页。
+        # 历史缺陷（嵌入页时代）：移除当前页会自己切到相邻下标，用户看到的是另一
+        # 个项目。现在只有总览/设置两页，删项目后必须仍在原来那一页上。
+        window.nav.navigate.emit("overview")
         pump(app, 300)
-        check("切到项目页后 stack 显示该页", window.stack.currentWidget() is window.project_pages[gui_key])
         removed_view = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
-        removed_view["projects"][gui_key]["gui"] = None
+        removed_view["projects"].pop(gui_key, None)
         window.registry_edit.setPlainText(yaml.safe_dump(removed_view, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
-        check("删掉正开着的项目页后退回总览", window.stack.currentWidget() is window.stack.widget(0))
-        check("删掉正开着的项目页后导航高亮回到总览", window.nav.active_key() == "overview")
+        check("删掉项目后仍停在总览页", window.stack.currentWidget() is window.stack.widget(0))
+        check("删掉项目后导航高亮仍是总览", window.nav.active_key() == "overview")
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
@@ -1541,7 +1262,7 @@ def test_main_window(app):
             pump(app, 60)
             check("没有记录位置时回落到默认可见位置", _widget_visible(widget))
 
-        # _poll 全流程：快照/胶囊/导航点/嵌入页 tick
+        # _poll 全流程：快照/胶囊/导航高亮（不再有嵌入页 tick）
         window._poll()
         pump(app, 60)
         check("_poll 正常执行", True)
@@ -1571,9 +1292,7 @@ def main():
     try:
         test_nav_rail(app)
         test_settings_page(app)
-        test_project_page(app)
         test_supervisor_extensions()
-        test_winembed_sanity()
         test_main_window(app)
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS

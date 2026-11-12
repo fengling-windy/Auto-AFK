@@ -7,7 +7,6 @@
 产出：
     ui_preview_default.png    总览页默认状态
     ui_preview_states.png     总览页动效状态（涟漪/按压/悬停/指示条中段）
-    ui_preview_project.png    项目界面嵌入页
     ui_preview_settings.png   设置页
 """
 
@@ -48,7 +47,6 @@ from gui.modern import (
     enable_smooth_scroll,
 )
 from gui.nav_rail import NavRail
-from gui.project_page import ProjectPage
 from gui.settings_page import SettingsPage
 
 FAKE_RUNS = {
@@ -296,11 +294,9 @@ def build_shell():
     root.setSpacing(0)
 
     nav = NavRail()
+    # 与真实 MainWindow._build_ui 一致：只有「总览」「设置」两项。项目界面不再
+    # 当作嵌入页挂进导航，点卡片上的「界面」是独立打开项目自己的窗口。
     nav.add_item("overview", "总览")
-    nav.add_item("proj-cap", "项目界面", section=True)
-    for key, spec in FAKE_PROJECTS.items():
-        nav.add_item("page:" + key, str(spec.get("display_name", key)).split("（")[0])
-    nav.add_item("sys-cap", "系统", section=True)
     nav.add_item("settings", "设置")
     nav.finish()
     # 真实 MainWindow 在 _build_ui 末尾会 set_active("overview")；预览若跳过这一步，
@@ -309,7 +305,6 @@ def build_shell():
     nav.set_active("overview", animate=False)
     root.addWidget(nav)
 
-    stack = QWidget()
     from PySide6.QtWidgets import QStackedWidget
 
     stack = QStackedWidget()
@@ -319,28 +314,18 @@ def build_shell():
     populate_log(log_view)
     stack.addWidget(overview)
 
-    pages = {}
-    for i, (key, spec) in enumerate(FAKE_PROJECTS.items()):
-        page = ProjectPage(key, spec, gui_main.PROJECT_COLORS.get(key, "#4fc3f7"), FakeSupervisor(), _noop)
-        if i == 0:
-            page._set_state(ProjectPage.STATE_STARTING, "正在启动界面进程...", pulse=True)
-        pages[key] = page
-        stack.addWidget(page)
-
     settings_page = SettingsPage(log_fn=_noop, registry=FAKE_REGISTRY)
     stack.addWidget(settings_page)
 
-    nav.navigate.connect(lambda key: _navigate(stack, nav, key, pages))
-    return central, stack, nav, tabs, cards, chain_pill, pages, settings_page
+    nav.navigate.connect(lambda key: _navigate(stack, nav, key))
+    return central, stack, nav, tabs, cards, chain_pill, settings_page
 
 
-def _navigate(stack, nav, key, pages):
+def _navigate(stack, nav, key):
     if key == "overview":
         page = stack.widget(0)
     elif key == "settings":
         page = stack.widget(stack.count() - 1)
-    elif key.startswith("page:"):
-        page = pages.get(key[5:])
     else:
         return
     if page is None:
@@ -356,7 +341,7 @@ def main():
     app.setStyleSheet(gui_main.APP_QSS)
     apply_palette(app)
 
-    window, stack, nav, tabs, cards, chain_pill, pages, settings_page = build_shell()
+    window, stack, nav, tabs, cards, chain_pill, settings_page = build_shell()
     window.show()
 
     def shot_overview():
@@ -366,11 +351,6 @@ def main():
 
     def shot_states():
         window.grab().save(str(out_dir / "ui_preview_states.png"))
-        nav.navigate.emit("page:BetterGI")
-        QTimer.singleShot(80, shot_project)
-
-    def shot_project():
-        window.grab().save(str(out_dir / "ui_preview_project.png"))
         nav.navigate.emit("settings")
         QTimer.singleShot(80, shot_settings)
 

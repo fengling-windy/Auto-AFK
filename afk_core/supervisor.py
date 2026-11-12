@@ -453,15 +453,16 @@ class Supervisor:
             env[str(k)] = str(v)
         return env
 
-    def spawn_project_gui(self, key, extra_args=None, report_port=None):
+    def spawn_project_gui(self, key, extra_args=None):
         """Spawn a project's own configuration GUI (not a supervised task run)
-        and return the Popen handle so the caller can locate/embed its window.
+        and return the Popen handle.
 
-        report_port 传入时（仅 python 入口），用 gui/gui_bootstrap.py 包裹启动：
-        引导脚本在项目进程内运行入口并把主窗口 HWND 上报给 Auto-AFK，
-        窗口定位零搜索、不会误抓其他窗口。
-        The spawned process is detached: it outlives Auto-AFK and is neither
-        monitored nor cleaned up. Returns None on failure."""
+        历史：这里曾支持 report_port，用 gui/gui_bootstrap.py 在项目进程内上报
+        主窗口 HWND，供「把项目窗口抓进 Auto-AFK 界面」的嵌入页使用。窗口嵌入
+        已整体移除，项目界面改为原生独立窗口，这套引导上报也一并删掉了。
+        The spawned process is detached and owns its own window: it outlives
+        Auto-AFK and is neither monitored nor cleaned up. Returns None on failure.
+        """
         spec = self._projects().get(key)
         if spec is None:
             self._emit("core", "error", "unknown project: {0}".format(key), level="error")
@@ -472,11 +473,6 @@ class Supervisor:
             return None
         if extra_args:
             cmd.extend(str(a) for a in extra_args)
-        if report_port is not None and spec.get("launch_type", "python") == "python" and not (spec.get("gui") or {}).get("exe"):
-            bootstrap = config.ROOT / "gui" / "gui_bootstrap.py"
-            if bootstrap.exists():
-                # [python, 引导脚本, 上报端口, 原脚本, 原参数...]
-                cmd = [cmd[0], str(bootstrap), str(int(report_port))] + cmd[1:]
         env = self._build_gui_env(key, spec, project)
         # CREATE_NO_WINDOW hides the venv launcher's console; unlike
         # STARTF_USESHOWWINDOW SW_HIDE it does not hide the app's Qt window

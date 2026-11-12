@@ -86,10 +86,10 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(4, 2, 8, 8)
         layout.setSpacing(10)
 
-        # -- 1. 启动时静默打开项目界面 -----------------------------------------
+        # -- 1. 启动时自动打开项目界面 -----------------------------------------
         self.silent_card = _SectionCard(
-            "启动时后台打开项目界面",
-            "勾选后，Auto-AFK 启动时会自动拉起对应项目的配置界面并隐藏到后台；点击左侧导航进入该页时再嵌入显示。",
+            "启动时自动打开项目界面",
+            "勾选后，Auto-AFK 启动时会把对应项目的配置界面独立打开（与手动双击该项目的启动器效果相同，窗口归项目自己管辖，不嵌入本窗口）。",
         )
         self.silent_checks = {}
         self._silent_empty_hint = QLabel("（当前没有配置 gui 入口的项目）")
@@ -261,13 +261,13 @@ class SettingsPage(QWidget):
         return {k: s for k, s in projects.items() if s.get("gui")}
 
     def _build_silent_checks(self):
-        """按当前注册表重建「启动时后台打开项目界面」的勾选项。
+        """按当前注册表重建「启动时自动打开项目界面」的勾选项。
 
         历史缺陷：这几个复选框只在 __init__ 里按当时的注册表建一次。用户在
-        「项目注册表」tab 新增一个带界面的项目并保存后，主窗口的项目卡、左侧
-        导航、嵌入页都跟着更新了，唯独这里没有它的勾选框——用户永远无法让新
-        项目开机静默启动，也看不出少了一项。删掉的项目反之会留下一个勾选框，
-        勾上后保存进 silent_open_projects，之后每次启动都去拉起一个不存在的项目。
+        「项目注册表」tab 新增一个带界面的项目并保存后，主窗口的项目卡都跟着
+        更新了，唯独这里没有它的勾选框——用户永远无法让新项目开机自动打开，
+        也看不出少了一项。删掉的项目反之会留下一个勾选框，勾上后保存进
+        silent_open_projects，之后每次启动都去拉起一个不存在的项目。
         """
         silent_set = {
             str(k)
@@ -356,7 +356,7 @@ class SettingsPage(QWidget):
             gui_cfg["silent_open_projects"] = current
 
         self._mutate_settings(mutate)
-        self._log("core", "info", "静默启动界面 {0}: {1}".format(key, "开" if checked else "关"))
+        self._log("core", "info", "启动时自动打开界面 {0}: {1}".format(key, "开" if checked else "关"))
 
     def _save_order(self, *_):
         if self._loading:
@@ -512,8 +512,8 @@ class SettingsPage(QWidget):
         self._loading = True
         try:
             settings = config.settings()
-            # 静默启动勾选项要跟着注册表重建（外部新增/删除带界面的项目后必须
-            # 反映到这几行，见 _build_silent_checks 的历史缺陷说明）。
+            # 「启动时自动打开」勾选项要跟着注册表重建（外部新增/删除带界面的
+            # 项目后必须反映到这几行，见 _build_silent_checks 的历史缺陷说明）。
             self._build_silent_checks()
             # 运行顺序也要跟着刷新：之前漏了这一项，外部改了 chain.order
             # （或直接在「设置」tab 里改了 yaml 保存）再回来，列表还是旧顺序，

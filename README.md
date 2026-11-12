@@ -58,6 +58,7 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
   换到更小的屏幕时自动夹进可用区域、不覆盖你调过的尺寸；把该值清空为 `[]` 即恢复按屏幕自适应的默认尺寸。
   - **项目卡片「界面」按钮**：每个挂机项目卡片上点「界面」可打开该项目自己的图形界面
     （三月七小助手=app.py 启动器、BAAH=配置编辑器、MaaEnd=MXU、绝区零=一条龙配置界面、BetterGI=主界面），
+    窗口是**项目自己的原生窗口**（独立进程、独立任务栏项，不被 Auto-AFK 的界面接管或嵌入），
     仅打开窗口、**不运行任务也不受监管**，进程独立于 Auto-AFK（关掉 Auto-AFK 后仍保留）；
     也可用 `Auto-AFK-CLI.bat gui <项目名>` 打开。GUI 入口在各项目的 `gui:` 配置块中定义，新增项目照抄即可。
   - **现代化深色界面**：圆角卡片 + 项目色条、状态圆点与状态胶囊、主/次按钮层级、标签页下划线指示、
@@ -354,7 +355,7 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 & .venv\Scripts\python.exe tests\smoke_idle.py       # 空闲阈值/武装冷却、三选一提示框、自启、background 组、小组件
 & .venv\Scripts\python.exe tests\smoke_idle_flow.py  # 空闲到点 -> 提示框 -> 启动任务（含 --tray 开机自启模式）
 & .venv\Scripts\python.exe tests\smoke_thread_qt.py  # 后台线程经 Signal 投递到 GUI 线程，不直接碰控件
-& .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/嵌入页）
+& .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/项目卡）
 & .venv\Scripts\python.exe tests\smoke_modern_ui.py  # 主题与动效组件（按钮/滚动/Tab/状态点/胶囊）
 & .venv\Scripts\python.exe tests\smoke_real_launch.py # 真实 fork GUI 进程（入口/事件管道/CLI 远程/空闲初始化）
 & .venv\Scripts\python.exe tests\smoke_gui_log_events.py # GUI 动作进事件流 + 渲染不回声

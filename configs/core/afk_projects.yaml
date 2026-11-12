@@ -38,8 +38,6 @@ projects:
     # 打开配置界面（app.py = 三月七小助手图形启动器；不带任务参数）
     gui:
       args: [app.py]
-      # 单实例应用：若 GUI 已在运行，新进程会退出，用窗口标题兜底定位
-      gui_window_keywords: ["March7th Assistant"]
     retry: 1
     hang_timeout: 900
     require_admin: true
@@ -201,8 +199,6 @@ projects:
     # 打开一条龙图形配置界面（extra_pythonpath 由打开逻辑自动带上）
     gui:
       args: [src\zzz_od\gui\app.py]
-      # 单实例应用：用窗口标题兜底定位（"一条龙"避免误匹配"绝区零"游戏窗口）
-      gui_window_keywords: ["一条龙"]
     extra_pythonpath:
       - src
     retry: 1

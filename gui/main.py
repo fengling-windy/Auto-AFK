@@ -67,7 +67,6 @@ from gui.idle_prompt import (
     decide_on_timeout,
 )
 from gui.nav_rail import NavRail
-from gui.project_page import ProjectPage
 from gui.settings_page import SettingsPage
 from gui.widget import DesktopWidget
 
@@ -343,6 +342,9 @@ class MainWindow(QMainWindow):
     # 后台任务（更新/自检）结束时把按钮恢复可用。worker 在后台线程跑，
     # 不能直接碰控件，统一用 Signal 排队回 GUI 线程。
     task_finished = Signal(str)
+    # 「界面」按钮在后台线程里拉起项目窗口，成功/失败都要写一行日志。
+    # 后台线程直接写 log_view 属跨线程操作控件，必须走 Signal。
+    gui_log = Signal(str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -425,6 +427,7 @@ class MainWindow(QMainWindow):
 
         self.doctor_result.connect(self._render_doctor)
         self.task_finished.connect(self._end_task)
+        self.gui_log.connect(self._append_log)
         try:
             from afk_core.housekeeping import cleanup_logs
 
@@ -449,14 +452,15 @@ class MainWindow(QMainWindow):
         elif (self.settings.get("gui", {}) or {}).get("autostart_chain_on_launch"):
             QTimer.singleShot(2000, self.start_chain)
 
-        # 静默启动勾选的项目界面（隐藏到后台，进入对应导航页时嵌入显示）
+        # 静默启动勾选的项目界面（原生独立打开，只拉进程、不嵌入）
         silent_keys = [
             str(k) for k in ((self.settings.get("gui") or {}).get("silent_open_projects") or [])
-            if k in self.project_pages
+            if k in (config.registry().get("projects") or {})
+            and (config.registry().get("projects") or {}).get(k, {}).get("gui")
         ]
         if silent_keys:
-            self._append_log("core", "info", "静默启动项目界面: {0}".format(", ".join(silent_keys)))
-            QTimer.singleShot(3000, lambda: self._silent_open_pages(silent_keys))
+            self._append_log("core", "info", "启动时打开项目界面: {0}".format(", ".join(silent_keys)))
+            QTimer.singleShot(3000, lambda: self._open_silent_pages(silent_keys))
 
     def _build_ui(self):
         central = QWidget()
@@ -466,14 +470,13 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         # -- 左侧导航栏 --------------------------------------------------------
+        # 历史：这里曾为每个带 gui 段的项目挂一个 page:XXX 导航项，点进去用
+        # QWindow.fromWinId 把项目自己的窗口「抓」进本窗口。那套做法在真机上
+        # 问题很多（窗口被抢走后布局错乱、跨进程输入法/焦点异常、关窗后进程
+        # 残留），已整体移除。现在只保留「一键挂机」这一套编排入口，项目界面
+        # 一律由卡片上的「界面」按钮用原生方式独立打开。
         self.nav = NavRail()
         self.nav.add_item("overview", "总览")
-        self._nav_page_keys = []
-        for key, spec in (config.registry().get("projects", {}) or {}).items():
-            if spec.get("gui"):
-                nav_key = "page:" + key
-                self._nav_page_keys.append((key, nav_key))
-                self.nav.add_item(nav_key, str(spec.get("display_name", key)).split("（")[0])
         self.nav.add_item("settings", "设置")
         self.nav.finish()
         self.nav.navigate.connect(self._navigate)
@@ -706,19 +709,6 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(overview)  # index 0 = 总览
 
-        # -- 项目界面嵌入页 --------------------------------------------------------
-        self.project_pages = {}
-        for key, spec in (config.registry().get("projects", {}) or {}).items():
-            if not spec.get("gui"):
-                continue
-            page = ProjectPage(
-                key, spec, self._project_color(key),
-                self.supervisor, self._append_log,
-                open_logs_fn=self._open_project_logs,
-            )
-            self.project_pages[key] = page
-            self.stack.addWidget(page)
-
         # -- 设置页 ----------------------------------------------------------------
         self.settings_page = SettingsPage(log_fn=self._append_log)
         self.settings_page.changed.connect(self._on_settings_changed)
@@ -737,18 +727,13 @@ class MainWindow(QMainWindow):
         self.mumu_btn.clicked.connect(self.run_mumu_updater)
 
     def _navigate(self, key):
-        """导航栏切换页面（不自动启动项目界面，需点击页内「启动界面」）。"""
+        """导航栏切换页面（总览 / 设置）。"""
         page = None
         if key == "overview":
             page = self.stack.widget(0)
         elif key == "settings":
             self.settings_page.reload_from_disk()
             page = self.settings_page
-        elif key.startswith("page:"):
-            page = self.project_pages.get(key[5:])
-            if page is not None and page._state == ProjectPage.STATE_HIDDEN:
-                # 静默启动的界面：进入页面时嵌入显示
-                page.ensure_started()
         else:
             return
         if page is None:
@@ -760,24 +745,41 @@ class MainWindow(QMainWindow):
             settings_page.flush_pending()
         self.stack.setCurrentWidget(page)
         self.nav.set_active(key, animate=False)
-        if not key.startswith("page:"):
-            # 含原生窗口容器（外部窗口）的页面不能用透明度特效
-            fade_in_widget(page, duration=150)
+        fade_in_widget(page, duration=150)
 
     def open_project_page(self, key):
-        """项目卡片「界面」按钮 → 切到嵌入页。"""
-        if key in self.project_pages:
-            self._navigate("page:" + key)
-        else:
-            threading.Thread(target=self.supervisor.open_project_gui, args=(key,), daemon=True, name="afk-gui-" + key).start()
+        """项目卡片「界面」按钮 → 用原生方式独立打开该项目的界面窗口。
+
+        历史：这里曾切到「项目嵌入页」，用 QWindow.fromWinId + createWindowContainer
+        把项目自己的窗口抓进本窗口显示。那套嵌入在真机上有连锁问题（窗口被
+        抢走后布局错乱、跨进程焦点/输入法异常、关本窗口后子进程残留），已整体
+        移除。现在就是拉一个独立的进程，窗口归它自己管，跟手动双击一样。
+        """
+        self._open_project_gui(key)
+
+    def _open_project_gui(self, key):
+        """后台线程拉起项目的配置界面（不阻塞 UI，不嵌入）。"""
+        def worker():
+            try:
+                ok = self.supervisor.open_project_gui(key)
+            except Exception as exc:
+                self.gui_log.emit(key, "error", "打开界面失败: {0}".format(exc))
+                return
+            if ok:
+                self.gui_log.emit(key, "info", "已打开 {0} 的界面".format(key))
+            else:
+                self.gui_log.emit(key, "warn", "无法打开 {0} 的界面：注册表里没有配置 gui 入口".format(key))
+
+        threading.Thread(target=worker, daemon=True, name="afk-gui-" + key).start()
+
 
     def _reload_project_colors(self):
-        """settings.yaml 的 gui.project_colors 改了之后让卡片/嵌入页配色跟上。
+        """settings.yaml 的 gui.project_colors 改了之后让卡片/日志配色跟上。
 
         历史缺陷：project_colors 只在 MainWindow.__init__ 里读一次并 snapshot 成
         self.project_colors。用户在「设置」tab 里改某个项目的颜色（或在 yaml 里加
-        gui.project_colors）再保存，卡片顶部色条、项目嵌入页的指示灯、
-        以及实时日志里该项目的前缀颜色全是开窗时那份旧配色，看起来像没保存。
+        gui.project_colors）再保存，卡片顶部色条以及实时日志里该项目的前缀颜色
+        全是开窗时那份旧配色，看起来像没保存。
         """
         custom = (self.settings.get("gui") or {}).get("project_colors") or {}
         colors = dict(PROJECT_COLORS)
@@ -787,10 +789,6 @@ class MainWindow(QMainWindow):
             color = self._project_color(key)
             if card.color != color:
                 card.apply_spec(card.spec, color)
-        for key, page in (getattr(self, "project_pages", {}) or {}).items():
-            color = self._project_color(key)
-            if page.color != color:
-                page.apply_spec(page.spec, color)
 
     def _on_settings_changed(self):
         self.settings = config.settings()
@@ -822,11 +820,10 @@ class MainWindow(QMainWindow):
         self._reload_project_colors()
         self._sync_settings_editor()
 
-    def _silent_open_pages(self, keys):
+    def _open_silent_pages(self, keys):
+        """启动时按设置打开（不嵌入、不隐藏）勾选项目的界面窗口。"""
         for key in keys:
-            page = self.project_pages.get(key)
-            if page is not None:
-                page.ensure_started(silent=True)
+            self._open_project_gui(key)
 
     def _file_tab(self, edit, path, button_text):
         tab = QWidget()
@@ -1003,33 +1000,13 @@ class MainWindow(QMainWindow):
         历史缺陷：这里原来什么都没做。改完注册表一保存，文件是对的，但界面、
         supervisor、设置页全都还在用开窗时读到的那一份——用户新增的项目不出现
         在总览页和左侧导航、删掉的项目卡片还在、改过的显示名/启用状态不生效。
-        重新读盘后按差异同步三处：项目卡、左侧导航入口、设置页（含运行顺序）。
+        重新读盘后按差异同步两处：项目卡、设置页（含运行顺序）。左侧导航只有
+        「总览」「设置」两项，不再随注册表增删。
         """
         registry = config.registry()
         projects = registry.get("projects", {}) or {}
         self.supervisor.registry = registry
-        # -- 1. 导航栏：新增的加进来，删掉的移走，改名/启用状态跟随 --------
-        nav = getattr(self, "nav", None)
-        for key, spec in projects.items():
-            nav_key = "page:" + key
-            label = str(spec.get("display_name", key)).split("（")[0]
-            if nav is not None and nav.item_for_key(nav_key) is None:
-                nav.add_item(nav_key, label)
-            elif nav is not None:
-                item = nav.item_for_key(nav_key)
-                if item is not None and item.text() != label:
-                    item.setText(label)
-        if nav is not None:
-            for nav_key in nav.item_keys():
-                if not nav_key.startswith("page:"):
-                    continue
-                key = nav_key[5:]
-                if key not in projects or not (projects[key] or {}).get("gui"):
-                    nav.remove_item(nav_key)
-        self._nav_page_keys = [
-            (key, "page:" + key) for key, spec in projects.items() if spec.get("gui")
-        ]
-        # -- 2. 项目卡：缺的补上，多的撤掉，其余更新文案/颜色 ----------------
+        # -- 1. 项目卡：缺的补上，多的撤掉，其余更新文案/颜色 ----------------
         cards = getattr(self, "cards", {})
         host = getattr(self, "cards_host", None)
         flow = host.flow() if host is not None else None
@@ -1058,46 +1035,7 @@ class MainWindow(QMainWindow):
                 flow.removeWidget(card)
             card.setParent(None)
             card.deleteLater()
-        # -- 3. 项目嵌入页：新增带 gui 的补页，删掉的移除 ---------------------
-        pages = getattr(self, "project_pages", {})
-        for key, spec in projects.items():
-            if not spec.get("gui"):
-                continue
-            if key in pages:
-                pages[key].apply_spec(spec)
-                continue
-            page = ProjectPage(
-                key, spec, self._project_color(key),
-                self.supervisor, self._append_log,
-                open_logs_fn=self._open_project_logs,
-            )
-            pages[key] = page
-            self.stack.addWidget(page)
-        # 正开着的那个项目页即将被删：QStackedWidget 移除当前页会自动切到相邻
-        # 下标——实测从「三月七小助手」页删掉该项目后，界面直接变成「BAAH」的页，
-        # 而左侧导航没有任何高亮项、页头还停在原处，用户看到的是另一个项目的
-        # 界面且不知道自己什么时候切过去的。这里显式退回总览页。
-        viewing_removed = False
-        current_widget = self.stack.currentWidget()
-        doomed = [k for k in pages if k not in projects or not (projects[k] or {}).get("gui")]
-        for key in doomed:
-            if pages[key] is current_widget:
-                viewing_removed = True
-        if viewing_removed:
-            # 先切走再删，别让 QStackedWidget 自己挑相邻页
-            self.stack.setCurrentWidget(self.stack.widget(0))
-            if nav is not None:
-                nav.set_active("overview", animate=False)
-        for key in doomed:
-            page = pages.pop(key)
-            try:
-                page.shutdown()
-            except Exception:
-                pass
-            self.stack.removeWidget(page)
-            page.setParent(None)
-            page.deleteLater()
-        # -- 4. 日志过滤器、设置页、副标题 -----------------------------------
+        # -- 2. 日志过滤器、设置页、副标题 -----------------------------------
         combo = getattr(self, "filter_combo", None)
         if combo is not None:
             wanted = list(projects.keys()) + ["core"]
@@ -1409,15 +1347,6 @@ class MainWindow(QMainWindow):
         snapshot = self.supervisor.status_snapshot()
         for key, card in self.cards.items():
             card.update_state(snapshot["runs"].get(key))
-        # 导航栏指示灯：绿=界面已启动（启动中/已嵌入/后台），灰=未启动
-        for key, nav_key in getattr(self, "_nav_page_keys", []):
-            item = self.nav.item_for_key(nav_key)
-            page = self.project_pages.get(key)
-            if item is not None and page is not None:
-                item.set_dot(page.dot_state())
-        # 嵌入页存活检测
-        for page in getattr(self, "project_pages", {}).values():
-            page.tick()
         chain = snapshot["chain_status"]
         text = CHAIN_TEXT.get(chain, chain)
         color = CHAIN_COLORS.get(chain, CHAIN_COLORS["idle"])
@@ -1822,12 +1751,6 @@ class MainWindow(QMainWindow):
             self.idle_watcher.stop()
         if getattr(self, "widget", None) is not None:
             self.widget.hide()
-        # 关闭各项目嵌入/静默启动的界面（窗口 WM_CLOSE + 结束界面进程树）
-        for page in getattr(self, "project_pages", {}).values():
-            try:
-                page.shutdown()
-            except Exception:
-                pass
         self.bus.unsubscribe(self.queue)
         self.supervisor.stop_all()
         self.bus.stop_server()

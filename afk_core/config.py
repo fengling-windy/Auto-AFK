@@ -242,7 +242,7 @@ def _normalize_gui(spec, key=""):
         _WARNED_GUI.add(key)
         logging.getLogger("afk.config").warning(
             "项目 %s 的 gui 不是映射（读到 %r），已按「没有界面入口」处理；"
-            "要嵌入界面请写成 gui: {args: [...]} 或 gui: {exe: ...}",
+            "要打开界面请写成 gui: {args: [...]} 或 gui: {exe: ...}",
             key or spec.get("display_name") or "?",
             gui,
         )
