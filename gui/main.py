@@ -1674,8 +1674,13 @@ class MainWindow(QMainWindow):
         # 注册表里删掉的项目，在 chain.order / hidden_projects / parallel_blocks
         # 里的残留键也要一起清（否则设置页的「已隐藏」永远挂着一个幽灵项）
         self._drop_stale_project_keys(projects)
-        # 卡片顺序要跟 chain.order（用户拖动改的顺序）一致，并把并行连线重画
-        self._apply_card_order(self.visible_card_keys())
+        # 卡片顺序要跟 chain.order（用户拖动改的顺序）一致，并把并行连线重画。
+        # 历史缺陷：这里用的是「此刻的界面顺序」，而新补进来的卡片是
+        # flow.addWidget 追加在尾部的，于是「隐藏一张卡再从设置页放回来」会让它
+        # 跑到最后一位——用户明明只是点了个 × 又点回来，运行顺序就被改了。
+        # 按 _ordered_project_items()（读 chain.order，未列出则按注册表书写顺序）
+        # 重排，放回来的卡片就回原位。
+        self._apply_card_order([k for k, _ in self._ordered_project_items()])
         # -- 2. 日志过滤器、设置页、副标题 -----------------------------------
         combo = getattr(self, "filter_combo", None)
         if combo is not None:

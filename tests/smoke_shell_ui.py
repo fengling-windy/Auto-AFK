@@ -1159,6 +1159,21 @@ def test_main_window(app):
             window._apply_card_order(order_keys)
             pump(app, 120)
 
+        # 从总览收起一张卡再从设置页放回来，卡片要回到原来的位置。
+        # 历史缺陷：_reload_registry 末尾按「此刻的界面顺序」重排，而新补的卡片
+        # 是 flow.addWidget 追加在尾部——用户只是点了 × 又点回来，运行顺序就被
+        # 悄悄改了（BAAH 从第二位跑到了最后）。
+        _pos_before = window.visible_card_keys()
+        if len(_pos_before) >= 3:
+            _victim = _pos_before[1]
+            window.hide_card(_victim)
+            pump(app, 200)
+            check("收起一张卡后它从总览消失", _victim not in window.visible_card_keys())
+            window.restore_card(_victim)
+            pump(app, 200)
+            check("放回来的卡片回到原来的位置（{0}）".format(window.visible_card_keys()),
+                  window.visible_card_keys() == _pos_before)
+
         # 注册表里删掉某个项目时，界面不能因为 QStackedWidget 移除页面而乱翻页。
         # 历史缺陷（嵌入页时代）：移除当前页会自己切到相邻下标，用户看到的是另一
         # 个项目。现在只有总览/设置两页，删项目后必须仍在原来那一页上。
