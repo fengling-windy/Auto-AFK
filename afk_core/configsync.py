@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import shutil
 import time
@@ -6,6 +7,8 @@ from pathlib import Path
 
 from . import config
 from .proc import run as proc_run
+
+log = logging.getLogger("afk.configsync")
 
 
 def _store_dir(key, spec):
@@ -42,21 +45,24 @@ def _backup(store, name, source, keep=10):
     for item in existing[max(0, keep - 1):]:
         try:
             item.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            # 旧备份删不掉就白占盘；备份目录还能无限长下去。
+            log.debug("remove old backup %s failed: %s", item.name, exc)
 
 
 def _is_link(path):
     try:
         if path.is_symlink():
             return True
-    except OSError:
-        pass
+    except OSError as exc:
+        # 判不出是不是链接就按「不是」处理，但要知道是哪条路径读不动
+        log.debug("is_symlink(%s) failed: %s", path, exc)
     checker = getattr(os.path, "isjunction", None)
     if checker is not None:
         try:
             return bool(checker(path))
-        except OSError:
+        except OSError as exc:
+            log.debug("isjunction(%s) failed: %s", path, exc)
             return False
     return False
 

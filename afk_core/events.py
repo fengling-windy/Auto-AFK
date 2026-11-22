@@ -68,7 +68,11 @@ class EventBus:
             if self._jsonl_fh is None:
                 self._jsonl_fh = open(self._jsonl, "a", encoding="utf-8", buffering=1)
             self._jsonl_fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-        except Exception:
+        except Exception as exc:
+            # 写不进去多半是盘满或权限变化。这里关掉句柄让下一条重开，
+            # 但重开同样会失败——不留下第一条线索的话，「日志突然不再增长」
+            # 就完全查不到原因。
+            logging.getLogger("afk.events").debug("write events jsonl failed: %s", exc)
             self._close_jsonl()
         project = event.get("project")
         if not project or event.get("kind") == "heartbeat":
@@ -85,15 +89,18 @@ class EventBus:
                 event.get("kind", "log"),
                 event.get("message", ""),
             ))
-        except Exception:
+        except Exception as exc:
+            logging.getLogger("afk.events").debug("write project log %s failed: %s", project, exc)
             self._close_project_log(project)
 
     def _close_jsonl(self):
         try:
             if self._jsonl_fh is not None:
                 self._jsonl_fh.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 关不掉说明句柄状态已经乱了，下次写入会重新 open。留痕便于排查
+            # 「日志偶发丢行」到底是写失败还是关失败。
+            logging.getLogger("afk.events").debug("close events jsonl failed: %s", exc)
         self._jsonl_fh = None
 
     def _close_project_log(self, project):
@@ -101,8 +108,8 @@ class EventBus:
         try:
             if fh is not None:
                 fh.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.events").debug("close project log %s failed: %s", project, exc)
 
     def close_handles(self):
         with self._lock:
@@ -262,10 +269,12 @@ class EventBus:
         if self._server:
             try:
                 self._server.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                # shutdown 抛异常时监听线程可能还活着，端口不肯释放；
+                # 下一次启动就会撞「地址已被占用」，必须留痕。
+                logging.getLogger("afk.events").warning("event server shutdown failed: %s", exc)
         self.close_handles()
         try:
             self._server_info_path().unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.events").debug("remove event server info failed: %s", exc)

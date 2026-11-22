@@ -83,8 +83,10 @@ def cleanup_logs(bus=None, settings=None):
                 try:
                     path.unlink()
                     removed += 1
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # 文件被别的进程占着（正在写的日志）删不掉是常态，
+                    # 但只删得掉一半会让「保留天数」越来越不准。
+                    log.debug("remove old project log %s failed: %s", path.name, exc)
 
         for path in config.PROJECT_LOGS.glob("*.log"):
             if not _is_rolling_project_log(path):
@@ -93,8 +95,9 @@ def cleanup_logs(bus=None, settings=None):
                 if path.stat().st_size > PROJECT_LOG_MAX_BYTES:
                     if _keep_tail(path, PROJECT_LOG_KEEP_BYTES):
                         _emit(bus, "project log truncated: {0}".format(path.name))
-            except OSError:
-                pass
+            except OSError as exc:
+                # 截断失败会让这份日志无限长下去，至少留下一条线索
+                log.debug("project log truncation failed: %s: %s", path.name, exc)
 
     max_bytes = int(float(cfg.get("events_max_mb", 50)) * 1024 * 1024)
     try:
@@ -111,8 +114,8 @@ def cleanup_logs(bus=None, settings=None):
         if durations.exists() and durations.stat().st_size > durations_max:
             if _keep_tail(durations, durations_max // 2):
                 _emit(bus, "durations.jsonl truncated")
-    except OSError:
-        pass
+    except OSError as exc:
+        log.warning("durations.jsonl truncation failed: %s", exc)
 
     # 旧版本用 os.replace 截断 events.jsonl，失败时会把 .tmp 留在 logs/ 里。
     # 现在改成原地重写，这些残留没有用处了，顺手清掉（只清自己的命名，别乱删）。
@@ -121,8 +124,9 @@ def cleanup_logs(bus=None, settings=None):
         try:
             if stale.exists():
                 stale.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            # 残留清不掉不致命，但会是 logs 目录长期带着垃圾的信号
+            log.debug("remove stale %s failed: %s", name, exc)
 
     if config.REPORTS_DIR.exists():
         for path in config.REPORTS_DIR.iterdir():

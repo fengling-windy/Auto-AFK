@@ -12,6 +12,9 @@ def hidden_kwargs():
         startupinfo.wShowWindow = 0
         kwargs["startupinfo"] = startupinfo
     except Exception:
+        # 拿不到 STARTUPINFO 就退回只用 CREATE_NO_WINDOW：窗口一样不弹，
+        # 只是某些启动器（.bat / .vbs）会闪一下。这里静默是有意的，
+        # 每次起子进程都刷一条 warning 会把真正的问题淹掉。
         pass
     return kwargs
 

@@ -115,8 +115,10 @@ def _write_atomic(path, text):
             try:
                 if tmp.exists():
                     tmp.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                # 删不掉只会在 logs/ 旁边留一份 .tmp，不影响本次写入；
+                # 但反复留垃圾说明有别的进程一直占着它，值得一行 debug。
+                logging.getLogger("afk.config").debug("remove temp file %s failed: %s", tmp, exc)
 
 
 def save_yaml(path, data):

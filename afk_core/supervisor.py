@@ -1109,8 +1109,11 @@ class Supervisor:
             parent = psutil.Process(run.process.pid)
             for child in parent.children(recursive=True):
                 run.children.add(child.pid)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 记不到子进程 → 项目退出后这些进程不会被清理，下一次链会撞上
+            # 「上一次的残留还在跑」。这里必须留痕，否则现场只剩「莫名占用」。
+            logging.getLogger("afk.supervisor").debug(
+                "track children of %s failed: %s: %s", run.key, type(exc).__name__, exc)
 
     def _cleanup_processes(self, run):
         killed = []
@@ -1123,8 +1126,9 @@ class Supervisor:
                             run.children.add(proc.info["pid"])
                     except Exception:
                         continue
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("afk.supervisor").debug(
+                    "enumerate pids of %s failed: %s: %s", run.key, type(exc).__name__, exc)
         for pid in list(run.children):
             try:
                 proc = psutil.Process(pid)
@@ -1162,17 +1166,20 @@ class Supervisor:
             for child in children:
                 try:
                     child.kill()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 子进程自己先退了是常态，这里只留 debug
+                    logging.getLogger("afk.supervisor").debug("kill child %s failed: %s", child.pid, exc)
             try:
                 parent.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger("afk.supervisor").debug("kill parent %s failed: %s", process.pid, exc)
         except Exception:
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                # 连「进程根本不存在」都杀失败，说明句柄不对或已被回收，
+                # 留一行线索避免「停止按钮点了但进程还在」
+                logging.getLogger("afk.supervisor").debug("kill tree %s failed: %s", getattr(process, "pid", "?"), exc)
 
     def _window_titles_contain(self, keywords):
         """Match visible top-level window titles against keywords (case-insensitive).
