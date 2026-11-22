@@ -95,6 +95,10 @@ STATUS_TEXT = {
     "stopped": "已停止",
 }
 
+# 还没收尾的状态：卡片上「启动」置灰、「停止」可点。hang（卡死）也算在跑，
+# 否则卡住时反而点不到「停止」。
+BUSY_STATUSES = ("pending", "running", "hang")
+
 # 没有 pid/exit/message 可显示时的详情行文案。必须按状态给，不能统一写
 # 「运行中…」，否则排队中的卡片会显示成「等待 / 运行中...」自相矛盾。
 STATUS_DETAIL_FALLBACK = {
@@ -339,12 +343,13 @@ class ProjectCard(HoverGlowCard):
         self._apply_enabled()
 
     # -- 启用状态 -----------------------------------------------------------
-    def _apply_enabled(self):
-        """enabled: false 时把卡片标灰、禁用启动按钮并说明原因。"""
+    def _apply_enabled(self, busy=None):
+        """enabled: false 时把卡片标灰、禁用启动按钮并说明原因。
+
+        busy 传 None 表示不清楚当前有没有在跑，沿用上一次算出来的值。
+        """
         enabled = bool((self.spec or {}).get("enabled", True))
         self._enabled = enabled
-        self.start_btn.setEnabled(enabled)
-        self.parallel_btn.setEnabled(enabled)
         if enabled:
             tip = ""
         else:
@@ -354,10 +359,44 @@ class ProjectCard(HoverGlowCard):
             self.dot.set_state(STATUS_COLORS["pending"], pulse=False)
             self.detail_label.setText("注册表里 enabled: false，链会跳过它")
         self.start_btn.setToolTip(tip)
+        self.parallel_btn.setEnabled(enabled)
         self.parallel_btn.setToolTip(tip or "与相邻的项目同时运行：两张相邻的卡各点一次")
+        # 禁用也要留着「停止」：用户取消勾选时，之前启动的进程不会自己退出。
+        self._apply_buttons(busy=busy)
 
     def is_enabled(self):
         return bool(getattr(self, "_enabled", True))
+
+    # -- 启动 / 停止按钮 -----------------------------------------------------
+    def _apply_buttons(self, busy=None):
+        """按「这个项目现在有没有在跑」调整启动/停止两个按钮。
+
+        历史缺陷：两个按钮一直可点。
+        - 已经跑起来再点「启动」→ supervisor 只 emit 一条 `already running` 的
+          warn，界面上看不出点过了；
+        - 没在跑时点「停止」→ `stop_project()` 直接 `return False`，一条日志都
+          没有，用户以为按钮坏了。
+
+        busy 不传就沿用上一次 update_state 算出来的状态（`_apply_enabled` 会在
+        构造与 apply_spec 时调到这里，那时还没有 run 可看）。
+        """
+        if busy is None:
+            busy = bool(getattr(self, "_busy", False))
+        self._busy = bool(busy)
+        enabled = self.is_enabled()
+        self.start_btn.setEnabled(enabled and not busy)
+        # 「停止」只看有没有在跑：注册表里刚改成 enabled: false 时，之前启动的
+        # 那个进程并不会自己退出，得留一个能停它的入口（「全部停止」也能停，
+        # 但用户会先看这张卡）。
+        self.stop_btn.setEnabled(busy)
+        if not enabled:
+            self.stop_btn.setToolTip("停止这个项目（会连同它的子进程一起结束）" if busy else "")
+        elif busy:
+            self.start_btn.setToolTip("这个项目已经在运行；要重跑请先「停止」")
+            self.stop_btn.setToolTip("停止这个项目（会连同它的子进程一起结束）")
+        else:
+            self.start_btn.setToolTip("")
+            self.stop_btn.setToolTip("这个项目没在运行，没有可停止的东西")
 
     # -- 并行状态 -----------------------------------------------------------
     def set_parallel(self, active, pending=False):
@@ -437,11 +476,19 @@ class ProjectCard(HoverGlowCard):
 
     def update_state(self, run):
         status = run.get("status", "pending") if run else "pending"
-        if not self.is_enabled() and (run is None or status == "pending"):
-            # 禁用的项目本来就不会被链启动，_poll 每轮都会把卡片刷回「等待」
-            # + 「未运行」，把「已禁用」这条唯一线索冲掉，所以这里让位。
-            self._apply_enabled()
+        if not self.is_enabled() and (run is None or status not in ("running", "hang")):
+            # 禁用的项目本来就不会被链启动。这里必须放在最前面：注册表里刚改成
+            # enabled: false 时，runs 里往往还留着上一次的 failed/success 记录，
+            # 若按 run 渲染，卡片会一直写「失败」，把「已禁用」这条唯一线索藏住
+            # （实测：禁用后卡片仍显示「失败 / exit=-2 | 需要管理员权限…」）。
+            # 只有它此刻真的还在跑（running/hang）才让 run 优先显示；pending
+            # 说明「还没启动」，禁用项目永远不会迎来那一轮，同样让位给「已禁用」。
+            # 还在跑时把 busy 传下去，「停止」按钮要留着——取消勾选不会杀掉已启动的进程。
+            self._apply_enabled(busy=bool(run) and status in ("running", "hang"))
             return
+        # 「在跑」= pending/running/hang 这三种都还没收尾（hang 卡死时更要能点停止）。
+        # 用它决定启动/停止按钮谁可点：跑起来之后「启动」置灰、「停止」亮起。
+        self._apply_buttons(busy=bool(run) and status in BUSY_STATUSES)
         color = STATUS_COLORS.get(status, STATUS_COLORS["pending"])
         # 运行中/卡死时状态点呼吸脉冲（卡死闪得更快）
         period = 1.1 if status == "hang" else 1.6

@@ -1,4 +1,4 @@
-"""离屏渲染 GUI 视觉预览截图（不启动 Supervisor/EventBus，只构建视觉外壳）。
+﻿"""离屏渲染 GUI 视觉预览截图（不启动 Supervisor/EventBus，只构建视觉外壳）。
 
 用法：
     QT_QPA_PLATFORM=offscreen QT_QPA_FONTDIR="C:\\Windows\\Fonts" \
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QPointF, QRectF, QTime, Qt, QTimer
+from PySide6.QtCore import QRectF, QTime, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -311,18 +311,27 @@ def apply_state_shots(tabs, cards, chain_pill):
             card.dot.update()
     buttons = card.window().findChildren(AnimatedButton)
     header_btns = [b for b in buttons if b.text() in ("一键挂机", "全部停止")]
-    if header_btns:
-        b = header_btns[0]
-        b._hover = 1.0
-        b._press = 0.6
-        b._ripple = 0.45
-        b._ripple_center = QPointF(b.width() * 0.5, b.height() * 0.6)
-        b.update()
+    chain_pill.set_state("运行中", gui_main.CHAIN_COLORS["running"])
+    # 链在跑时真实界面会把这颗按钮置灰并换成「挂机中…」（MainWindow._sync_chain_controls）。
+    # 预览若只改胶囊，图上就是「运行中 + 可点的一键挂机」，与实际交互不符。
+    for b in header_btns:
+        if b.text() == "一键挂机":
+            b.setText("挂机中…")
+            b.setEnabled(False)
+            b.update()
     if len(header_btns) > 1:
+        # 置灰之后「全部停止」才是这一屏里唯一可点的动作，给它画悬停态
         d = header_btns[1]
         d._hover = 1.0
         d.update()
-    chain_pill.set_state("运行中", gui_main.CHAIN_COLORS["running"])
+    # 链在跑时真实界面会把这颗按钮置灰并换成「挂机中…」（MainWindow._sync_chain_controls）。
+    # 预览若只改胶囊，图上就是「运行中 + 可点的一键挂机」，与实际交互不符。
+    for b in header_btns:
+        if b.text() == "一键挂机":
+            b.setText("挂机中…")
+            b.setEnabled(False)
+            b._hover = 0.0
+            b.update()
 
 
 def build_shell():

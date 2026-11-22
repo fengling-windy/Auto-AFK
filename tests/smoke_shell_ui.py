@@ -1078,6 +1078,8 @@ def test_main_window(app):
               _dcard.status_label.text() == "已禁用")
         check("禁用的项目启动按钮不可点", not _dcard.start_btn.isEnabled())
         check("禁用的项目并行按钮不可点", not _dcard.parallel_btn.isEnabled())
+        # 「停止」要留着：注册表里取消勾选不会让已经在跑的进程退出，得留个入口。
+        check("禁用的项目没在跑时「停止」也置灰", not _dcard.stop_btn.isEnabled())
         check("禁用的项目状态提示说明原因（{0}）".format(_dcard.detail_label.text()),
               "enabled: false" in _dcard.detail_label.text())
         # _poll 每轮会把卡片刷成「等待 / 未运行」，不能把「已禁用」这条线索冲掉
@@ -1091,6 +1093,63 @@ def test_main_window(app):
         _dcard = window.cards[disabled_key]
         check("重新启用后卡片恢复可点（{0}）".format(_dcard.status_label.text()),
               _dcard.start_btn.isEnabled() and _dcard.status_label.text() != "已禁用")
+
+        # 卡片上的「启动 / 停止」要跟着运行状态走。历史缺陷：两个按钮一直可点，
+        # 跑起来再点「启动」只得到一条 already running 的 warn；没在跑时点
+        # 「停止」supervisor 直接 return False，一条日志都没有。
+        _btn_key = disabled_key
+        _btn_run = ProjectRun(_btn_key, {"display_name": _btn_key})
+        _btn_run.status = "running"
+        window.supervisor.runs[_btn_key] = _btn_run
+        window._poll()
+        pump(app, 80)
+        _bcard = window.cards[_btn_key]
+        check("项目跑起来后「启动」置灰", not _bcard.start_btn.isEnabled())
+        check("项目跑起来后「停止」可点", _bcard.stop_btn.isEnabled())
+        for _status in ("pending", "hang"):
+            _btn_run.status = _status
+            window._poll()
+            pump(app, 60)
+            check("状态 {0} 时仍算在跑（启动置灰/停止可点）".format(_status),
+                  not _bcard.start_btn.isEnabled() and _bcard.stop_btn.isEnabled())
+        _btn_run.status = "success"
+        window._poll()
+        pump(app, 80)
+        check("项目跑完后「启动」恢复可点", _bcard.start_btn.isEnabled())
+        check("项目跑完后「停止」置灰", not _bcard.stop_btn.isEnabled())
+        window.supervisor.runs.pop(_btn_key, None)
+        window._poll()
+        pump(app, 60)
+        check("没有 run 时「停止」置灰", not window.cards[_btn_key].stop_btn.isEnabled())
+
+        # 已经跑起来之后才被禁用：卡片写「已禁用」，但「停止」必须还能点，
+        # 否则用户只能去点「全部停止」把别的项目也一起停掉。
+        window.registry_edit.setPlainText(
+            yaml.safe_dump(disabled_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 300)
+        _live_run = ProjectRun(disabled_key, {"display_name": disabled_key})
+        _live_run.status = "running"
+        window.supervisor.runs[disabled_key] = _live_run
+        window._poll()
+        pump(app, 80)
+        _lcard = window.cards[disabled_key]
+        # 还在跑的时候按 run 渲染（写「运行中」），跑完才回落成「已禁用」——
+        # 否则用户眼看着进程还在跑，卡片却写「已禁用」，会以为它已经停了。
+        check("运行中才被禁用时卡片仍显示真实状态（{0}）".format(_lcard.status_label.text()),
+              _lcard.status_label.text() == gm.STATUS_TEXT["running"])
+        check("运行中才被禁用时「停止」仍可点", _lcard.stop_btn.isEnabled())
+        check("运行中才被禁用时「启动」仍不可点", not _lcard.start_btn.isEnabled())
+        _live_run.status = "failed"
+        window._poll()
+        pump(app, 80)
+        check("跑完之后卡片回落成「已禁用」（{0}）".format(_lcard.status_label.text()),
+              _lcard.status_label.text() == "已禁用")
+        window.supervisor.runs.pop(disabled_key, None)
+        window.registry_edit.setPlainText(
+            yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 300)
 
         # 改已存在项目的显示名，卡片标题要跟着变。
         # 历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一直
