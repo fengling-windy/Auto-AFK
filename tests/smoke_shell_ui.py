@@ -944,6 +944,16 @@ def test_main_window(app):
         window._parallel_blocks = [[dropped_key, second_key]]
         window._write_parallel_blocks()
         window._hidden_projects = [dropped_key]
+        # 静默启动列表（gui.silent_open_projects）里也塞一个死键
+
+        def _pin_silent(settings):
+            gui_cfg = settings.setdefault("gui", {})
+            if not isinstance(gui_cfg, dict):
+                gui_cfg = {}
+                settings["gui"] = gui_cfg
+            gui_cfg["silent_open_projects"] = [dropped_key]
+
+        window._mutate_settings(_pin_silent)
         pump(app, 120)
         check("动手前注册表里确实有那个项目", dropped_key in window.cards)
         window.registry_edit.setPlainText(yaml.safe_dump(mutated, allow_unicode=True, sort_keys=False))
@@ -955,6 +965,7 @@ def test_main_window(app):
         _order_after = ((_after_delete.get("chain") or {}).get("order")) or []
         _hidden_after = ((_after_delete.get("gui") or {}).get("hidden_projects")) or []
         _blocks_after = ((_after_delete.get("chain") or {}).get("parallel_blocks")) or []
+        _silent_after = ((_after_delete.get("gui") or {}).get("silent_open_projects")) or []
         check(
             "删掉项目后运行顺序里不再有它（{0}）".format(_order_after),
             dropped_key not in _order_after,
@@ -966,6 +977,10 @@ def test_main_window(app):
         check(
             "删掉项目后并行组里不再有它（{0}）".format(_blocks_after),
             dropped_key not in [k for b in _blocks_after for k in b],
+        )
+        check(
+            "删掉项目后静默启动列表里不再有它（{0}）".format(_silent_after),
+            dropped_key not in _silent_after,
         )
         check("保存注册表后 supervisor 用新注册表", extra_key in (window.supervisor.registry.get("projects") or {}))
         check("保存注册表后设置页运行顺序跟随", extra_key in [

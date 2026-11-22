@@ -1573,11 +1573,12 @@ class MainWindow(QMainWindow):
         """注册表里已经不存在的项目，从运行顺序、隐藏列表、并行组里清掉。
 
         历史缺陷：在「项目注册表」页签里删掉一个项目后，`chain.order`、
-        `gui.hidden_projects`、`chain.parallel_blocks` 三处仍留着它的键。
-        后果：链按 chain.order 排程，走到不存在的项目会命中「跳过未知项目」
-        分支（每次跑链都刷一条告警）；「设置 → 已隐藏的项目」里永远挂着一个
-        已经删掉的项目，点「放回总览」毫无反应；并行组里那一对也会被
-        supervisor 判成「隔着别的项目」整块作废。
+        `gui.hidden_projects`、`gui.silent_open_projects`、`chain.parallel_blocks`
+        四处仍留着它的键。后果：链按 chain.order 排程，走到不存在的项目会命中
+        「跳过未知项目」分支（每次跑链都刷一条告警）；「设置 → 已隐藏的项目」
+        里永远挂着一个已经删掉的项目，点「放回总览」毫无反应；并行组里那一对
+        会被 supervisor 判成「隔着别的项目」整块作废；静默启动列表里的死键让
+        每次开窗都去拉起一个不存在的项目的界面（失败后只在日志里留一行）。
 
         只有真发现残留时才写盘，避免每次重新加载都改一遍 settings.yaml。
         返回被清掉的键（给调用方写日志）。
@@ -1586,8 +1587,12 @@ class MainWindow(QMainWindow):
         order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
         hidden = [str(k) for k in (self._hidden_projects or [])]
         blocks = [list(b) for b in (self._parallel_blocks or [])]
+        silent = [
+            str(k)
+            for k in (((self.settings.get("gui") or {}).get("silent_open_projects")) or [])
+        ]
         stale = sorted(
-            (set(order) | set(hidden) | {k for b in blocks for k in b}) - alive
+            (set(order) | set(hidden) | set(silent) | {k for b in blocks for k in b}) - alive
         )
         if not stale:
             return []
@@ -1611,6 +1616,7 @@ class MainWindow(QMainWindow):
                 gui_cfg = {}
                 settings["gui"] = gui_cfg
             gui_cfg["hidden_projects"] = list(new_hidden)
+            gui_cfg["silent_open_projects"] = [k for k in silent if k in alive]
 
         # 先更新内存里的副本，_mutate_settings 会重读文件并替换 self.settings
         self._hidden_projects = new_hidden
