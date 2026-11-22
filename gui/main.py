@@ -864,6 +864,16 @@ class MainWindow(QMainWindow):
         self.nav.set_active("overview", animate=False)
         self.setCentralWidget(central)
 
+        # 开窗时把配置里已经存在的并行组画出来。历史缺陷：这里建完卡片就收工，
+        # 只有 _rebuild_cards()（换肤/重载注册表）才会刷新并行状态——于是上次
+        # 退出前设好的并行组，重开程序后卡片全写「并行」，连线也不画，看着像
+        # 并行设置丢了（其实 chain.parallel_blocks 还在，跑起来仍然是同时跑）。
+        self._sync_parallel_state()
+        # 手工编辑过 settings.yaml 的项目可能留着失效/互相重叠的并行块（拖散过、
+        # 或手动写了 A-B 与 B-C 两块）。不修剪的话界面与 supervisor 会各说各话，
+        # 而且每次跑链都刷一条「并行块已忽略」告警。只在真有改动时写盘。
+        self._prune_parallel_blocks()
+
         self.chain_btn.clicked.connect(self.start_chain)
         self.stop_all_btn.clicked.connect(self.supervisor.stop_all)
         self.doctor_btn.clicked.connect(self.run_doctor)
@@ -1098,6 +1108,7 @@ class MainWindow(QMainWindow):
         visible = self.visible_card_keys()
         visible_set = set(visible)
         groups = []
+        claimed = set()
         for block in self._parallel_blocks:
             members = [k for k in block if k in (getattr(self, "cards", {}) or {})]
             if len(members) < 2 or not all(k in visible_set for k in members):
@@ -1105,6 +1116,14 @@ class MainWindow(QMainWindow):
             indices = sorted(visible.index(k) for k in members)
             if indices != list(range(indices[0], indices[0] + len(indices))):
                 continue
+            # 同一个项目不能同时在两个并行组里：supervisor 的 merge_parallel_blocks
+            # 遇到这种重叠会把后面的整块作废并告警（只认第一次出现的那块）。界面
+            # 若把两块都画成「并行中」，用户看到的是三张卡都亮着并行、实际只同时
+            # 跑两块中的第一块。这里同样只认先出现的那组，其余交给
+            # _prune_parallel_blocks() 从配置里清掉。
+            if claimed & set(members):
+                continue
+            claimed |= set(members)
             # 按卡片顺序返回，连线才连相邻的那几张
             groups.append(sorted(members, key=visible.index))
         return groups

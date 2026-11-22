@@ -384,6 +384,12 @@ def test_supervisor_extensions():
 
 def test_main_window(app):
     """完整实例化 MainWindow（隔离：临时 settings/日志目录，spawn 打桩）。"""
+    # 开窗前先在配置里放一组并行块（取注册表前两个项目，天然相邻）。
+    # 历史缺陷：_build_ui 建完卡片不回灌并行状态，只有 _rebuild_cards()（换肤 /
+    # 重载注册表）才刷新——上次退出前设好的并行组，重开程序后卡片全写「并行」、
+    # 连线也不画，看着像设置丢了（其实 chain.parallel_blocks 还在，跑起来仍是同时跑）。
+    _boot_keys = list((config.registry().get("projects", {}) or {}).keys())
+    _boot_pair = _boot_keys[:2]
     config.save_yaml(
         config.SETTINGS_YAML,
         {
@@ -392,6 +398,10 @@ def test_main_window(app):
             "schedule": {"enabled": False},
             "gui": {"minimize_to_tray": False, "autostart_chain_on_launch": False},
             "post_actions": {"after_all": "none", "delay_sec": 60},
+            "chain": {
+                "order": list(_boot_keys),
+                "parallel_blocks": [_boot_pair] if len(_boot_pair) == 2 else [],
+            },
         },
     )
     tmp_logs = _TMP_DIR / "logs"
@@ -418,6 +428,15 @@ def test_main_window(app):
         check("导航不再有项目嵌入页",
               not [k for k in window.nav.item_keys() if str(k).startswith("page:")])
         check("默认显示总览页", window.stack.currentIndex() == 0 and window.nav.active_key() == "overview")
+        # 配置里预置的并行组，开窗就该画出来（不点任何按钮）
+        if len(_boot_pair) == 2:
+            check("开窗后配置里的并行组已经生效（{0}）".format(window.parallel_groups()),
+                  window.parallel_groups() == [list(_boot_pair)])
+            check("开窗后参与并行的卡片显示「并行中」",
+                  all(window.cards[k].is_parallel() for k in _boot_pair if k in window.cards))
+            check("开窗后连线层已经拿到这一组",
+                  [[getattr(w, "key", None) for w in g] for g in (window.links._groups or [])]
+                  == [list(_boot_pair)])
 
         # 卡片的详情行不能跟状态行互相矛盾。历史缺陷：update_state 的兜底文案
         # 无条件写「运行中...」，排队中的项目（status=pending、还没有 pid/exit/
@@ -1196,6 +1215,26 @@ def test_main_window(app):
             window._sync_parallel_state()
             pump(app, 120)
 
+            # 互相重叠的并行块（A-B 与 B-C）：supervisor 遇到重叠会把后一块整块
+            # 作废并告警「B 已经在另一个并行组里」，界面上却把三张卡都点亮成
+            # 「并行中」。两边必须一致：只认先出现的那组，重叠的从配置里清掉。
+            window._parallel_blocks = [[first, second], [second, third]]
+            window._write_parallel_blocks()
+            window._prune_parallel_blocks()
+            pump(app, 120)
+            check("重叠的并行块只保留先出现的一组（{0}）".format(window.parallel_groups()),
+                  window.parallel_groups() == [[first, second]])
+            check("重叠块被清掉后配置里只剩一组（{0}）".format(
+                      (config.settings().get("chain") or {}).get("parallel_blocks")),
+                  (config.settings().get("chain") or {}).get("parallel_blocks") == [[first, second]])
+            check("不在有效组里的卡片不显示「并行中」",
+                  not window.cards[third].is_parallel())
+            window._parallel_blocks = []
+            window._parallel_pending = None
+            window._write_parallel_blocks()
+            window._sync_parallel_state()
+            pump(app, 120)
+
         # 从总览收起一张卡再从设置页放回来，卡片要回到原来的位置。
         # 历史缺陷：_reload_registry 末尾按「此刻的界面顺序」重排，而新补的卡片
         # 是 flow.addWidget 追加在尾部——用户只是点了 × 又点回来，运行顺序就被
@@ -1481,7 +1520,12 @@ def test_main_window(app):
         # exit 后动作事件 → 调度退出
         bus_event = {"project": "core", "kind": "post_action", "level": "info", "message": "post action executed: exit", "data": {"action": "exit"}}
         window.bus.emit(bus_event)
-        pump(app, 1300)
+        # QTimer.singleShot(800, self._quit) 的到期依赖事件循环真正跑到那一刻；
+        # 固定 pump(1300) 在机器忙时（前面刚写过几次 settings.yaml）会差几十毫秒
+        # 打完最后一行，断言偶发失败。这里轮询到定时器停下，上限 6 秒。
+        _quit_deadline = time.monotonic() + 6.0
+        while window.timer.isActive() and time.monotonic() < _quit_deadline:
+            pump(app, 50)
         check("exit 事件触发 _quit（定时器已停）", not window.timer.isActive())
     finally:
         try:
