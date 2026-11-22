@@ -56,6 +56,7 @@ SUITE = [
     ("smoke_ansi", "core", "子项目输出带 ANSI 颜色时界面/报告要干净"),
     ("smoke_config_save", "core", "保存配置（并发/被占用时不丢设置）"),
     ("smoke_chain", "core", "并行组 + 独占组编排"),
+    ("smoke_parallel_merge", "core", "总览点出的并行块如何变成一步（含三张以上）"),
     ("smoke_sequential", "core", "组内串行顺序"),
     ("smoke_classify", "core", "完成/失败判定"),
     ("smoke_retry_round", "core", "链级容错与重试上限"),

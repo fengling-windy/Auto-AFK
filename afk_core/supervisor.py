@@ -143,8 +143,10 @@ def merge_parallel_blocks(steps, blocks, warn=None):
 
     * 同一块里的项目必须在步骤序列里**连续相邻**——跨过别的项目就合并等于
       偷偷改变运行顺序，所以整块作废并告警，而不是尽力而为地凑；
-    * 已经单独是并行步骤的项目不能再进块（会变成「并行套并行」，语义含糊）；
-    * 合并后的一步沿用块里的第一个项目所属的分组（只为日志与
+    * 块里可以包含「本来就已经是并行的一步」（默认注册表里三月七 + BAAH 就
+      同属 ``cloud_and_emulator`` 并行组）——但只有那一步的成员全都在块里
+      才允许，否则等于把用户没点的项目偷偷拉进并行组，同样整块作废；
+    * 合并后的一步沿用块里第一个项目所在步骤的分组（只为日志与
       continue_on_failure 取默认值）。
     """
     if not blocks:
@@ -163,7 +165,9 @@ def merge_parallel_blocks(steps, blocks, warn=None):
                 break
             positions.append(hits[0])
         unique = sorted(set(positions))
-        if broken or len(unique) != len(keys):
+        # 同一个步骤里可能有两个块成员（它们本来就在同一并行组里），这不算
+        # 冲突；只有「某个成员压根不在这次运行里」或「同一步被拆到多处」才作废。
+        if broken:
             if warn is not None:
                 warn("并行块 {0} 已忽略：有项目不在这次运行里，或不在同一步内".format(keys))
             continue
@@ -171,9 +175,18 @@ def merge_parallel_blocks(steps, blocks, warn=None):
             if warn is not None:
                 warn("并行块 {0} 已忽略：项目之间隔着别的项目，只能把相邻的任务设为并行".format(keys))
             continue
-        if any(len(result[i].get("members", [])) > 1 for i in unique):
+        # 已经是并行的一步可以被扩展，但它原有的成员必须都在块里：
+        # 否则「A-B 并行 + 只点 A 与 C」会把 B 偷偷拉进来。
+        stolen = []
+        for i in unique:
+            step_members = result[i].get("members", [])
+            if len(step_members) > 1:
+                stolen.extend(m for m in step_members if m not in keys)
+        if stolen:
             if warn is not None:
-                warn("并行块 {0} 已忽略：其中某个项目已经在另一个并行组里".format(keys))
+                warn(
+                    "并行块 {0} 已忽略：{1} 已经在另一个并行组里".format(keys, "、".join(stolen))
+                )
             continue
         merged = {
             "group": result[unique[0]].get("group"),
