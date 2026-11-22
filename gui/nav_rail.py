@@ -1,7 +1,7 @@
 """左侧导航栏：滑动指示条 + 分组导航项。"""
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -14,8 +14,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui import icons
+
 
 class NavItem(QPushButton):
+    # 图标与文字的间距、图标尺寸；_apply_elide 里算可用文字宽度时要一并扣掉
+    ICON_SIZE = 17
+    ICON_GAP = 9
+
     def __init__(self, key, label, parent=None):
         super().__init__("", parent)
         self.key = key
@@ -25,6 +31,8 @@ class NavItem(QPushButton):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(38)
         self._dot = None
+        self._icon_name = ""
+        self._icon_color = "#8b97ad"
         # 文本自己裁：QPushButton 的 minimumSizeHint 等于整段文字宽度，注册表里
         # 写一个长 display_name，侧栏最小宽度就被顶到 1176px（实测），整个窗口
         # 的最小宽度跟着爆到 1927px。这里把 minimumSizeHint 压到下限，显示时
@@ -42,16 +50,37 @@ class NavItem(QPushButton):
 
     def display_text(self):
         """屏幕上真正画出来的那段（可能带省略号）。测试用它判断有没有裁。"""
-        return super().text()
+        return self._text_drawn
+
+    def set_icon(self, name, color="#8b97ad"):
+        """设置导航图标（gui/icons.py 里的名字）；名字为空就只显示文字。"""
+        self._icon_name = str(name or "")
+        self._icon_color = str(color or "#8b97ad")
+        if self._icon_name:
+            self.setIcon(icons.make(self._icon_name, self._icon_color, self.ICON_SIZE))
+            self.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
+        else:
+            self.setIcon(QIcon())
+        self._apply_elide()
+
+    def set_icon_color(self, color):
+        """主题切换后重画图标（图标是位图，不能靠 QSS 换色）。"""
+        if not self._icon_name:
+            return
+        self.set_icon(self._icon_name, color)
 
     def _apply_elide(self):
         # QSS 里 QPushButton#navItem 的左右内边距是 18px / 14px
         width = self.width() - 18 - 14 - 8
+        if self._icon_name:
+            width -= self.ICON_SIZE + self.ICON_GAP
         if width <= 0 or not self._full_label:
+            self._text_drawn = self._full_label
             super().setText(self._full_label)
             return
         metrics = self.fontMetrics()
-        super().setText(metrics.elidedText(self._full_label, Qt.ElideRight, width))
+        self._text_drawn = metrics.elidedText(self._full_label, Qt.ElideRight, width)
+        super().setText(self._text_drawn)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -111,6 +140,8 @@ class NavRail(QWidget):
         self._items = {}
         self._indicator_y = 0.0
         self._finished = False
+        # 图标颜色（主题切换时由 set_icon_color 更新并重画所有导航项图标）
+        self._icon_color = "#8b97ad"
         # finish() 之后新增的导航项要插到尾部弹性空隙之前，这里记下它的位置
         self._stretch_index = 0
 
@@ -163,8 +194,12 @@ class NavRail(QWidget):
         """导航项所在的布局（滚动区里的那一层）。"""
         return self._list_layout
 
-    def add_item(self, key, label, section=False):
-        """按添加顺序追加导航项；section=True 渲染为分组小标题。"""
+    def add_item(self, key, label, section=False, icon=""):
+        """按添加顺序追加导航项；section=True 渲染为分组小标题。
+
+        icon 取 gui/icons.py 里的名字（"home"/"status"/"settings" …）；
+        名字不认识时不显示图标，只留文字，不影响点击。
+        """
         layout = self._layout()
         if section:
             cap = QLabel(label)
@@ -173,6 +208,8 @@ class NavRail(QWidget):
             layout.addWidget(cap)
             return
         item = NavItem(key, label)
+        if icon:
+            item.set_icon(icon, self._icon_color)
         self._items[key] = item
         self._group.addButton(item)
         if self._finished:
@@ -237,6 +274,12 @@ class NavRail(QWidget):
 
     def item_keys(self):
         return list(self._items.keys())
+
+    def set_icon_color(self, color):
+        """主题切换后重画全部导航图标（QIcon 是位图，QSS 管不到）。"""
+        self._icon_color = str(color or "#8b97ad")
+        for item in self._items.values():
+            item.set_icon_color(self._icon_color)
 
     def set_active(self, key, animate=True):
         item = self._items.get(key)

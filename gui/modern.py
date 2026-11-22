@@ -1,13 +1,15 @@
 """Auto-AFK GUI 现代主题与动效组件。
 
 包含：
-- APP_QSS / apply_palette: 全局深色现代主题与基础调色板
+- APP_QSS_TEMPLATE / build_qss / apply_palette: 主题化 QSS 与基础调色板
+  （颜色抽进 gui/themes.py 的设计令牌，深色/浅色共用同一份模板）
 - AnimatedButton: 悬停/按压颜色过渡 + 点击涟漪 + 按压下沉
 - SmoothScroller / enable_smooth_scroll: 滚轮平滑滚动（缓动动画）
 - AnimatedTabBar / AnimatedTabWidget: Tab 切换滑动指示条 + 页面淡入
 - StatusDot: 状态点呼吸脉冲
 - AnimatedPill: 状态胶囊颜色渐变
 - HoverGlowCard: 卡片悬停边框过渡
+- CardBackground: 卡片背景（可选自定义背景图，带不透明度）
 - fade_in_widget / fade_in_window: 淡入工具
 """
 
@@ -34,6 +36,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPalette,
     QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,7 +49,10 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTabWidget,
     QWidget,
+    QWidgetItem,
 )
+
+from gui import themes
 
 ACCENT = "#4c8dff"
 
@@ -160,6 +166,15 @@ class FlowLayout(QLayout):
         if 0 <= index < len(self._items):
             return self._items.pop(index)
         return None
+
+    def insertItem(self, index, item):
+        """插到指定位置（拖动改顺序时用；QLayout 默认只提供 addItem）。"""
+        index = max(0, min(int(index), len(self._items)))
+        self._items.insert(index, item)
+
+    def clear_items(self):
+        """清空内部列表（只清列表，不销毁控件：重排序时控件要复用）。"""
+        self._items = []
 
     def expandingDirections(self):
         return Qt.Orientations(Qt.Orientation(0))
@@ -349,94 +364,262 @@ class FlowHost(QWidget):
                 self._syncing = False
         self.updateGeometry()
 
+    # -- 顺序调整（卡片拖动排序）------------------------------------------
+    def insert_widget(self, index, widget):
+        """把控件插到指定序号（拖动改运行顺序时用）。
 
-APP_QSS = """
+        QLayout 只有 addWidget（追加），没有 insertWidget；这里自己把 QWidgetItem
+        插进内部列表，位置就直接决定了 FlowLayout 的排布顺序。
+        """
+        item = QWidgetItem(widget)
+        self.addChildWidget(widget)
+        if index < 0 or index > self._flow.count():
+            index = self._flow.count()
+        self._flow.insertItem(index, item)
+        widget.show()
+        self.updateGeometry()
+        return index
+
+    def index_of(self, widget):
+        """控件在流式顺序里的序号（-1 表示不在里面）。"""
+        for index in range(self._flow.count()):
+            item = self._flow.itemAt(index)
+            if item is not None and item.widget() is widget:
+                return index
+        return -1
+
+    def ordered_widgets(self):
+        """按当前排布顺序列出控件（隐藏的也算，顺序即运行顺序）。"""
+        out = []
+        for index in range(self._flow.count()):
+            item = self._flow.itemAt(index)
+            if item is not None and item.widget() is not None:
+                out.append(item.widget())
+        return out
+
+    def set_order(self, widgets):
+        """按给定顺序重排控件（未列出的保持在尾部原顺序）。
+
+        只动内部列表顺序，不重建控件——重建会丢卡片的运行状态与信号连接。
+        """
+        wanted = [w for w in widgets if w is not None]
+        pool = set(id(w) for w in wanted)
+        rest = [w for w in self.ordered_widgets() if id(w) not in pool]
+        order = wanted + rest
+        items = [self._flow.itemAt(i) for i in range(self._flow.count())]
+        by_widget = {}
+        for item in items:
+            if item is not None and item.widget() is not None:
+                by_widget[id(item.widget())] = item
+        rebuilt = [by_widget[id(w)] for w in order if id(w) in by_widget]
+        # 保险：万一有控件没在 order 里（理论上不会），补回尾部避免丢项
+        for item in items:
+            if item is not None and item not in rebuilt:
+                rebuilt.append(item)
+        self._flow.clear_items()
+        for item in rebuilt:
+            self._flow.addItem(item)
+        self.updateGeometry()
+
+
+class ParallelLinks(QWidget):
+    """在相邻的并行卡片之间画连接线。
+
+    为什么单独一层：卡片自己是 QFrame（HoverGlowCard 还有发光 paintEvent），
+    在卡片上画跨卡片的线会被卡片边界裁掉。这里用一张与卡片容器等大的透明
+    覆盖层，鼠标事件穿透（WA_TransparentForMouseEvents），只在 paintEvent 里
+    按当前卡片几何画曲线——卡片被拖到别处、窗口变窄折行，线都跟着走。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._groups = []          # [[QWidget, QWidget, ...], ...]
+        self._color = QColor("#3d7dfa")
+        self._active = None        # 正在编辑（还没成为正式一组）的那一组，画虚线
+
+    def set_color(self, color):
+        self._color = QColor(color)
+        self.update()
+
+    def set_groups(self, groups, active=None):
+        """groups: 每个并行组一个卡片列表（相邻的两张或多张）。"""
+        self._groups = [[w for w in group if w is not None] for group in (groups or [])]
+        self._active = [w for w in (active or []) if w is not None]
+        self.update()
+
+    def _centers(self):
+        """返回 [(widget, QRectF)] —— 用卡片在覆盖层坐标系里的几何。"""
+        out = []
+        for group in self._groups:
+            for widget in group:
+                if widget is None:
+                    continue
+                out.append((widget, QRectF(widget.geometry())))
+        return out
+
+    def paintEvent(self, ev):
+        if not self._groups:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for group in self._groups:
+            rects = [QRectF(w.geometry()) for w in group if w is not None]
+            if len(rects) < 2:
+                continue
+            is_active = bool(self._active) and all(w in self._active for w in group)
+            for left, right in zip(rects, rects[1:]):
+                self._draw_link(painter, left, right, is_active)
+
+    def _draw_link(self, painter, left, right, dashed):
+        """两张相邻卡片之间的连线：同行走弧线，折行时绕到下方。"""
+        color = QColor(self._color)
+        pen = QPen(color, 2.0)
+        pen.setCapStyle(Qt.RoundCap)
+        if dashed:
+            pen.setStyle(Qt.DashLine)
+            pen.setDashPattern([4.0, 3.0])
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        same_row = abs(left.center().y() - right.center().y()) < 4.0
+        if same_row:
+            y = min(left.bottom(), right.bottom()) - 6.0
+            start = QPointF(left.right() - 2.0, y)
+            end = QPointF(right.left() + 2.0, y)
+            path = QPainterPath(start)
+            span = max(8.0, end.x() - start.x())
+            path.cubicTo(
+                QPointF(start.x() + span * 0.35, y + 14.0),
+                QPointF(end.x() - span * 0.35, y + 14.0),
+                end,
+            )
+        else:
+            start = QPointF(left.center().x(), left.bottom() - 2.0)
+            end = QPointF(right.center().x(), right.top() + 2.0)
+            path = QPainterPath(start)
+            span = max(20.0, abs(end.y() - start.y()))
+            path.cubicTo(
+                QPointF(start.x(), start.y() + span * 0.5),
+                QPointF(end.x(), end.y() - span * 0.5),
+                end,
+            )
+        painter.drawPath(path)
+
+        # 两端各点一个小圆，读起来像「接上了」
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        for point in (path.pointAtPercent(0.0), path.pointAtPercent(1.0)):
+            painter.drawEllipse(point, 3.0, 3.0)
+
+
+APP_QSS_TEMPLATE = """
 * {
     font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
     outline: none;
 }
-QMainWindow, QWidget#central {
-    background: #0b0d12;
+QMainWindow {
+    background: $window;
+}
+/* 页面容器单独设透明：主窗口底板下垫了一层 CardBackground（可在设置里换成
+   自定义背景图），容器若继续不透明会把图整片盖住，用户以为背景设置没生效。 */
+QWidget#central {
+    background: transparent;
 }
 QFrame#header {
-    background: #10141d;
-    border: 1px solid #1d2432;
+    background: $panel;
+    border: 1px solid $border;
     border-radius: 16px;
 }
 QLabel#title {
     font-size: 20px;
     font-weight: 700;
-    color: #ecf1fa;
+    color: $text_strong;
 }
 QLabel#subtitle {
     font-size: 12px;
-    color: #7f8aa3;
+    color: $text_muted;
 }
 QLabel#sectionTitle {
-    color: #7f8aa3;
+    color: $text_muted;
     font-size: 12px;
     font-weight: 600;
     padding-left: 2px;
 }
 QFrame#card {
-    background: #141926;
-    border: 1px solid #212b3c;
+    background: $card;
+    border: 1px solid $card_border;
     border-radius: 14px;
 }
 QLabel#cardName {
     font-size: 14px;
     font-weight: 700;
-    color: #e9eef9;
+    color: $text_strong;
 }
 QLabel#cardStatus {
     font-size: 13px;
     font-weight: 700;
 }
 QLabel#cardDetail {
-    color: #7f8aa3;
+    color: $text_muted;
     font-size: 11px;
 }
 QLabel#cardAttempt {
-    color: #5c667d;
+    color: $text_dim;
     font-size: 11px;
 }
+QLabel#cardGrip {
+    background: transparent;
+    padding: 0px;
+}
+QPushButton#cardClose {
+    padding: 0px;
+    border: none;
+    background: transparent;
+}
+QPushButton#parallel {
+    padding: 4px 9px;
+    font-size: 11px;
+    border-radius: 7px;
+}
 QPushButton {
-    background: #1a2130;
-    color: #ccd6ea;
-    border: 1px solid #2a3547;
+    background: $control_bg;
+    color: $text_control;
+    border: 1px solid $control_border;
     border-radius: 9px;
     padding: 6px 14px;
     font-size: 12px;
 }
 QPushButton:hover {
-    background: #243048;
-    border-color: #3f5173;
+    background: $control_bg_hover;
+    border-color: $control_border_hover;
 }
 QPushButton:pressed {
-    background: #151c2a;
+    background: $control_bg_press;
 }
 QPushButton:disabled {
-    color: #59627a;
-    background: #161c28;
+    color: $text_disabled;
+    background: $disabled_bg;
 }
 QPushButton#primary {
-    background: #3d7dfa;
-    border: 1px solid #3d7dfa;
-    color: #ffffff;
+    background: $accent;
+    border: 1px solid $accent;
+    color: $on_accent;
     font-weight: 700;
     padding: 7px 20px;
 }
 QPushButton#primary:hover {
-    background: #5594ff;
-    border-color: #5594ff;
+    background: $accent_hover;
+    border-color: $accent_hover;
 }
 QPushButton#danger {
-    background: #251821;
-    border: 1px solid #48242f;
-    color: #ff92a2;
+    background: $danger_bg;
+    border: 1px solid $danger_border;
+    color: $danger_text;
 }
 QPushButton#danger:hover {
-    background: #33212c;
+    background: $danger_bg_hover;
 }
 QPushButton#mini {
     padding: 4px 8px;
@@ -444,9 +627,9 @@ QPushButton#mini {
     border-radius: 7px;
 }
 QTabWidget::pane {
-    border: 1px solid #1d2432;
+    border: 1px solid $border;
     border-radius: 12px;
-    background: #10141d;
+    background: $panel;
     top: -1px;
 }
 QTabBar {
@@ -454,7 +637,7 @@ QTabBar {
 }
 QTabBar::tab {
     background: transparent;
-    color: #7f8aa3;
+    color: $text_muted;
     padding: 9px 16px;
     margin-right: 4px;
     border-radius: 8px;
@@ -462,52 +645,52 @@ QTabBar::tab {
     font-weight: 600;
 }
 QTabBar::tab:hover {
-    color: #b9c6de;
-    background: rgba(255, 255, 255, 0.04);
+    color: $text_control;
+    background: $overlay_subtle;
 }
 QTabBar::tab:selected {
-    color: #ecf1fa;
+    color: $text_strong;
 }
 QPlainTextEdit, QTextEdit {
-    background: #0a0c11;
-    border: 1px solid #1d2432;
+    background: $input_bg_deep;
+    border: 1px solid $border;
     border-radius: 10px;
-    color: #d7deec;
-    selection-background-color: #2b4a7a;
+    color: $text;
+    selection-background-color: $selection;
     padding: 6px;
 }
 QLineEdit {
-    background: #151b28;
-    border: 1px solid #242f42;
+    background: $input_bg;
+    border: 1px solid $input_border;
     border-radius: 8px;
     padding: 5px 10px;
-    color: #ccd6ea;
-    selection-background-color: #2b4a7a;
+    color: $text_control;
+    selection-background-color: $selection;
 }
 QLineEdit:hover {
-    border-color: #33415c;
+    border-color: $input_border_hover;
 }
 QLineEdit:focus {
-    border-color: #4c8dff;
+    border-color: $accent_soft;
 }
 /* 空闲提示框的倒计时条：默认样式是纯蓝色实心方块，与圆角主题不搭 */
 QProgressBar {
-    background: #151b28;
-    border: 1px solid #242f42;
+    background: $input_bg;
+    border: 1px solid $input_border;
     border-radius: 4px;
-    color: #ccd6ea;
+    color: $text_control;
     text-align: center;
     font-size: 11px;
 }
 QProgressBar::chunk {
-    background: #3d7dfa;
+    background: $accent;
     border-radius: 3px;
 }
 QListWidget {
-    background: #0a0c11;
-    border: 1px solid #1d2432;
+    background: $input_bg_deep;
+    border: 1px solid $border;
     border-radius: 10px;
-    color: #cfd8ea;
+    color: $text_control;
     padding: 4px;
 }
 QListWidget::item {
@@ -515,25 +698,25 @@ QListWidget::item {
     border-radius: 7px;
 }
 QListWidget::item:hover {
-    background: rgba(255, 255, 255, 0.04);
+    background: $overlay_subtle;
 }
 QListWidget::item:selected {
-    background: #1e2c44;
-    color: #ffffff;
+    background: $selection;
+    color: $on_selection;
 }
 QComboBox, QTimeEdit {
-    background: #151b28;
-    border: 1px solid #242f42;
+    background: $input_bg;
+    border: 1px solid $input_border;
     border-radius: 8px;
     padding: 5px 10px;
-    color: #ccd6ea;
+    color: $text_control;
     min-width: 80px;
 }
 QComboBox:hover, QTimeEdit:hover {
-    border-color: #33415c;
+    border-color: $input_border_hover;
 }
 QComboBox:focus, QTimeEdit:focus {
-    border-color: #4c8dff;
+    border-color: $accent_soft;
 }
 /* 只给 QComboBox 画下拉箭头。QTimeEdit 是 QAbstractSpinBox 的子类，它的右侧是
  * 「上/下」一对堆叠按钮，用 ::down-arrow 一个 chevron 去套它，上面那个按钮仍由
@@ -545,7 +728,7 @@ QComboBox::drop-down {
     width: 20px;
     background: transparent;
     border: none;
-    border-left: 1px solid #242f42;
+    border-left: 1px solid $input_border;
 }
 QComboBox::down-arrow {
     image: url("__ASSET_DIR__/chevron.svg");
@@ -553,14 +736,14 @@ QComboBox::down-arrow {
     height: 6px;
 }
 QComboBox QAbstractItemView {
-    background: #141a26;
-    border: 1px solid #2a3547;
-    color: #ccd6ea;
-    selection-background-color: #1e2c44;
+    background: $card;
+    border: 1px solid $control_border;
+    color: $text_control;
+    selection-background-color: $selection;
     outline: none;
 }
 QCheckBox {
-    color: #9fb0cc;
+    color: $text_control;
     font-size: 12px;
     spacing: 6px;
 }
@@ -568,15 +751,15 @@ QCheckBox::indicator {
     width: 15px;
     height: 15px;
     border-radius: 4px;
-    border: 1px solid #33405a;
-    background: #131926;
+    border: 1px solid $input_border_hover;
+    background: $input_bg;
 }
 QCheckBox::indicator:hover {
-    border-color: #4a5a7a;
+    border-color: $input_border_hover;
 }
 QCheckBox::indicator:checked {
-    background: #3d7dfa;
-    border-color: #3d7dfa;
+    background: $accent;
+    border-color: $accent;
 }
 QSplitter::handle {
     background: transparent;
@@ -588,12 +771,12 @@ QScrollBar:vertical {
     margin: 2px;
 }
 QScrollBar::handle:vertical {
-    background: #2b3547;
+    background: $scroll_handle;
     border-radius: 5px;
     min-height: 30px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #3d4d6b;
+    background: $scroll_handle_hover;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
@@ -606,12 +789,12 @@ QScrollBar:horizontal {
     margin: 2px;
 }
 QScrollBar::handle:horizontal {
-    background: #2b3547;
+    background: $scroll_handle;
     border-radius: 5px;
     min-width: 30px;
 }
 QScrollBar::handle:horizontal:hover {
-    background: #3d4d6b;
+    background: $scroll_handle_hover;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
@@ -619,47 +802,47 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: transparent;
 }
 QToolTip {
-    background: #1a2130;
-    color: #dfe6f5;
-    border: 1px solid #33405a;
+    background: $tooltip_bg;
+    color: $tooltip_text;
+    border: 1px solid $input_border_hover;
     padding: 4px 8px;
     border-radius: 6px;
 }
 QDialog, QMessageBox {
-    background: #131826;
-    color: #dbe3f2;
+    background: $panel;
+    color: $text;
 }
 QMessageBox QLabel {
-    color: #dbe3f2;
+    color: $text;
     font-size: 13px;
 }
 QMenu {
-    background: #141a26;
-    border: 1px solid #2a3547;
+    background: $card;
+    border: 1px solid $control_border;
     border-radius: 10px;
     padding: 6px;
 }
 QMenu::item {
-    color: #c6d0e4;
+    color: $text_control;
     padding: 6px 22px 6px 14px;
     border-radius: 6px;
     font-size: 12px;
 }
 QMenu::item:selected {
-    background: #1e2c44;
-    color: #ffffff;
+    background: $selection;
+    color: $on_selection;
 }
 QWidget#sidebar {
-    background: #0d1017;
-    border-right: 1px solid #1a2130;
+    background: $sidebar_bg;
+    border-right: 1px solid $border;
 }
 QLabel#navBrand {
     font-size: 15px;
     font-weight: 700;
-    color: #ecf1fa;
+    color: $text_strong;
 }
 QLabel#navSection {
-    color: #5c667d;
+    color: $text_dim;
     font-size: 11px;
     font-weight: 600;
     padding-left: 8px;
@@ -670,58 +853,58 @@ QPushButton#navItem {
     border-radius: 8px;
     padding: 9px 14px 9px 18px;
     text-align: left;
-    color: #8b97ad;
+    color: $nav_text;
     font-size: 13px;
     font-weight: 600;
 }
 QPushButton#navItem:hover {
-    background: rgba(255, 255, 255, 0.045);
-    color: #cdd7ea;
+    background: $overlay_nav;
+    color: $nav_text_hover;
 }
 QPushButton#navItem:checked {
-    background: #1a2334;
-    color: #eef3fc;
+    background: $nav_checked_bg;
+    color: $nav_text_checked;
 }
 QWidget#pageBar {
-    background: #10141d;
-    border: 1px solid #1d2432;
+    background: $panel;
+    border: 1px solid $border;
     border-radius: 12px;
 }
 QLabel#pageTitle {
     font-size: 15px;
     font-weight: 700;
-    color: #e9eef9;
+    color: $text_strong;
 }
 QLabel#pageState {
     font-size: 12px;
-    color: #7f8aa3;
+    color: $text_muted;
 }
 QLabel#pagePlaceholder {
-    color: #5f6a82;
+    color: $text_placeholder;
     font-size: 13px;
 }
 QLabel#sectionTitleCard {
-    color: #b9c4da;
+    color: $section_title;
     font-size: 13px;
     font-weight: 700;
 }
 QLabel#hintLabel {
-    color: #6b7690;
+    color: $text_dim;
     font-size: 11px;
 }
 QSpinBox {
-    background: #151b28;
-    border: 1px solid #242f42;
+    background: $input_bg;
+    border: 1px solid $input_border;
     border-radius: 8px;
     padding: 5px 10px;
-    color: #ccd6ea;
+    color: $text_control;
     min-width: 90px;
 }
 QSpinBox:hover {
-    border-color: #33415c;
+    border-color: $input_border_hover;
 }
 QSpinBox:focus {
-    border-color: #4c8dff;
+    border-color: $accent_soft;
 }
 /* Qt 默认绘制 QSpinBox / QTimeEdit 的上下按钮和 QComboBox 的箭头时，会画成浅色立体块，
  * 在深色圆角输入框里像两个突兀的小方块越出边界（实测见 tools/ui_widget_probe.py）。
@@ -744,7 +927,7 @@ QSpinBox::down-button, QTimeEdit::down-button {
 }
 QSpinBox::up-button:hover, QSpinBox::down-button:hover,
 QTimeEdit::up-button:hover, QTimeEdit::down-button:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: $overlay_hover;
 }
 QSpinBox::up-arrow, QTimeEdit::up-arrow {
     image: url("__ASSET_DIR__/arrow_up.svg");
@@ -762,25 +945,48 @@ QSpinBox::down-arrow, QTimeEdit::down-arrow {
 # 箭头图标目录。QSS 的 url() 用绝对路径最稳（相对路径依赖进程工作目录），
 # 且必须 as_posix：Windows 反斜杠在 QSS 里会被当成转义符。
 ASSET_DIR = (Path(__file__).resolve().parent / "assets").as_posix()
-APP_QSS = APP_QSS.replace("__ASSET_DIR__", ASSET_DIR)
 
 
-def apply_palette(app):
-    """给未被 QSS 覆盖的原生部分（对话框、菜单、编辑选中态）铺一层深色。"""
+def build_qss(theme=None):
+    """按主题把令牌替换成真实颜色，返回可直接 setStyleSheet 的 QSS。
+
+    历史：整个界面原先只有一份硬编码深色的 APP_QSS，加浅色主题只能复制
+    400 行样式再逐色改。现在颜色都在 gui/themes.py 的令牌表里，模板只写
+    ``$token``；未知令牌原样保留（Qt 会把整条声明当无效丢掉，不会崩，
+    冒烟测试 check_theme() 会守住完整性）。
+    """
+    tokens = themes.resolve(theme)
+    text = APP_QSS_TEMPLATE.replace("__ASSET_DIR__", ASSET_DIR)
+    # 必须按令牌名长度倒序替换：$control_bg 是 $control_bg_hover 的前缀，
+    # 先换短的会把后者变成 "#242f42_hover"（Qt 报 Unknown color name，
+    # 整条声明被丢掉，表现为按钮悬停色失效）。
+    for name in sorted(tokens, key=len, reverse=True):
+        text = text.replace("$" + name, tokens[name])
+    return text
+
+
+# 深色 QSS，供不关心主题的调用方（历史代码、探针）沿用
+APP_QSS = build_qss(themes.DEFAULT_THEME)
+
+
+def apply_palette(app, theme=None):
+    """给未被 QSS 覆盖的原生部分（对话框、菜单、编辑选中态）铺一层主题色。"""
+    tokens = themes.resolve(theme)
     pal = QPalette()
-    pal.setColor(QPalette.Window, QColor("#0b0d12"))
-    pal.setColor(QPalette.WindowText, QColor("#e8edf8"))
-    pal.setColor(QPalette.Base, QColor("#0a0c11"))
-    pal.setColor(QPalette.AlternateBase, QColor("#10141d"))
-    pal.setColor(QPalette.Text, QColor("#d7deec"))
-    pal.setColor(QPalette.Button, QColor("#1a2130"))
-    pal.setColor(QPalette.ButtonText, QColor("#ccd6ea"))
-    pal.setColor(QPalette.Highlight, QColor("#2b4a7a"))
-    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    pal.setColor(QPalette.ToolTipBase, QColor("#1a2130"))
-    pal.setColor(QPalette.ToolTipText, QColor("#dfe6f5"))
-    pal.setColor(QPalette.PlaceholderText, QColor("#5c667d"))
+    pal.setColor(QPalette.Window, QColor(tokens["window"]))
+    pal.setColor(QPalette.WindowText, QColor(tokens["text_strong"]))
+    pal.setColor(QPalette.Base, QColor(tokens["input_bg_deep"]))
+    pal.setColor(QPalette.AlternateBase, QColor(tokens["panel"]))
+    pal.setColor(QPalette.Text, QColor(tokens["text"]))
+    pal.setColor(QPalette.Button, QColor(tokens["control_bg"]))
+    pal.setColor(QPalette.ButtonText, QColor(tokens["text_control"]))
+    pal.setColor(QPalette.Highlight, QColor(tokens["selection"]))
+    pal.setColor(QPalette.HighlightedText, QColor(tokens["on_selection"]))
+    pal.setColor(QPalette.ToolTipBase, QColor(tokens["tooltip_bg"]))
+    pal.setColor(QPalette.ToolTipText, QColor(tokens["tooltip_text"]))
+    pal.setColor(QPalette.PlaceholderText, QColor(tokens["text_dim"]))
     app.setPalette(pal)
+
 
 
 def _mix(a, b, t):
@@ -830,10 +1036,15 @@ def fade_in_window(window, duration=260):
     return anim
 
 
-def add_shadow(widget, color=ACCENT, alpha=110, blur=18, dy=3):
-    """给控件加柔和投影（用于主按钮，增加层次感）。"""
+def add_shadow(widget, color=None, alpha=110, blur=18, dy=3):
+    """给控件加柔和投影（用于主按钮，增加层次感）。
+
+    默认色取当前主题的 accent：浅色主题下深色的 #4c8dff 投影会糊成一片。
+    """
     from PySide6.QtWidgets import QGraphicsDropShadowEffect
 
+    if color is None:
+        color = accent_color()
     effect = QGraphicsDropShadowEffect(widget)
     shadow_color = QColor(str(color)) if isinstance(color, str) else QColor(color)
     shadow_color.setAlpha(alpha)
@@ -848,28 +1059,52 @@ def add_shadow(widget, color=ACCENT, alpha=110, blur=18, dy=3):
 # 按钮：颜色过渡 + 涟漪 + 按压下沉
 # ---------------------------------------------------------------------------
 
-_BUTTON_VARIANTS = {
-    "default": {
-        "bg": "#1a2130", "bg_hover": "#243048", "bg_press": "#151c2a",
-        "border": "#2a3547", "border_hover": "#3f5173", "text": "#ccd6ea",
-        "ripple": "#7fb0ff", "radius": 9.0, "gradient": 0.0,
-    },
-    "primary": {
-        "bg": "#3d7dfa", "bg_hover": "#5594ff", "bg_press": "#2e6ae6",
-        "border": "#3d7dfa", "border_hover": "#5594ff", "text": "#ffffff",
-        "ripple": "#ffffff", "radius": 9.0, "gradient": 0.07,
-    },
-    "danger": {
-        "bg": "#251821", "bg_hover": "#33212c", "bg_press": "#1e1319",
-        "border": "#48242f", "border_hover": "#5e2f3d", "text": "#ff92a2",
-        "ripple": "#ff92a2", "radius": 9.0, "gradient": 0.0,
-    },
-    "mini": {
-        "bg": "#1a2130", "bg_hover": "#243048", "bg_press": "#151c2a",
-        "border": "#2a3547", "border_hover": "#3f5173", "text": "#ccd6ea",
-        "ripple": "#7fb0ff", "radius": 7.0, "gradient": 0.0,
-    },
-}
+# 按钮配色按主题给（gui/themes.py 的 BUTTONS）。这里保留深色默认表的别名，
+# 老调用方/探针读 _BUTTON_VARIANTS 仍然拿到深色那一套。
+_BUTTON_VARIANTS = themes.BUTTONS[themes.DEFAULT_THEME]
+
+# 当前进程生效的主题。AnimatedButton 的颜色是构造时抓的快照，切换主题后
+# 新建的按钮要用新表，所以记在模块级状态里，由 apply_theme() 更新。
+_current_theme = themes.DEFAULT_THEME
+
+
+def current_theme():
+    return _current_theme
+
+
+def accent_color():
+    """当前主题的强调色（手绘部分用：焦点环、发光、连线）。
+
+    QSS 里的 $accent 由 build_qss 替换，但 paintEvent 里手绘的颜色拿不到 QSS，
+    历史上这些地方直接写死 ACCENT="#4c8dff"，切到浅色主题就会画出一层深色
+    光晕。统一从这里取。
+    """
+    return themes.resolve(_current_theme)["accent"]
+
+
+def links_color():
+    """并行连线的颜色：比强调色更亮一档，深色背景上才看得清。"""
+    return themes.resolve(_current_theme)["accent_hover"]
+
+
+def apply_theme(app, theme):
+    """切换全局主题：记状态 + 重设 QSS 与调色板。
+
+    已存在的 AnimatedButton 不会自动换色（颜色在 paintEvent 里按构造时的快照
+    画），需要调用方重建控件；MainWindow 在切换后会重建项目卡。
+    """
+    global _current_theme
+    _current_theme = themes.normalize_theme(theme)
+    if app is not None:
+        app.setStyleSheet(build_qss(_current_theme))
+        apply_palette(app, _current_theme)
+    return _current_theme
+
+
+def button_spec(variant):
+    """按当前主题取按钮配色；未知 variant 回退 default。"""
+    table = themes.button_variants(_current_theme)
+    return table.get(variant) or table["default"]
 
 
 class AnimatedButton(QPushButton):
@@ -886,7 +1121,8 @@ class AnimatedButton(QPushButton):
 
     def __init__(self, text="", variant="default", parent=None):
         super().__init__(text, parent)
-        self._variant = _BUTTON_VARIANTS[variant]
+        self._variant_name = variant
+        self._variant = button_spec(variant)
         self._hover = 0.0
         self._press = 0.0
         self._ripple_center = QPointF()
@@ -896,6 +1132,18 @@ class AnimatedButton(QPushButton):
         self._anim_hover = self._make_anim(self.HOVER_MS, self._set_hover)
         self._anim_press = self._make_anim(self.PRESS_IN_MS, self._set_press)
         self._anim_ripple = self._make_anim(self.RIPPLE_MS, self._set_ripple)
+
+    def set_variant(self, variant):
+        """换一套配色（主题切换后由界面调用，避免重建整个控件）。"""
+        spec = button_spec(variant)
+        if spec is not self._variant:
+            self._variant = spec
+            self._variant_name = variant
+            self.update()
+
+    @property
+    def variant_name(self):
+        return self._variant_name
 
     def _make_anim(self, duration, setter):
         anim = QVariantAnimation(self)
@@ -995,7 +1243,7 @@ class AnimatedButton(QPushButton):
         if self.hasFocus() and self.isEnabled():
             ring = QPainterPath()
             ring.addRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), radius, radius)
-            focus_color = QColor(ACCENT)
+            focus_color = QColor(accent_color())
             focus_color.setAlpha(150)
             painter.setPen(QPen(focus_color, 1.4))
             painter.drawPath(ring)
@@ -1160,7 +1408,7 @@ class AnimatedTabBar(QTabBar):
             bar_w,
             3.0,
         )
-        glow = QColor(ACCENT)
+        glow = QColor(accent_color())
         glow.setAlpha(70)
         painter.setPen(Qt.NoPen)
         painter.setBrush(glow)
@@ -1168,7 +1416,7 @@ class AnimatedTabBar(QTabBar):
             QRectF(bar_rect.left(), bar_rect.top() - 1.5, bar_rect.width(), bar_rect.height() + 1.5),
             2.0, 2.0,
         )
-        painter.setBrush(QColor(ACCENT))
+        painter.setBrush(QColor(accent_color()))
         painter.drawRoundedRect(bar_rect, 1.5, 1.5)
 
 
@@ -1377,14 +1625,79 @@ class HoverGlowCard(QFrame):
         path = QPainterPath()
         path.addRoundedRect(rect, 13.0, 13.0)
 
-        border = _mix(QColor("#212b3c"), QColor(ACCENT), self._hover * 0.75)
+        token = themes.resolve(_current_theme)
+        border = _mix(QColor(token["card_border"]), QColor(accent_color()), self._hover * 0.75)
         painter.setPen(QPen(border, 1.2))
         painter.drawPath(path)
 
-        highlight = QColor("#ffffff")
+        highlight = QColor(token["text_strong"])
         highlight.setAlpha(int(9 * self._hover))
         top = QPainterPath()
         top.addRoundedRect(QRectF(rect.left() + 14.0, rect.top() + 0.5, rect.width() - 28.0, 1.6), 0.8, 0.8)
         painter.setPen(Qt.NoPen)
         painter.setBrush(highlight)
         painter.drawPath(top)
+
+
+class CardBackground(QWidget):
+    """界面背景：纯色（QSS 的 $window）之上可选铺一张自定义背景图。
+
+    为什么不做成 central 的 paintEvent：central 上叠着导航栏、卡片、页签，
+    在它自己身上画图要先铺底再让子控件透明，Qt 的 QSS 背景与手绘混在一起
+    很容易出现「一半黑一半图」。改成在 central 里垫一层独立控件、放在最底层
+    （raise 之后再用 stackUnder），主题切换只改这一层的颜色。
+
+    ``opacity`` 是背景图的不透明度（0-100）：压得太实字就看不清了，所以要能调。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._pixmap = None
+        self._opacity = 100
+        self._fill = QColor(themes.DARK["window"])
+
+    def set_image(self, path):
+        """设置背景图路径；空/不存在/解码失败都按「没有背景图」处理。"""
+        self._pixmap = None
+        text = str(path or "").strip()
+        if text:
+            candidate = Path(text)
+            if not candidate.is_absolute():
+                candidate = Path(__file__).resolve().parents[1] / text
+            if candidate.is_file():
+                pix = QPixmap(str(candidate))
+                if not pix.isNull():
+                    self._pixmap = pix
+        self.update()
+
+    def image_path_loaded(self):
+        return self._pixmap is not None
+
+    def set_opacity(self, percent):
+        try:
+            self._opacity = max(0, min(100, int(percent)))
+        except (TypeError, ValueError):
+            self._opacity = 100
+        self.update()
+
+    def set_fill(self, color):
+        self._fill = QColor(color)
+        self.update()
+
+    def paintEvent(self, ev):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._fill)
+        if self._pixmap is None or self._opacity <= 0:
+            return
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setOpacity(self._opacity / 100.0)
+        # 等比铺满（裁掉超出的部分），不拉伸变形
+        scaled = self._pixmap.scaled(
+            self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        x = (scaled.width() - self.width()) // 2
+        y = (scaled.height() - self.height()) // 2
+        painter.drawPixmap(-x, -y, scaled)
+
