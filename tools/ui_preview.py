@@ -205,7 +205,7 @@ def build_overview():
     header_layout.addLayout(controls)
     root.addWidget(header)
 
-    cards_title = QLabel("项目状态")
+    cards_title = QLabel("挂机项目")
     cards_title.setObjectName("sectionTitle")
     root.addWidget(cards_title)
     # 和真实主窗口一样用 FlowHost 包一层：它按窗口宽度决定折成几行并钉住高度。

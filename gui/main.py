@@ -692,7 +692,9 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(controls)
         root.addWidget(header)
 
-        cards_title = QLabel("项目状态")
+        # 标题不叫「项目状态」：左侧导航里已经有一页叫「项目状态」（版本/仓库/
+        # 参数汇总），这里放的是可操作的项目卡片，重名会让用户以为点错了页。
+        cards_title = QLabel("挂机项目")
         cards_title.setObjectName("sectionTitle")
         root.addWidget(cards_title)
         # 用 FlowLayout 而非 QHBoxLayout：5 张卡横排会把窗口最小宽度顶到 1592px，
