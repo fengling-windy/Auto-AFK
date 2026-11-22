@@ -135,6 +135,57 @@ def apply_chain_order(members, order):
     return sorted(members, key=lambda m: rank.get(m, len(rank)))
 
 
+def merge_parallel_blocks(steps, blocks, warn=None):
+    """把 ``chain.parallel_blocks`` 里的相邻步骤合并成「同时运行」的一步。
+
+    steps 是 _chain_plan 产出的步骤序列（每步 dict：group/members/parallel）。
+    blocks 形如 ``[["A", "B"], ["C", "D", "E"]]``：
+
+    * 同一块里的项目必须在步骤序列里**连续相邻**——跨过别的项目就合并等于
+      偷偷改变运行顺序，所以整块作废并告警，而不是尽力而为地凑；
+    * 已经单独是并行步骤的项目不能再进块（会变成「并行套并行」，语义含糊）；
+    * 合并后的一步沿用块里的第一个项目所属的分组（只为日志与
+      continue_on_failure 取默认值）。
+    """
+    if not blocks:
+        return steps
+    result = list(steps)
+    for block in blocks:
+        keys = [str(k) for k in (block or []) if isinstance(k, (str, int))]
+        if len(keys) < 2:
+            continue
+        positions = []
+        broken = False
+        for key in keys:
+            hits = [i for i, step in enumerate(result) if key in step.get("members", [])]
+            if len(hits) != 1:
+                broken = True
+                break
+            positions.append(hits[0])
+        unique = sorted(set(positions))
+        if broken or len(unique) != len(keys):
+            if warn is not None:
+                warn("并行块 {0} 已忽略：有项目不在这次运行里，或不在同一步内".format(keys))
+            continue
+        if unique != list(range(unique[0], unique[0] + len(unique))):
+            if warn is not None:
+                warn("并行块 {0} 已忽略：项目之间隔着别的项目，只能把相邻的任务设为并行".format(keys))
+            continue
+        if any(len(result[i].get("members", [])) > 1 for i in unique):
+            if warn is not None:
+                warn("并行块 {0} 已忽略：其中某个项目已经在另一个并行组里".format(keys))
+            continue
+        merged = {
+            "group": result[unique[0]].get("group"),
+            "members": [m for i in unique for m in result[i].get("members", [])],
+            "parallel": True,
+            "merged": True,
+        }
+        result[unique[0] : unique[-1] + 1] = [merged]
+    return result
+
+
+
 class Supervisor:
     # chain_status 只可能是这五种；state.json 里读到别的东西（比如被手改成数字）
     # 一律当 idle 处理，避免界面上出现无法比较的状态。
@@ -1250,13 +1301,17 @@ class Supervisor:
         self._chain_thread.start()
         return True
 
-    def _chain_plan(self, groups, chain_order, only_keys=None):
-        """Build the [(group, members)] plan for one round.
+    def _chain_plan(self, groups, chain_order, only_keys=None, parallel_blocks=None):
+        """Build the executable step list for one round.
 
         only_keys=None -> every enabled member (first round); otherwise only the
         listed keys, so a retry round touches exactly the projects that failed.
+
+        每步是 ``{"group": 组, "members": [...], "parallel": bool}``。默认沿用
+        分组自己的 ``parallel``；``chain.parallel_blocks``（总览里点「并行」
+        连起来的相邻卡片）会在建好步骤后把相邻步骤合成一步并强制并行。
         """
-        plan = []
+        steps = []
         for group in groups:
             members = [
                 m
@@ -1267,8 +1322,27 @@ class Supervisor:
                 continue
             if chain_order:
                 members = apply_chain_order(members, chain_order)
-            plan.append((group, members))
-        return plan
+            steps.append(
+                {
+                    "group": group,
+                    "members": members,
+                    "parallel": bool(group.get("parallel", True)),
+                    "merged": False,
+                }
+            )
+        if parallel_blocks:
+            merged = merge_parallel_blocks(
+                steps,
+                parallel_blocks,
+                warn=lambda text: self._emit("core", "chain", text, level="warn"),
+            )
+            # 合并会把原本分属不同分组的项目塞进同一步，顺序也可能和分组表
+            # 不同；重排 members 让 chain.order 仍然生效。
+            for step in merged:
+                if step.get("merged") and chain_order:
+                    step["members"] = apply_chain_order(step["members"], chain_order)
+            return merged
+        return steps
 
     def _launch_and_wait(self, members, parallel):
         """Launch the members and block until they settle (or the chain stops)."""
@@ -1345,6 +1419,20 @@ class Supervisor:
                 return
         chain_cfg = self.settings.get("chain") or {}
         chain_order = [str(k) for k in (chain_cfg.get("order") or [])]
+        # 总览里点「并行」把相邻卡片连起来后写在这里，形如 [["A","B"],["C","D"]]；
+        # 每一块里的项目会合并成「同时启动、一起等完」的一步。
+        parallel_blocks = chain_cfg.get("parallel_blocks") or []
+        if not isinstance(parallel_blocks, list):
+            self._emit(
+                "core",
+                "chain",
+                "chain.parallel_blocks 不是列表（读到 {0}），已忽略".format(
+                    type(parallel_blocks).__name__
+                ),
+                level="warn",
+            )
+            parallel_blocks = []
+
         # A failing project no longer aborts the whole chain: it is skipped so the
         # remaining projects still run, and retried once every project has had its
         # turn. Each project is launched at most max_attempts_per_project times in
@@ -1367,11 +1455,11 @@ class Supervisor:
             if self._chain_stop.is_set() or self._chain_soft.is_set():
                 break
             if round_index == 1:
-                plan = self._chain_plan(groups, chain_order, None)
+                plan = self._chain_plan(groups, chain_order, None, parallel_blocks)
             else:
                 if not retry_failed_at_end:
                     break
-                plan = self._chain_plan(groups, chain_order, failed_keys)
+                plan = self._chain_plan(groups, chain_order, failed_keys, parallel_blocks)
                 if not plan:
                     break
                 self._emit(
@@ -1384,7 +1472,9 @@ class Supervisor:
             if not plan:
                 break
             round_failed = []
-            for group, members in plan:
+            for step in plan:
+                group = step.get("group") or {}
+                members = step.get("members") or []
                 if self._chain_stop.is_set() or self._chain_soft.is_set() or aborted:
                     break
                 runnable = [m for m in members if self._chain_attempts.get(m, 0) < cap]
@@ -1398,8 +1488,13 @@ class Supervisor:
                     )
                 if not runnable:
                     continue
-                parallel = bool(group.get("parallel", True))
-                self._emit("core", "chain", "group {0} started: {1} (parallel={2})".format(group.get("id"), runnable, parallel))
+                parallel = bool(step.get("parallel", True))
+                label = group.get("id") or "并行块"
+                self._emit(
+                    "core",
+                    "chain",
+                    "group {0} started: {1} (parallel={2})".format(label, runnable, parallel),
+                )
                 self._launch_and_wait(runnable, parallel)
                 if self._chain_stop.is_set():
                     break

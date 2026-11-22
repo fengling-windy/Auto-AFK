@@ -329,6 +329,88 @@ def _normalize_groups(raw, data, warned):
     data["groups"] = cleaned
 
 
+def _merge_spec(base, override):
+    """把 override 深合并到 base 之上，返回新映射（两者都不被修改）。
+
+    规则：
+      * 映射与映射 → 递归合并
+      * 其余情况 → override 的值整体替换（含列表，列表不做元素级合并，
+        否则「实例想清空 links」永远清不掉）
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_spec(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _expand_bases(projects, warned=None):
+    """展开项目规格里的 ``base: <项目名>``（同项目多卡片/多配置文件的支点）。
+
+    用途：同一个挂机项目要出第二张卡片跑另一套配置时，不必复制整段规格，
+    只写与基项目的差异：
+
+        BAAH-日服:
+          base: BAAH
+          config_name: 日服挂机.json
+
+    展开后 ``base`` 键仍保留（方便界面显示「来自哪个项目」），但所有字段
+    都已合并到位，运行时各处（_build_command / project_dir / config_dir_for）
+    拿到的都是完整规格。
+
+    循环引用（A→B→A）与指向不存在项目的 base 都会被丢弃并告警一次：这类
+    配置一旦进入运行路径就是无限递归或 KeyError，必须在这里挡住。
+    """
+    if not isinstance(projects, dict):
+        return
+    resolved = {}
+
+    def resolve(key, stack):
+        if key in resolved:
+            return resolved[key]
+        spec = projects.get(key)
+        if not isinstance(spec, dict):
+            return {}
+        base_key = spec.get("base")
+        if not isinstance(base_key, str) or not base_key or base_key == key:
+            resolved[key] = dict(spec)
+            return resolved[key]
+        if base_key in stack:
+            if warned is not None and "projects:base-cycle" not in warned:
+                warned.add("projects:base-cycle")
+                logging.getLogger("afk.config").warning(
+                    "afk_projects.yaml 里 base 出现循环引用（%s），已忽略 %s 的 base",
+                    " -> ".join(list(stack) + [base_key]),
+                    key,
+                )
+            resolved[key] = dict(spec)
+            return resolved[key]
+        if base_key not in projects:
+            if warned is not None and "projects:base-missing" not in warned:
+                warned.add("projects:base-missing")
+                logging.getLogger("afk.config").warning(
+                    "afk_projects.yaml 里 %s 的 base 指向不存在的项目 %r，已按独立项目处理",
+                    key,
+                    base_key,
+                )
+            resolved[key] = dict(spec)
+            return resolved[key]
+        parent = resolve(base_key, stack + (base_key,))
+        merged = _merge_spec(parent, spec)
+        # 没有单独写 display_name 时，用「基项目名（实例名）」区分卡片，
+        # 否则两张卡在界面上完全同名，用户分不清哪张跑哪套配置。
+        if "display_name" not in spec:
+            label = str(parent.get("display_name") or base_key)
+            merged["display_name"] = "{0}（{1}）".format(label, key)
+        resolved[key] = merged
+        return merged
+
+    for key in list(projects.keys()):
+        projects[key] = resolve(key, (key,))
+
+
 def registry():
     data = load_yaml(PROJECTS_YAML, {})
     warned = _WARNED_SHAPE
@@ -337,6 +419,7 @@ def registry():
     data.setdefault("reserved", [])
     _normalize_projects(data.get("projects"), data, warned)
     _normalize_groups(data.get("groups"), data, warned)
+    _expand_bases(data.get("projects"), warned)
     projects = data.get("projects")
     if isinstance(projects, dict):
         for key, spec in projects.items():
