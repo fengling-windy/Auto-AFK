@@ -46,7 +46,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 from afk_core.events import EventBus
-from afk_core.supervisor import Supervisor, apply_chain_order
+from afk_core.supervisor import ProjectRun, Supervisor, apply_chain_order
 from gui.nav_rail import NavRail
 from gui.settings_page import SettingsPage
 
@@ -1283,8 +1283,6 @@ def test_main_window(app):
         # 历史缺陷：日志一律写「已从总览移除 X（设置页可恢复）」，用户以为点了 ×
         # 等于停掉，实际上进程、窗口、占用的模拟器都还在。
         if len(_pos_before) >= 3:
-            from afk_core.supervisor import ProjectRun
-
             _running = _pos_before[2]
             _run = ProjectRun(_running, {"display_name": _running})
             _run.status = "running"
@@ -1545,6 +1543,77 @@ def test_main_window(app):
         window._poll()
         pump(app, 60)
         check("_poll 正常执行", True)
+
+        # 关窗口会 _quit() → supervisor.stop_all()，正在挂的项目被直接杀掉。
+        # 历史缺陷：closeEvent 一句不问就退，minimize_to_tray 关掉之后用户以为
+        # 只是关个界面，实际正在跑的项目全停（实测伪造 running 的 run，close()
+        # 之后 alive 从 True 变 False）。
+        _busy_key = window.visible_card_keys()[0]
+        window.supervisor.runs.clear()
+        _real_chain_running = window.supervisor.chain_running
+        window.supervisor.chain_running = lambda: False
+        check("开始前没有在跑的项目（{0}）".format(sorted(window.supervisor.runs)),
+              window._busy_project_keys() == [])
+        check("没有在跑的项目、链也闲着时不用问，直接放行",
+              window._confirm_quit_with_busy([]) is True)
+        _busy_run = ProjectRun(_busy_key, {"display_name": _busy_key})
+        _busy_run.status = "running"
+        window.supervisor.runs[_busy_key] = _busy_run
+        check("伪造一个运行中的项目会被算成「还在跑」（{0}）".format(window._busy_project_keys()),
+              window._busy_project_keys() == [_busy_key])
+        _done_run = ProjectRun("SmokeDone", {"display_name": "SmokeDone"})
+        _done_run.status = "success"
+        window.supervisor.runs["SmokeDone"] = _done_run
+        check("跑到终态的项目不算「还在跑」", "SmokeDone" not in window._busy_project_keys())
+        window.supervisor.runs.pop("SmokeDone", None)
+        _asked = []
+        _real_confirm = window._confirm_quit_with_busy
+
+        def _say_no(keys):
+            _asked.append(list(keys))
+            return False
+
+        window._confirm_quit_with_busy = _say_no
+        try:
+            window.close()
+            pump(app, 80)
+            check("有项目在跑时关窗口会先把它们列出来（{0}）".format(_asked),
+                  _asked == [[_busy_key]])
+            check("选择「不退出」后窗口还在、状态轮询也没停",
+                  window.isVisible() and window.timer.isActive())
+            check("取消退出会在日志里留一行",
+                  "退出已取消" in window.log_view.toPlainText())
+            check("取消退出不会把运行中的项目停掉", _busy_run.status == "running")
+        finally:
+            window._confirm_quit_with_busy = _real_confirm
+            window.supervisor.runs.pop(_busy_key, None)
+            window.show()
+            pump(app, 60)
+
+        # 项目还没真正起来（正在更新/起模拟器）时 runs 是空的，但链在跑；
+        # 这时候关窗口会把整条链静默中止，也要问一句。
+        window.supervisor.runs.clear()
+        _chain_asked = []
+
+        def _chain_say_no(keys):
+            _chain_asked.append(list(keys))
+            return False
+
+        window.supervisor.chain_running = lambda: True
+        window._confirm_quit_with_busy = _chain_say_no
+        try:
+            window.close()
+            pump(app, 80)
+            check("链在跑但项目还没起来时，关窗口也会问一句（{0}）".format(_chain_asked),
+                  _chain_asked == [[]])
+            check("链在跑时取消退出，窗口还在", window.isVisible() and window.timer.isActive())
+            check("链在跑时取消退出会写「挂机链仍在运行」",
+                  "挂机链仍在运行" in window.log_view.toPlainText())
+        finally:
+            window._confirm_quit_with_busy = _real_confirm
+            window.supervisor.chain_running = _real_chain_running
+            window.show()
+            pump(app, 60)
 
         # exit 后动作事件 → 调度退出
         bus_event = {"project": "core", "kind": "post_action", "level": "info", "message": "post action executed: exit", "data": {"action": "exit"}}

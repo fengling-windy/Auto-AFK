@@ -2728,13 +2728,82 @@ class MainWindow(QMainWindow):
         used += spacing * max(0, countable)
         return max(0, overview.height() - used)
 
+    def _busy_project_keys(self):
+        """还没跑到终态的项目键，按名字排序返回。
+
+        关窗口会走 `_quit()` → `supervisor.stop_all()`，正在挂的项目会被直接
+        杀掉（实测：伪造一个 running 的 run，`window.close()` 之后
+        `run.alive` 从 True 变 False）。点右上角 × 时用户往往只是想把界面收起来，
+        所以要先把这份清单拿出来问一句。
+        """
+        runs = getattr(getattr(self, "supervisor", None), "runs", None) or {}
+        busy = []
+        for key, run in runs.items():
+            if run is None or getattr(run, "terminal", False):
+                continue
+            if getattr(run, "alive", False) or getattr(run, "status", "") in ("pending", "running", "hang"):
+                busy.append(str(key))
+        return sorted(busy)
+
+    def _busy_project_label(self, key):
+        """卡片标题（就是用户看到的名字）；卡片已收起时退回项目键。"""
+        card = (getattr(self, "cards", None) or {}).get(key)
+        if card is not None:
+            try:
+                text = card.name_label.text()
+            except Exception as exc:
+                logging.getLogger("afk.gui").debug("read card label failed: %s", exc)
+            else:
+                if text:
+                    return text
+        return str(key)
+
+    def _confirm_quit_with_busy(self, keys):
+        """有项目在跑时问一句；纯逻辑抽出来，冒烟可以直接替换掉这个函数。"""
+        chain_busy = False
+        if not keys:
+            # 点了「一键挂机」但项目还没真正起来（正在更新/起模拟器阶段），
+            # runs 里是空的，关窗口会把整条链静默中止，同样要问一句。
+            try:
+                chain_busy = bool(self.supervisor.chain_running())
+            except Exception as exc:
+                logging.getLogger("afk.gui").debug("chain_running probe failed: %s", exc)
+            if not chain_busy:
+                return True
+        if keys:
+            names = "、".join(self._busy_project_label(k) for k in keys)
+            detail = "还有 {0} 个项目在运行：\n\n{1}".format(len(keys), names)
+        else:
+            detail = "挂机链正在运行（项目还没有真正启动）"
+        choice = QMessageBox.question(
+            self,
+            "退出 Auto-AFK",
+            "{0}\n\n退出会把它们一起停掉，确定退出吗？".format(detail),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return choice == QMessageBox.Yes
+
     def closeEvent(self, event):
         if (self.settings.get("gui", {}) or {}).get("minimize_to_tray", False):
             event.ignore()
             self.hide()
             self.tray.showMessage("Auto-AFK", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
-        else:
-            self._quit()
+            return
+        # 历史缺陷：关窗口无条件 _quit()，正在挂的项目被一声不响地杀掉，
+        # 尤其是 minimize_to_tray 关掉之后，用户以为只是关个界面。
+        busy = self._busy_project_keys()
+        if not self._confirm_quit_with_busy(busy):
+            event.ignore()
+            if busy:
+                self._append_log(
+                    "core", "info",
+                    "退出已取消：{0} 个项目仍在运行".format(len(busy)),
+                )
+            else:
+                self._append_log("core", "info", "退出已取消：挂机链仍在运行")
+            return
+        self._quit()
 
 
 class CardsScrollArea(QScrollArea):
