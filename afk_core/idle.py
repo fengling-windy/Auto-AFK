@@ -171,8 +171,8 @@ class IdleWatcher:
                         "message": "idle trigger callback failed: {0}".format(self.last_error),
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("idle failure emit failed: %s", exc)
 
     def _note_skip(self, reason):
         """记录「本次空闲被跳过」的原因，并写入事件流（同一原因只记一次，避免刷屏）。"""
@@ -190,8 +190,17 @@ class IdleWatcher:
                     "message": "idle auto-run skipped: {0}".format(reason),
                 }
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("idle skip emit failed: %s", exc)
+
+    def _note_probe_error(self, name, exc):
+        """记录「判断条件本身出错」。
+
+        is_busy / is_done_today 是外面注入的回调，过去异常被静默 pass：链线程
+        挂了导致 is_busy 抛异常时，空闲逻辑会当成「没在忙」继续往下走，到点就
+        弹提示把用户叫回来——而真正的原因（回调坏了）在日志里一个字都没有。
+        """
+        log.warning("idle probe %s failed: %s: %s", name, type(exc).__name__, exc)
 
     # -- 主循环 ----------------------------------------------------------------
     def _loop(self):
@@ -226,8 +235,8 @@ class IdleWatcher:
                     self._armed = False
                     self._next_allowed_at = time.time() + self.cooldown_seconds()
                     return
-            except Exception:
-                pass
+            except Exception as exc:
+                self._note_probe_error("is_busy", exc)
         if self.is_done_today is not None:
             try:
                 if self.is_done_today():
@@ -236,8 +245,8 @@ class IdleWatcher:
                     self._next_allowed_at = time.time() + self.cooldown_seconds()
                     self._note_skip("already completed today")
                     return
-            except Exception:
-                pass
+            except Exception as exc:
+                self._note_probe_error("is_done_today", exc)
         self._armed = False
         self._next_allowed_at = time.time() + self.cooldown_seconds()
         if self.bus is not None:

@@ -13,8 +13,10 @@
         .venv/Scripts/python.exe tests/smoke_idle.py
 """
 
+import logging
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,22 @@ from afk_core import autostart, config, idle as idle_mod
 from afk_core.idle import IdleWatcher, format_idle
 
 FAILURES = []
+
+
+@contextmanager
+def _capture_log(logger, level=logging.WARNING):
+    """临时挂一个 handler 收集日志记录（用于断言「静默吞错已改成留痕」）。"""
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
 
 
 def check(name, ok):
@@ -122,6 +140,43 @@ def test_idle_watcher():
     # status 结构
     snap = watcher3.status()
     check("status 含必要字段", {"supported", "enabled", "idle_sec", "threshold_sec", "armed"} <= set(snap))
+
+    # is_busy / is_done_today 抛异常时必须留痕。
+    # 历史缺陷：两处异常都被静默 pass，链线程挂掉导致 is_busy 抛异常时空闲逻辑
+    # 会当成「没在忙」继续往下走，到点就把用户叫回来，而真正的原因（回调坏了）
+    # 在日志里一个字都没有。
+    fired.clear()
+
+    def boom():
+        raise RuntimeError("probe exploded")
+
+    watcher5 = IdleWatcher(lambda: settings, lambda sec: fired.append(sec),
+                           interval=0.05, is_busy=boom, is_done_today=boom)
+    fake["value"] = 2000.0
+    with _capture_log(idle_mod.log) as errors:
+        watcher5._tick()
+    texts = " ".join(r.getMessage() for r in errors)
+    check("is_busy 抛异常会写 warning", "idle probe is_busy failed" in texts)
+    check("is_done_today 抛异常会写 warning", "idle probe is_done_today failed" in texts)
+    check("判断条件抛异常时仍按没在忙处理", len(fired) == 1)
+
+    # 事件发不出去时（bus 的 emit 抛异常）也要留痕
+    class _BadBus:
+        def emit(self, event):
+            raise RuntimeError("bus down")
+
+    fired.clear()
+    watcher6 = IdleWatcher(lambda: settings, lambda sec: fired.append(sec),
+                           interval=0.05, bus=_BadBus())
+    fake["value"] = 2000.0
+    with _capture_log(idle_mod.log) as errors:
+        watcher6._tick()
+        watcher6._note_failure(RuntimeError("x"))
+        watcher6._note_skip("why")
+    texts = " ".join(r.getMessage() for r in errors)
+    check("bus 发不出去时 prompt 事件留痕", "idle prompt emit failed" in texts)
+    check("bus 发不出去时失败事件留痕", "idle failure emit failed" in texts)
+    check("bus 发不出去时跳过事件留痕", "idle skip emit failed" in texts)
 
     # 格式化
     check("format_idle 小时", format_idle(3700) == "1 小时 1 分")
