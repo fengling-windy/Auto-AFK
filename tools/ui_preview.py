@@ -177,7 +177,7 @@ def build_overview():
     chain_pill = AnimatedPill("空闲", gui_main.CHAIN_COLORS["idle"])
     chain_btn = AnimatedButton("一键挂机", variant="primary")
     chain_btn.setObjectName("primary")
-    add_shadow(chain_btn, color="#3d7dfa", alpha=120, blur=18, dy=3)
+    add_shadow(chain_btn, alpha=120, blur=18, dy=3)
     stop_all_btn = AnimatedButton("全部停止", variant="danger")
     stop_all_btn.setObjectName("danger")
     top.addWidget(chain_pill)

@@ -626,6 +626,10 @@ QPushButton#mini {
     font-size: 11px;
     border-radius: 7px;
 }
+/* 页签条那一行的底色不能用 QSS 给（Qt 的 QTabWidget 本体不画背景，QTabBar 也
+   被设成透明的，写 background 全部无效）：设了自定义背景图后，页签之间的空隙与
+   页签右侧的空白会把图片露出来，未选中的灰字直接压在图上。改由
+   AnimatedTabWidget.paintEvent 填一条 $window 色的底。 */
 QTabWidget::pane {
     border: 1px solid $border;
     border-radius: 12px;
@@ -1215,8 +1219,9 @@ class AnimatedButton(QPushButton):
         radius = spec["radius"]
 
         if not self.isEnabled():
-            bg = QColor("#161c28")
-            border = QColor("#232c3d")
+            token = themes.resolve(_current_theme)
+            bg = QColor(token["disabled_bg"])
+            border = QColor(token["disabled_border"])
         else:
             bg = _mix(QColor(spec["bg"]), QColor(spec["bg_hover"]), self._hover)
             border = _mix(QColor(spec["border"]), QColor(spec["border_hover"]), self._hover)
@@ -1427,6 +1432,32 @@ class AnimatedTabWidget(QTabWidget):
         super().__init__(parent)
         self.setTabBar(AnimatedTabBar())
         self.currentChanged.connect(self._fade_current)
+
+    def paintEvent(self, ev):
+        """自己给页签条那一行铺底色。
+
+        为什么不在 QSS 里写 QTabWidget { background: ... }：Qt 的 QTabWidget 本体
+        不绘制背景，QTabBar 又被上面那条规则设成 transparent，于是页签之间的空隙
+        和页签右侧的空白完全透明——没设背景图时露出主窗口的 $window 尚可，设了
+        自定义背景图之后那块图片直接透出来，未选中页签的灰字压在彩色图上读不出。
+        实测四种 QSS 写法（QTabWidget / QTabBar / QTabWidget::tab-bar / ::pane）
+        都改不动这块像素，只能自绘。
+        """
+        bar = self.tabBar()
+        if bar is not None and bar.isVisible():
+            height = bar.geometry().height()
+            if height > 0:
+                # 必须先铺底，再交给父类把页签和页面画上去（顺序反了字就没了）。
+                painter = QPainter(self)
+                painter.fillRect(
+                    0,
+                    bar.geometry().top(),
+                    self.width(),
+                    height,
+                    QColor(themes.resolve(_current_theme)["window"]),
+                )
+                painter.end()
+        super().paintEvent(ev)
 
     def _fade_current(self, index):
         page = self.widget(index)

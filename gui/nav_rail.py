@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui import icons
+from gui import icons, themes
 
 
 class NavItem(QPushButton):
@@ -118,13 +118,19 @@ class _NavIndicator(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._color = QColor(themes.resolve(themes.DEFAULT_THEME)["accent"])
         self.hide()
+
+    def set_color(self, color):
+        """主题切换时改指示条颜色（QSS 管不到自绘控件）。"""
+        self._color = QColor(str(color or themes.resolve(themes.DEFAULT_THEME)["accent"]))
+        self.update()
 
     def paintEvent(self, ev):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#4c8dff"))
+        painter.setBrush(self._color)
         painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 1.5, 1.5)
 
 
@@ -155,6 +161,8 @@ class NavRail(QWidget):
 
         logo = QLabel()
         logo.setPixmap(make_icon().pixmap(30, 30))
+        # 记下 logo 控件：主题切换要重画（图标是位图，QSS 换不掉底色）
+        self._logo = logo
         brand_label = QLabel(title)
         brand_label.setObjectName("navBrand")
         brand.addWidget(logo)
@@ -275,11 +283,23 @@ class NavRail(QWidget):
     def item_keys(self):
         return list(self._items.keys())
 
-    def set_icon_color(self, color):
-        """主题切换后重画全部导航图标（QIcon 是位图，QSS 管不到）。"""
+    def set_icon_color(self, color, accent=None):
+        """主题切换后重画全部导航图标（QIcon 是位图，QSS 管不到）。
+
+        accent 一并传进来改左边那条滑动指示条：它也是自绘控件，QSS 里的
+        $accent 换不到它身上，不跟着改就会在浅色主题下留一条深蓝。
+        """
         self._icon_color = str(color or "#8b97ad")
         for item in self._items.values():
             item.set_icon_color(self._icon_color)
+        indicator = getattr(self, "_indicator", None)
+        if indicator is not None and accent:
+            indicator.set_color(accent)
+        logo = getattr(self, "_logo", None)
+        if logo is not None:
+            from gui.main import make_icon
+
+            logo.setPixmap(make_icon().pixmap(30, 30))
 
     def set_active(self, key, animate=True):
         item = self._items.get(key)

@@ -56,6 +56,7 @@ from gui.modern import (
     StatusDot,
     add_shadow,
     apply_theme,
+    current_theme,
     enable_smooth_scroll,
     fade_in_widget,
     fade_in_window,
@@ -186,17 +187,22 @@ def _preferred_window_size(screen=None):
     return min(width, limit_w), min(height, limit_h)
 
 
-def make_icon():
+def make_icon(theme=None):
+    """应用图标：深/浅主题各一套配色（浅色主题下用深底会像一块黑补丁）。
+
+    颜色走 themes 的设计令牌，和 QSS 用同一套值；没传 theme 时取当前主题。
+    """
+    token = themes.resolve(theme or current_theme())
     pix = QPixmap(64, 64)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#10141d"))
+    painter.setBrush(QColor(token["panel"]))
     painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
-    painter.setBrush(QColor("#3d7dfa"))
+    painter.setBrush(QColor(token["accent"]))
     painter.drawEllipse(8, 8, 48, 48)
-    painter.setPen(QColor("#ffffff"))
+    painter.setPen(QColor(token["on_accent"]))
     painter.setFont(QFont("Arial", 17, QFont.Bold))
     painter.drawText(pix.rect(), Qt.AlignCenter, "AFK")
     painter.end()
@@ -634,7 +640,7 @@ class MainWindow(QMainWindow):
         self.chain_pill = AnimatedPill("空闲", CHAIN_COLORS["idle"])
         self.chain_btn = AnimatedButton("一键挂机", variant="primary")
         self.chain_btn.setObjectName("primary")
-        add_shadow(self.chain_btn, color="#3d7dfa", alpha=120, blur=18, dy=3)
+        add_shadow(self.chain_btn, alpha=120, blur=18, dy=3)
         self.stop_all_btn = AnimatedButton("全部停止", variant="danger")
         self.stop_all_btn.setObjectName("danger")
         top.addWidget(self.chain_pill)
@@ -1279,10 +1285,13 @@ class MainWindow(QMainWindow):
             background.set_opacity(opacity)
         nav = getattr(self, "nav", None)
         if nav is not None and hasattr(nav, "set_icon_color"):
-            nav.set_icon_color(themes.resolve(name)["nav_text"])
+            token = themes.resolve(name)
+            nav.set_icon_color(token["nav_text"], accent=token["accent"])
         links = getattr(self, "links", None)
         if links is not None:
             links.set_color(links_color())
+        # 标题栏/任务栏图标是位图，换肤后要重画一张，否则浅色主题下还是一块深底
+        self.setWindowIcon(make_icon(name))
         changed = getattr(self, "_applied_theme", None) != name
         self._applied_theme = name
         if changed:
