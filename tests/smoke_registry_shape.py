@@ -152,6 +152,109 @@ def _run(tmp):
     check("members 写成字符串时救成列表", members == ["A"], repr(members))
     check("members 救回来之后链能正常起", not _probe("members"), _probe("members"))
 
+    # -- base 继承：同项目多卡片 / 多配置文件的支点 ----------------------
+    _write(
+        "projects:\n"
+        + SPEC.format(name="Base")
+        + "  Inst:\n"
+        "    base: Base\n"
+        "    config_name: 日服.json\n"
+    )
+    projects = config.registry().get("projects") or {}
+    inst = projects.get("Inst") or {}
+    check("base 继承：子项拿到基项目的字段", inst.get("path") == ".", repr(inst.get("path")))
+    check("base 继承：子项自己的字段覆盖基项目",
+          inst.get("config_name") == "日服.json", repr(inst.get("config_name")))
+    check("base 继承：展开后保留 base 键", inst.get("base") == "Base", repr(inst.get("base")))
+    check("base 继承：没写 display_name 时用「基项目名（实例名）」",
+          inst.get("display_name") == "Base（Inst）", repr(inst.get("display_name")))
+    check("base 继承：基项目本身不受影响",
+          (projects.get("Base") or {}).get("display_name") == "Base")
+    check("base 展开后 supervisor 各入口不抛", not _probe("base"), _probe("base"))
+
+    # 深合并：映射递归合并，列表整体替换（否则「实例想清空 links」永远清不掉）
+    _write(
+        "projects:\n"
+        "  B:\n"
+        "    display_name: B\n"
+        "    path: .\n"
+        "    args: [a]\n"
+        "    env:\n"
+        "      K: 1\n"
+        "      J: 2\n"
+        "  C:\n"
+        "    base: B\n"
+        "    args: [b, c]\n"
+        "    env:\n"
+        "      J: 9\n"
+    )
+    projects = config.registry().get("projects") or {}
+    c = projects.get("C") or {}
+    check("base 继承：列表整体替换（不做元素合并）", c.get("args") == ["b", "c"], repr(c.get("args")))
+    check("base 继承：映射递归合并", c.get("env") == {"K": 1, "J": 9}, repr(c.get("env")))
+
+    # 显式写了 display_name 就用它，不再自动拼接
+    _write(
+        "projects:\n"
+        + SPEC.format(name="Base2")
+        + "  Named:\n"
+        "    base: Base2\n"
+        "    display_name: 我的日服\n"
+    )
+    named = (config.registry().get("projects") or {}).get("Named") or {}
+    check("base 继承：显式 display_name 优先", named.get("display_name") == "我的日服",
+          repr(named.get("display_name")))
+
+    # base 指向不存在的项目：按独立项目处理，不能抛
+    _write("projects:\n  D:\n    display_name: D\n    path: .\n    base: NoSuch\n")
+    projects = config.registry().get("projects") or {}
+    check("base 指向不存在的项目时保留自身", (projects.get("D") or {}).get("display_name") == "D",
+          repr(projects.get("D")))
+    check("base 指向不存在的项目不抛", not _probe("missing-base"), _probe("missing-base"))
+
+    # 循环引用（A→B→A）必须挡住，否则是无限递归
+    _write(
+        "projects:\n"
+        "  P:\n    display_name: P\n    path: .\n    base: Q\n"
+        "  Q:\n    display_name: Q\n    path: .\n    base: P\n"
+    )
+    projects = config.registry().get("projects") or {}
+    check("base 循环引用时两个项目都保留", sorted(projects) == ["P", "Q"], sorted(projects))
+    check("base 循环引用不无限递归", not _probe("cycle"), _probe("cycle"))
+
+    # 指向自己：等价于没写 base
+    _write("projects:\n  S:\n    display_name: S\n    path: .\n    base: S\n")
+    self_base = (config.registry().get("projects") or {}).get("S") or {}
+    check("base 指向自己时按独立项目处理", self_base.get("display_name") == "S", repr(self_base))
+
+    # base 告警只报一次（registry() 每次刷新都会重读）
+    records = []
+
+    class _GrabBase(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("afk.config")
+    handler = _GrabBase()
+    logger.addHandler(handler)
+    old_level = logger.level
+    old_prop = logger.propagate
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    try:
+        # 文件里要真的有一个「缺失 base」的项目，否则这轮什么都不会告警
+        # （上一段写的是 base 指向自己，属于正常配置）。
+        _write("projects:\n  M:\n    display_name: M\n    path: .\n    base: NoSuch\n")
+        config._WARNED_SHAPE.clear()
+        for _ in range(5):
+            config.registry()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_prop
+    missing = [m for m in records if "base 指向不存在的项目" in m]
+    check("base 缺失告警只报一次", len(missing) == 1, "{0} 条: {1}".format(len(missing), records))
+
     # 结构告警只报一次
     _write("projects: hi\ngroups: nope\n")
     records = []

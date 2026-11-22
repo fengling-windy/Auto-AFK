@@ -438,7 +438,14 @@ class Supervisor:
         for item in spec.get("args", []) or []:
             try:
                 args.append(str(item).format(**fmt))
-            except Exception:
+            except Exception as exc:
+                # 占位符写错（{config-name}、{configname}、花括号没配对）时静默
+                # 回退成原文，等于把字面量 "{config_name}" 当参数交给子项目——
+                # 界面上看起来「参数没生效」，而日志里一条线索都没有。
+                logging.getLogger("afk.supervisor").warning(
+                    "参数里的占位符没能展开（%s 的 %r）：%s: %s，已按原文传入",
+                    key, item, type(exc).__name__, exc,
+                )
                 args.append(str(item))
         return args, project
 
