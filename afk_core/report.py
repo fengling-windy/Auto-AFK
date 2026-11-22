@@ -185,8 +185,11 @@ def list_reports(limit=100):
                 snap = json.loads(index.read_text(encoding="utf-8"))
                 entry["project"] = snap.get("project")
                 entry["reason"] = snap.get("reason")
-            except Exception:
-                pass
+            except Exception as exc:
+                # 报告目录里的 snapshot.json 可能被手工改坏或写到一半断电；
+                # 坏一个不能让「报告列表」整个空掉，但要知道它坏了。
+                log.warning("read report snapshot failed: %s: %s: %s",
+                            index, type(exc).__name__, exc)
         items.append(entry)
         if len(items) >= limit:
             break

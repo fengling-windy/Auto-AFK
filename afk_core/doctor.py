@@ -1,10 +1,13 @@
 import importlib.util
+import logging
 import os
 import shutil
 from pathlib import Path
 
 from . import config
 from .proc import run as proc_run
+
+log = logging.getLogger("afk.doctor")
 
 TOOLS = [
     ("git", ["git", "--version"]),
@@ -55,8 +58,12 @@ def _find_genshin():
             install_path = (data.get("genshinStartConfig") or {}).get("installPath") or ""
             if install_path:
                 candidates.append(Path(str(install_path)))
-        except Exception:
-            pass
+        except Exception as exc:
+            # BetterGI 的 config.json 是它自己写的，形状会随版本变。读不出来
+            # 只是少了「用户配的安装路径」这一个线索，后面还有默认候选，但
+            # 排障时要能看出为什么没找到游戏。
+            log.warning("read BetterGI config for genshin path failed: %s: %s",
+                        type(exc).__name__, exc)
     candidates += [
         Path(r"E:\miHoYo Launcher\games\Genshin Impact Game\YuanShen.exe"),
         Path(r"E:\miHoYo Launcher\games\Genshin Impact Game\GenshinImpact.exe"),

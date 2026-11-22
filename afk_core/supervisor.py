@@ -1197,8 +1197,12 @@ class Supervisor:
                         title = (buf.value or "").lower()
                         if any(needle in title for needle in needles):
                             hits.append(title)
-            except Exception:
-                pass
+            except Exception as exc:
+                # 回调必须返回 True 才能继续枚举剩下的窗口，所以这里不能往上抛；
+                # 但「某个窗口取名失败」会让完成判定漏掉它，留 debug 便于对账。
+                logging.getLogger("afk.supervisor").debug(
+                    "window title probe failed: %s: %s", type(exc).__name__, exc
+                )
             return True
 
         try:

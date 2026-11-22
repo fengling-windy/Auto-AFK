@@ -389,8 +389,10 @@ class MuMuController:
                 name = (proc.info.get("name") or "").lower()
                 if name in ("mumunxdevice.exe", "mumunxmain.exe"):
                     pids.add(int(proc.info["pid"]))
-        except Exception:
-            pass
+        except Exception as exc:
+            # 这里静默会让「停止模拟器」看起来成功、实际一个进程都没杀：
+            # stop() 用这个集合决定杀谁，集合空就等于什么都没做。
+            log.warning("enumerate MuMu processes failed: %s: %s", type(exc).__name__, exc)
         return pids
 
     def window_state(self):
@@ -461,8 +463,10 @@ class MuMuController:
                     shown += 1
                 try:
                     user32.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Windows 会拒绝非前台进程抢焦点（前台锁定），这是常态、
+                    # 不影响「窗口已恢复」，所以只记 debug，不刷 warning。
+                    log.debug("SetForegroundWindow(%s) failed: %s", hwnd, exc)
             if shown:
                 break
             time.sleep(1)
@@ -615,8 +619,10 @@ class MuMuController:
             for proc in psutil.process_iter(["name"]):
                 if (proc.info.get("name") or "").lower() == "mumunxmain.exe":
                     return True
-        except Exception:
-            pass
+        except Exception as exc:
+            # 返回 False 的后果是「以为没开 → 再起一个前端」，两套 UI 抢同一个
+            # 实例。留一条 warning 才看得出是枚举失败而不是真的没在跑。
+            log.warning("check MuMu main app failed: %s: %s", type(exc).__name__, exc)
         return False
 
     def update_check(self):
