@@ -1022,6 +1022,35 @@ def test_main_window(app):
         pump(app, 400)
         check("还原 gui 段后「界面」按钮回来", window.cards[gui_key].gui_btn.isVisible())
 
+        # 拖动把原本相邻的并行组拆开之后，界面不能再显示「并行中」。
+        # 历史缺陷：parallel_groups() 只检查组员「还显示着」，不检查是否仍然相邻，
+        # 于是拖散之后界面照样画着连线、按钮写着「并行中」，而 supervisor 的
+        # merge_parallel_blocks 会因为「项目之间隔着别的项目」把整块作废——
+        # 界面说同时跑，实际是顺序跑，用户完全看不出来。
+        order_keys = window.visible_card_keys()
+        if len(order_keys) >= 3:
+            first, second, third = order_keys[0], order_keys[1], order_keys[2]
+            window.toggle_parallel(first)
+            window.toggle_parallel(second)
+            pump(app, 120)
+            check("点两张相邻卡的「并行」组成一组", window.parallel_groups() == [[first, second]])
+            check("并行组写进 chain.parallel_blocks", [first, second] in (
+                (config.settings().get("chain") or {}).get("parallel_blocks") or []
+            ))
+            # 把第三张卡拖到前两张之间，原本相邻的 first/second 就被拆开了
+            window._apply_card_order([first, third, second] + order_keys[3:])
+            pump(app, 120)
+            check("拖动拆散并行组后界面不再认这一组", window.parallel_groups() == [])
+            check("拆散后卡片不再显示「并行中」", not window.cards[first].is_parallel())
+            check("拆散后连线层没有组", not (window.links._groups or []))
+            window._prune_parallel_blocks()
+            pump(app, 120)
+            check("拆散后配置里的并行块被清掉", not (
+                (config.settings().get("chain") or {}).get("parallel_blocks") or []
+            ))
+            window._apply_card_order(order_keys)
+            pump(app, 120)
+
         # 注册表里删掉某个项目时，界面不能因为 QStackedWidget 移除页面而乱翻页。
         # 历史缺陷（嵌入页时代）：移除当前页会自己切到相邻下标，用户看到的是另一
         # 个项目。现在只有总览/设置两页，删项目后必须仍在原来那一页上。

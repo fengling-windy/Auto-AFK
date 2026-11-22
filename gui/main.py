@@ -1070,17 +1070,55 @@ class MainWindow(QMainWindow):
         return True
 
     def parallel_groups(self):
-        """当前有效的并行组（只保留组员都还显示着的）。"""
-        visible = set(self.visible_card_keys())
+        """当前有效的并行组（组员都还显示着，且仍然是相邻的）。
+
+        历史缺陷：只检查组员「还显示着」，不检查是否仍然相邻。用户在总览上把
+        一张卡拖到别处之后，原本相邻的并行组被拆开了，界面照样显示「并行中」
+        并画着连线，但 supervisor 的 merge_parallel_blocks 会因为「项目之间
+        隔着别的项目」把整块作废——界面说同时跑，实际是顺序跑，用户看不出来。
+        这里按卡片当前顺序校验连续性，不连续的组直接不算数（连线也跟着消失）。
+        """
+        visible = self.visible_card_keys()
+        visible_set = set(visible)
         groups = []
         for block in self._parallel_blocks:
             members = [k for k in block if k in (getattr(self, "cards", {}) or {})]
-            if len(members) >= 2 and all(k in visible for k in members):
-                groups.append(members)
+            if len(members) < 2 or not all(k in visible_set for k in members):
+                continue
+            indices = sorted(visible.index(k) for k in members)
+            if indices != list(range(indices[0], indices[0] + len(indices))):
+                continue
+            # 按卡片顺序返回，连线才连相邻的那几张
+            groups.append(sorted(members, key=visible.index))
         return groups
+
+    def _prune_parallel_blocks(self):
+        """把因为拖动/隐藏而不再相邻的并行组从配置里清掉。
+
+        parallel_groups() 已经会把不相邻的组判为无效（界面不画连线、不显示
+        「并行中」），但 chain.parallel_blocks 里还留着那一对。留着会有两个
+        后果：一是 supervisor 每次跑链都会告警「并行块已忽略」刷日志；二是
+        用户再点其中一张卡的「并行」会命中 toggle_parallel 的「已在某个组里
+        → 退出」分支，日志写「取消并行」，可界面上那张卡明明没在并行中。
+        """
+        blocks = self.parallel_groups()
+        kept = {tuple(sorted(g)) for g in blocks}
+        before = [list(b) for b in self._parallel_blocks]
+        dropped = [b for b in before if tuple(sorted(b)) not in kept]
+        if not dropped:
+            return
+        self._parallel_blocks = [list(g) for g in blocks]
+        self._write_parallel_blocks()
+        self._append_log(
+            "core", "warn",
+            "并行组已取消：{0} 里的项目不再相邻".format("、".join("+".join(b) for b in dropped)),
+        )
 
     def toggle_parallel(self, key):
         """卡片「并行」按钮：第一次点记下待配对，第二次点相邻的另一张组成一组。"""
+        # 先把已经不相邻的失效组清掉：否则下面「已在某个组里 → 取消」的分支
+        # 会把一张界面上根本没显示「并行中」的卡当成在并行组里。
+        self._prune_parallel_blocks()
         pending = self._parallel_pending
         # 已在某个组里 → 再点一次退出该组
         for block in list(self._parallel_blocks):
@@ -1206,6 +1244,8 @@ class MainWindow(QMainWindow):
         # 不写回去用户会觉得「拖了没生效」。
         self._apply_card_order(keys)
         self._save_chain_order(keys, log_text="运行顺序已更新：{0}".format(" → ".join(keys)))
+        # 拖动可能把原本相邻的并行组拆开，配置里那一对要跟着作废
+        self._prune_parallel_blocks()
 
 
     def _reload_project_colors(self):
