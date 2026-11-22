@@ -324,6 +324,35 @@ def test_settings_page(app):
     check("运行顺序列表行多时不再出现滚动条", page.order_list.verticalScrollBar().maximum() == 0)
     page.hide()
 
+    # 5. 新增挂机项目：项目键会变成 configs/<键> 目录名、日志名、报告名。
+    # 历史缺陷：只校验「非空 + 不重复」，带 Windows 保留字符的键照样写进注册表，
+    # 之后 supervisor 建 configs/<键> 目录直接 OSError(123)，链在这一步崩掉，
+    # 而错误信息只有一个 WinError，看不出是项目键的问题。
+    added = []
+    page2 = SettingsPage(log_fn=lambda *a, **k: None, registry=FAKE_REGISTRY)
+    page2.project_added.connect(added.append)
+    page2.show()
+    pump(app, 40)
+    before_projects = len(config.registry()["projects"])
+    for bad_key in ['bad:name', 'bad|name', 'bad<name>', 'bad"name"', 'bad\\name']:
+        page2.add_key_edit.setText(bad_key)
+        page2.add_path_edit.setText("BAAH")
+        page2._add_project()
+    pump(app, 40)
+    check("含 Windows 保留字符的项目键被拒绝", len(config.registry()["projects"]) == before_projects)
+    check("非法键不发出新增信号", added == [])
+    page2.add_key_edit.setText("SmokeNewProj")
+    page2.add_path_edit.setText("BAAH")
+    page2._add_project()
+    pump(app, 40)
+    check("合法项目键照常写入注册表", "SmokeNewProj" in (config.registry()["projects"] or {}))
+    check("合法键发出一次新增信号", added == ["SmokeNewProj"])
+    # 收尾：把这一条从临时副本里删掉，避免影响后面的「新增项目出现在卡片」断言
+    _cleanup = config.load_yaml(config.PROJECTS_YAML, {})
+    (_cleanup.get("projects") or {}).pop("SmokeNewProj", None)
+    config.save_yaml(config.PROJECTS_YAML, _cleanup)
+    page2.hide()
+
 
 def test_supervisor_extensions():
     # 运行顺序排序：列出的按优先级，未列出的保持原相对顺序垫底

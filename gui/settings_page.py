@@ -36,6 +36,21 @@ AUTOSTART_MODES = [
     (autostart.MODE_ADMIN, autostart.MODE_LABELS[autostart.MODE_ADMIN]),
 ]
 
+# 项目键会变成 configs/<键> 目录名、日志名、报告名，这些字符在 Windows 上
+# 直接建目录会 OSError(123)，而 YAML 本身完全允许它们。
+_BAD_KEY_CHARS = '\\/:*?"<>|'
+
+
+def _bad_key_chars(key):
+    """返回项目键里不能出现在 Windows 文件名中的字符（去重、保序）。"""
+    out = []
+    for ch in key:
+        if ch in _BAD_KEY_CHARS and ch not in out:
+            out.append(ch)
+    if key.endswith(".") or key.endswith(" "):
+        out.append("首尾的点或空格")
+    return out
+
 
 class _SectionCard(QFrame):
     def __init__(self, title, hint="", parent=None):
@@ -483,6 +498,19 @@ class SettingsPage(QWidget):
         key = self.add_key_edit.text().strip()
         if not key:
             self._log("core", "warn", "新增项目失败：项目键不能为空")
+            return
+        bad = _bad_key_chars(key)
+        if bad:
+            # 项目键不只是 YAML 里的一个名字：它还是 configs/<键> 目录名、
+            # 日志文件名、报告文件名。带 Windows 保留字符（\ / : * ? " < > |）
+            # 或首尾的点/空格时，建目录直接抛 OSError(123)，链跑起来在这一步
+            # 就崩，而错误信息只有一个 WinError，看不出是项目键的问题。
+            self._log(
+                "core", "warn",
+                "新增项目失败：项目键 {0} 含有不能用在文件名里的字符 {1}".format(
+                    key, " ".join(bad)
+                ),
+            )
             return
         base = str(self.add_base_combo.currentData() or "")
         name = self.add_name_edit.text().strip()
