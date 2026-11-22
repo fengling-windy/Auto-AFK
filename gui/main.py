@@ -2087,6 +2087,7 @@ class MainWindow(QMainWindow):
         text = CHAIN_TEXT.get(chain, chain)
         color = CHAIN_COLORS.get(chain, CHAIN_COLORS["idle"])
         self.chain_pill.set_state(text, color)
+        self._sync_chain_controls(snapshot)
         if self.widget is not None and self.widget.isVisible():
             self.widget.tick(
                 snapshot,
@@ -2111,6 +2112,38 @@ class MainWindow(QMainWindow):
                     logging.getLogger("afk.gui").warning(
                         "refresh completion label failed: %s", exc
                     )
+
+    def _sync_chain_controls(self, snapshot=None):
+        """链在跑时把「一键挂机」置灰。
+
+        历史缺陷：链跑起来之后按钮照旧可点，点下去 `run_chain()` 只回一句
+        `chain already running` 的 warn，界面上看起来像没反应——用户会连点，
+        以为卡住了。改成忙时禁用并把文案换成「挂机中…」，「全部停止」保持
+        可点（有东西可停的时候才需要它）。
+        """
+        if snapshot is None:
+            try:
+                snapshot = self.supervisor.status_snapshot()
+            except Exception as exc:
+                logging.getLogger("afk.gui").debug("status snapshot failed: %s", exc)
+                snapshot = {}
+        chain = str((snapshot or {}).get("chain_status") or "idle")
+        # 只信 chain_status。不要用 chain_running()：它把「手动单独启动的项目
+        # 还在跑」也算忙，那种情况下「一键挂机」跑整条链完全正常，不该置灰；
+        # 也不要用 _chain_thread.is_alive()，线程收尾与状态写回之间有时序空隙。
+        busy = chain == "running"
+        if busy:
+            if self.chain_btn.isEnabled():
+                self.chain_btn.setEnabled(False)
+            if self.chain_btn.text() != "挂机中…":
+                self.chain_btn.setText("挂机中…")
+            self.chain_btn.setToolTip("挂机链正在运行；要停止请用「全部停止」")
+        else:
+            if not self.chain_btn.isEnabled():
+                self.chain_btn.setEnabled(True)
+            if self.chain_btn.text() != "一键挂机":
+                self.chain_btn.setText("一键挂机")
+            self.chain_btn.setToolTip("按当前运行顺序把所有项目跑一遍")
 
     def _on_change(self):
         pass

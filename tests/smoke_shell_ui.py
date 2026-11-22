@@ -1544,6 +1544,27 @@ def test_main_window(app):
         pump(app, 60)
         check("_poll 正常执行", True)
 
+        # 链在跑时「一键挂机」必须置灰：历史缺陷是按钮照旧可点，点下去
+        # run_chain() 只回一句 warn「chain already running」，界面上看起来
+        # 像没反应，用户会连点。
+        window.supervisor.chain_status = "idle"
+        window._poll()
+        pump(app, 60)
+        check("空闲时「一键挂机」可点（{0}）".format(window.chain_btn.text()),
+              window.chain_btn.isEnabled() and window.chain_btn.text() == "一键挂机")
+        window.supervisor.chain_status = "running"
+        window._poll()
+        pump(app, 60)
+        check("链在跑时「一键挂机」置灰且换文案（{0}）".format(window.chain_btn.text()),
+              not window.chain_btn.isEnabled() and window.chain_btn.text() == "挂机中…")
+        check("置灰时提示指向「全部停止」",
+              "全部停止" in window.chain_btn.toolTip())
+        window.supervisor.chain_status = "idle"
+        window._poll()
+        pump(app, 60)
+        check("链跑完后「一键挂机」恢复可点（{0}）".format(window.chain_btn.text()),
+              window.chain_btn.isEnabled() and window.chain_btn.text() == "一键挂机")
+
         # 关窗口会 _quit() → supervisor.stop_all()，正在挂的项目被直接杀掉。
         # 历史缺陷：closeEvent 一句不问就退，minimize_to_tray 关掉之后用户以为
         # 只是关个界面，实际正在跑的项目全停（实测伪造 running 的 run，close()
