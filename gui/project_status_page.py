@@ -215,6 +215,10 @@ class ProjectStatusPage(QWidget):
         self._log = log_fn or (lambda *a, **k: None)
         self._blocks = {}
         self._version_thread = None
+        # 待扫队列：reload 时把目标追加进来，已经在跑的线程自己会继续消费，
+        # 所以新增/改路径的项目也能拿到版本号（见 _start_version_scan）。
+        self._scan_pending = []
+        self._scan_lock = threading.Lock()
         self.version_ready.connect(self._apply_version)
 
         outer = QVBoxLayout(self)
@@ -277,9 +281,14 @@ class ProjectStatusPage(QWidget):
         self._start_version_scan(projects)
 
     def _start_version_scan(self, projects):
-        """后台读各子项目 git 版本（每次 git 调用几十毫秒，串起来会让切页卡顿）。"""
-        if self._version_thread is not None and self._version_thread.is_alive():
-            return
+        """后台读各子项目 git 版本（每次 git 调用几十毫秒，串起来会让切页卡顿）。
+
+        历史缺陷：只要上一轮扫描线程还活着就直接 return。用户在「项目注册表」
+        里存盘（或新增项目）会立刻触发 reload，「新增挂机项目」建出来的那一张
+        卡就永远停在「未知」——线程早就拿着旧的项目清单跑完了，没人再扫它。
+        现在改成往同一个队列里追加目标：线程还活着就往队列里补，它自己会继续
+        消费；线程已经结束就新起一个。
+        """
         targets = []
         for key, spec in projects.items():
             spec = spec or {}
@@ -289,19 +298,29 @@ class ProjectStatusPage(QWidget):
             targets.append((key, str(config.ROOT / str(path))))
         if not targets:
             return
-
-        def worker():
-            for key, path in targets:
-                try:
-                    version = read_version(path)
-                except Exception:
-                    version = ""
-                self.version_ready.emit(key, version)
-
+        with self._scan_lock:
+            self._scan_pending.extend(
+                t for t in targets if t not in self._scan_pending
+            )
+        if self._version_thread is not None and self._version_thread.is_alive():
+            return
         self._version_thread = threading.Thread(
-            target=worker, daemon=True, name="afk-versions"
+            target=self._version_worker, daemon=True, name="afk-versions"
         )
         self._version_thread.start()
+
+    def _version_worker(self):
+        """逐个消费待扫队列；扫完队列空才退出（期间新追加的目标也会被扫到）。"""
+        while True:
+            with self._scan_lock:
+                if not self._scan_pending:
+                    return
+                key, path = self._scan_pending.pop(0)
+            try:
+                version = read_version(path)
+            except Exception:
+                version = ""
+            self.version_ready.emit(key, version)
 
     def _apply_version(self, key, version):
         block = self._blocks.get(key)
