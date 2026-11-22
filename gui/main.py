@@ -333,6 +333,31 @@ class ProjectCard(HoverGlowCard):
         buttons.addWidget(self.parallel_btn)
         buttons.addStretch(1)
         layout.addLayout(buttons)
+        # 注册表里 enabled: false 的项目，链会直接跳过。历史缺陷：卡片上一点
+        # 标识都没有（状态还是「等待」），用户点「启动」只得到一条日志
+        # 「project disabled, skipped」，看起来像点了没反应。
+        self._apply_enabled()
+
+    # -- 启用状态 -----------------------------------------------------------
+    def _apply_enabled(self):
+        """enabled: false 时把卡片标灰、禁用启动按钮并说明原因。"""
+        enabled = bool((self.spec or {}).get("enabled", True))
+        self._enabled = enabled
+        self.start_btn.setEnabled(enabled)
+        self.parallel_btn.setEnabled(enabled)
+        if enabled:
+            tip = ""
+        else:
+            tip = "注册表里这个项目是 enabled: false，跑链时会跳过；要启用请到「项目注册表」改成 true"
+            self.status_label.setText("已禁用")
+            self.status_label.setStyleSheet("color: {0};".format(STATUS_COLORS["pending"]))
+            self.dot.set_state(STATUS_COLORS["pending"], pulse=False)
+            self.detail_label.setText("注册表里 enabled: false，链会跳过它")
+        self.start_btn.setToolTip(tip)
+        self.parallel_btn.setToolTip(tip or "与相邻的项目同时运行：两张相邻的卡各点一次")
+
+    def is_enabled(self):
+        return bool(getattr(self, "_enabled", True))
 
     # -- 并行状态 -----------------------------------------------------------
     def set_parallel(self, active, pending=False):
@@ -407,9 +432,16 @@ class ProjectCard(HoverGlowCard):
         if color and color != self.color:
             self.color = color
             self.accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
+        # enabled 也可能在注册表里被改（false → true），刷新时要跟着恢复/置灰
+        self._apply_enabled()
 
     def update_state(self, run):
         status = run.get("status", "pending") if run else "pending"
+        if not self.is_enabled() and (run is None or status == "pending"):
+            # 禁用的项目本来就不会被链启动，_poll 每轮都会把卡片刷回「等待」
+            # + 「未运行」，把「已禁用」这条唯一线索冲掉，所以这里让位。
+            self._apply_enabled()
+            return
         color = STATUS_COLORS.get(status, STATUS_COLORS["pending"])
         # 运行中/卡死时状态点呼吸脉冲（卡死闪得更快）
         period = 1.1 if status == "hang" else 1.6

@@ -1063,6 +1063,35 @@ def test_main_window(app):
         pump(app, 400)
         check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
 
+        # 注册表里 enabled: false 的项目，链会直接跳过。历史缺陷：卡片上一个
+        # 标识都没有（状态还是「等待」、启动按钮照常可点），用户点「启动」只得到
+        # 一行日志「project disabled, skipped」，看起来像点了没反应。
+        disabled_key = [k for k in original_registry["projects"] if k != extra_key][0]
+        disabled_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
+        disabled_registry["projects"][disabled_key]["enabled"] = False
+        window.registry_edit.setPlainText(
+            yaml.safe_dump(disabled_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        _dcard = window.cards[disabled_key]
+        check("注册表里禁用后卡片标出「已禁用」（{0}）".format(_dcard.status_label.text()),
+              _dcard.status_label.text() == "已禁用")
+        check("禁用的项目启动按钮不可点", not _dcard.start_btn.isEnabled())
+        check("禁用的项目并行按钮不可点", not _dcard.parallel_btn.isEnabled())
+        check("禁用的项目状态提示说明原因（{0}）".format(_dcard.detail_label.text()),
+              "enabled: false" in _dcard.detail_label.text())
+        # _poll 每轮会把卡片刷成「等待 / 未运行」，不能把「已禁用」这条线索冲掉
+        window._poll()
+        pump(app, 60)
+        check("刷新状态后禁用提示仍在（{0}）".format(_dcard.status_label.text()),
+              _dcard.status_label.text() == "已禁用")
+        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        pump(app, 400)
+        _dcard = window.cards[disabled_key]
+        check("重新启用后卡片恢复可点（{0}）".format(_dcard.status_label.text()),
+              _dcard.start_btn.isEnabled() and _dcard.status_label.text() != "已禁用")
+
         # 改已存在项目的显示名，卡片标题要跟着变。
         # 历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一直
         # 用构造时的 spec，副标题都改了名字，卡片标题还是旧的。
