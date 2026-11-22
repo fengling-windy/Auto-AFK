@@ -1569,6 +1569,59 @@ class MainWindow(QMainWindow):
         self._sync_parallel_state()
         self._sync_cards_height()
 
+    def _drop_stale_project_keys(self, projects):
+        """注册表里已经不存在的项目，从运行顺序、隐藏列表、并行组里清掉。
+
+        历史缺陷：在「项目注册表」页签里删掉一个项目后，`chain.order`、
+        `gui.hidden_projects`、`chain.parallel_blocks` 三处仍留着它的键。
+        后果：链按 chain.order 排程，走到不存在的项目会命中「跳过未知项目」
+        分支（每次跑链都刷一条告警）；「设置 → 已隐藏的项目」里永远挂着一个
+        已经删掉的项目，点「放回总览」毫无反应；并行组里那一对也会被
+        supervisor 判成「隔着别的项目」整块作废。
+
+        只有真发现残留时才写盘，避免每次重新加载都改一遍 settings.yaml。
+        返回被清掉的键（给调用方写日志）。
+        """
+        alive = set(projects)
+        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        hidden = [str(k) for k in (self._hidden_projects or [])]
+        blocks = [list(b) for b in (self._parallel_blocks or [])]
+        stale = sorted(
+            (set(order) | set(hidden) | {k for b in blocks for k in b}) - alive
+        )
+        if not stale:
+            return []
+        new_order = [k for k in order if k in alive]
+        new_hidden = [k for k in hidden if k in alive]
+        new_blocks = []
+        for block in blocks:
+            kept = [k for k in block if k in alive]
+            if len(kept) >= 2:
+                new_blocks.append(kept)
+
+        def mutate(settings):
+            chain_cfg = settings.setdefault("chain", {})
+            if not isinstance(chain_cfg, dict):
+                chain_cfg = {}
+                settings["chain"] = chain_cfg
+            chain_cfg["order"] = list(new_order)
+            chain_cfg["parallel_blocks"] = [list(b) for b in new_blocks]
+            gui_cfg = settings.setdefault("gui", {})
+            if not isinstance(gui_cfg, dict):
+                gui_cfg = {}
+                settings["gui"] = gui_cfg
+            gui_cfg["hidden_projects"] = list(new_hidden)
+
+        # 先更新内存里的副本，_mutate_settings 会重读文件并替换 self.settings
+        self._hidden_projects = new_hidden
+        self._parallel_blocks = new_blocks
+        self._mutate_settings(mutate)
+        self._append_log(
+            "core", "info",
+            "注册表里已经没有 {0}，已从运行顺序/隐藏列表/并行组里一并清掉".format("、".join(stale)),
+        )
+        return stale
+
     def _reload_registry(self):
         """「项目注册表」保存后让界面跟上新注册表。
 
@@ -1606,6 +1659,9 @@ class MainWindow(QMainWindow):
                 flow.removeWidget(card)
             card.setParent(None)
             card.deleteLater()
+        # 注册表里删掉的项目，在 chain.order / hidden_projects / parallel_blocks
+        # 里的残留键也要一起清（否则设置页的「已隐藏」永远挂着一个幽灵项）
+        self._drop_stale_project_keys(projects)
         # 卡片顺序要跟 chain.order（用户拖动改的顺序）一致，并把并行连线重画
         self._apply_card_order(self.visible_card_keys())
         # -- 2. 日志过滤器、设置页、副标题 -----------------------------------

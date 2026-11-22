@@ -935,11 +935,38 @@ def test_main_window(app):
         dropped_key = next(iter(mutated["projects"]))
         if dropped_key != extra_key:
             mutated["projects"].pop(dropped_key, None)
+        # 先人为造出「残留键」：把要被删掉的项目写进运行顺序、隐藏列表和并行组。
+        # 历史缺陷：保存注册表后只清了卡片/导航/设置页，这三处仍留着它的键，
+        # 于是「设置 → 已隐藏的项目」里永远挂着一个幽灵项，点「放回总览」没反应，
+        # 链每次跑到 chain.order 里的死键都刷一条「跳过未知项目」。
+        second_key = [k for k in (config.registry().get("projects") or {}) if k != dropped_key][0]
+        window._save_chain_order([dropped_key, second_key])
+        window._parallel_blocks = [[dropped_key, second_key]]
+        window._write_parallel_blocks()
+        window._hidden_projects = [dropped_key]
+        pump(app, 120)
+        check("动手前注册表里确实有那个项目", dropped_key in window.cards)
         window.registry_edit.setPlainText(yaml.safe_dump(mutated, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("保存注册表后新项目出现在项目卡", extra_key in window.cards)
         check("保存注册表后删掉的项目卡片消失", dropped_key not in window.cards)
+        _after_delete = config.settings()
+        _order_after = ((_after_delete.get("chain") or {}).get("order")) or []
+        _hidden_after = ((_after_delete.get("gui") or {}).get("hidden_projects")) or []
+        _blocks_after = ((_after_delete.get("chain") or {}).get("parallel_blocks")) or []
+        check(
+            "删掉项目后运行顺序里不再有它（{0}）".format(_order_after),
+            dropped_key not in _order_after,
+        )
+        check(
+            "删掉项目后隐藏列表里不再有它（{0}）".format(_hidden_after),
+            dropped_key not in _hidden_after,
+        )
+        check(
+            "删掉项目后并行组里不再有它（{0}）".format(_blocks_after),
+            dropped_key not in [k for b in _blocks_after for k in b],
+        )
         check("保存注册表后 supervisor 用新注册表", extra_key in (window.supervisor.registry.get("projects") or {}))
         check("保存注册表后设置页运行顺序跟随", extra_key in [
             window.settings_page.order_list.item(i).data(Qt.UserRole)
