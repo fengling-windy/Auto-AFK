@@ -10,6 +10,7 @@ import subprocess
 import threading
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -57,6 +58,22 @@ KEY_LABELS = {
     "repo": "仓库",
     "version": "版本",
     "description": "说明",
+    # 下面这些原来没有标签，界面上直接露 English 键名，和周围的中文混在一起
+    # 很扎眼（例如 stop_on_error_delay_sec、window_keywords 一竖排）。
+    "extra_pythonpath": "额外 PYTHONPATH",
+    "finish_patterns": "完成标记",
+    "warn_patterns": "告警标记",
+    "log_files": "外部日志",
+    "manage_emulator": "接管模拟器",
+    "report_on_warn": "告警即算失败",
+    "stop_on_error": "出错就停止",
+    "stop_on_error_delay_sec": "出错停止延迟(秒)",
+    "stop_on_finish": "完成后停止进程",
+    "update_submodules": "更新子模块",
+    "update_hooks": "更新步骤",
+    "window_absent_sec": "窗口消失(秒)",
+    "window_finish": "等窗口结束",
+    "window_keywords": "窗口标题",
 }
 
 
@@ -102,6 +119,8 @@ class _ProjectBlock(QFrame):
         self.key = key
         self.spec = spec or {}
         self.setObjectName("card")
+        # 每行左侧的「参数名」标签，整块建完后由 align_caps 统一宽度
+        self._caps = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
@@ -119,6 +138,10 @@ class _ProjectBlock(QFrame):
         head.addWidget(title, 1)
         self.state_label = QLabel("")
         self.state_label.setObjectName("hintLabel")
+        # 「已启用」实测 36px，而 hintLabel 的 QSS 把左右内边距也算进去，
+        # 布局给它的宽度只有 33px，末尾那个字会被裁掉一像素——看起来像
+        # 「已启川」。给个下限，让它按文本宽度排。
+        self.state_label.setMinimumWidth(48)
         head.addWidget(self.state_label)
         self.repo_btn = AnimatedButton("打开仓库", variant="mini")
         self.repo_btn.setIcon(icons.make("file", "#8b97ad", 12))
@@ -155,6 +178,16 @@ class _ProjectBlock(QFrame):
         if isinstance(value, bool):
             return "是" if value else "否"
         if isinstance(value, (list, tuple)):
+            # 列表里装的是更新步骤（update_hooks）这类字典时，直接 str() 出来
+            # 是 2768px 的一坨 Python 字面量，界面上被省略成半行省略号，等于
+            # 什么也没显示；只取每个步骤的 label 就能一眼看清这项目要做什么。
+            labels = [
+                str(item.get("label") or item.get("type") or "")
+                for item in value
+                if isinstance(item, dict)
+            ]
+            if labels and len(labels) == len(value):
+                return " → ".join(labels)
             return ", ".join(str(v) for v in value)
         if isinstance(value, dict):
             return " / ".join("{0}: {1}".format(k, v) for k, v in value.items())
@@ -163,7 +196,11 @@ class _ProjectBlock(QFrame):
     def _add_row(self, label, value):
         cap = QLabel(label)
         cap.setObjectName("hintLabel")
-        cap.setFixedWidth(88)
+        # 列宽不写死：历史实现是 setFixedWidth(88)，而「卡死超时(秒)」「要求
+        # 完成标记」「最短运行(秒)」实测 68–72px、再算上 QSS 字号就贴边，
+        # 换台机器（字体/缩放的 DPI 不同）直接截成「卡死超时(秒」。改为记下
+        # 每个标签，整页建完后按最长的一个统一 setFixedWidth（见 align_caps），
+        # 既不会截字，各张卡的列也仍然对齐。
         cap.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         text = ElidedLabel(str(value), min_width=60, max_hint_width=760)
         text.setObjectName("cardDetail")
@@ -171,6 +208,7 @@ class _ProjectBlock(QFrame):
         self.grid.addWidget(cap, self._rows, 0)
         self.grid.addWidget(text, self._rows, 1)
         self._rows += 1
+        self._caps.append(cap)
         if label == KEY_LABELS["version"]:
             self._version_label = text
 
@@ -185,6 +223,22 @@ class _ProjectBlock(QFrame):
             text = "未知"
         self._version_label.setText(text)
         self._version_label.setToolTip(text)
+
+    def align_caps(self, width):
+        """把本块所有「参数名」标签设成同一宽度，让各张卡的列对齐。"""
+        width = int(width)
+        if width <= 0:
+            return
+        for cap in self._caps:
+            cap.setFixedWidth(width)
+
+    def cap_width_hint(self):
+        """本块标签需要的最小宽度（按当前字体实测最长的一个）。"""
+        if not self._caps:
+            return 0
+        font = self._caps[0].font()
+        fm = QFontMetrics(font)
+        return max(fm.horizontalAdvance(cap.text()) for cap in self._caps)
 
     def set_state(self, enabled):
         self.state_label.setText("已启用" if enabled else "已禁用")
@@ -276,7 +330,25 @@ class ProjectStatusPage(QWidget):
             block.set_state(bool((spec or {}).get("enabled", True)))
             self._blocks[key] = block
             self._list_layout.insertWidget(self._list_layout.count() - 1, block)
+        self._align_caps()
         self._start_version_scan(projects)
+
+    def _align_caps(self):
+        """按最长标签统一各块左列的宽度（含 QSS 字号与 DPI 的影响）。
+
+        历史缺陷：列宽写死 setFixedWidth(88)。「要求完成标记」实测 72px、
+        「卡死超时(秒)」68px，看着够但没有任何余量——换个字体/缩放比就被
+        截成「要求完成标记」「卡死超时(秒」。现在实测后加 8px 余量，且取
+        所有块里的最大值，保证每张卡的列仍然对齐。
+        """
+        if not self._blocks:
+            return
+        width = max(block.cap_width_hint() for block in self._blocks.values())
+        if width <= 0:
+            return
+        width += 8
+        for block in self._blocks.values():
+            block.align_caps(width)
 
     def _start_version_scan(self, projects):
         """后台读各子项目 git 版本（每次 git 调用几十毫秒，串起来会让切页卡顿）。

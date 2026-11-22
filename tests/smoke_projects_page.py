@@ -15,7 +15,11 @@ r"""项目状态页：版本行、扫描队列、状态与参数格式化的回�
   3. 扫描线程按队列消费，扫完自己退出且 `_scan_pending` 清空，之后还能重启；
   4. reload 期间的追加目标不会丢（A 在扫时新增 B，B 也要有版本）；
   5. `set_state` 文案、`_format` 对 bool/list/tuple/dict/str 的输出正确；
-  6. spec 为 None / 空映射 / 缺 path 时不抛。
+  6. spec 为 None / 空映射 / 缺 path 时不抛；
+  7. 左列「参数名」标签的宽度按最长的那个自适应（写死 88px 时「要求完成
+     标记」72px 配 QSS 内边距正好贴边，换字体/DPI 就截字），同块内等宽；
+  8. 列表里装的是更新步骤字典时，按各步骤的 label 串成「A → B」，不再
+     直接 str() 出一千多像素的 Python 字面量（界面上只剩省略号）。
 """
 
 import shutil
@@ -270,7 +274,45 @@ def _run(tmp):
     check("reload 后跟着注册表减少", list(page4._blocks) == ["Y"])
     check("版本行标签常量存在", KEY_LABELS.get("version") == "版本")
 
-    for widget in (page, page2, page3, page4):
+    # -- 9. 左列宽度按最长标签自适应 --------------------------------------
+    # 历史缺陷：标签列写死 setFixedWidth(88)，而「要求完成标记」实测 72px、
+    # 再算上 QSS 内边距就没余量，换字体/DPI 就被截成「要求完成标记」。
+    from PySide6.QtGui import QFontMetrics
+
+    page5 = ProjectStatusPage(
+        registry_getter=_registry_for({
+            "宽标签": {
+                "display_name": "宽标签",
+                "require_finish": True,
+                "stop_on_error_delay_sec": 5,
+            },
+        }),
+        color_getter=lambda k: "#4fc3f7",
+        log_fn=lambda *a, **k: None,
+    )
+    page5.show()
+    pump(app, 60)
+    _b5 = page5._blocks["宽标签"]
+    check("每行都记下了左侧标签控件", len(_b5._caps) == _b5._rows)
+    _fm = QFontMetrics(_b5._caps[0].font())
+    _widest = max(_fm.horizontalAdvance(c.text()) for c in _b5._caps)
+    check("最宽的标签文字被完整容纳（{0}px 里要放下 {1}px）".format(_b5._caps[0].width(), _widest),
+          _b5._caps[0].width() >= _widest)
+    check("同一块里所有标签等宽", len({c.width() for c in _b5._caps}) == 1)
+    check("英文键名也给了中文标签",
+          all(KEY_LABELS.get(k) for k in ("stop_on_error_delay_sec", "window_keywords",
+                                          "update_hooks", "manage_emulator")))
+
+    # -- 10. 更新步骤这类「列表里装字典」按 label 串起来 -------------------
+    hooks = _ProjectBlock._format([{"type": "command", "label": "uv sync"},
+                                   {"type": "command", "label": "pnpm install"}])
+    check("更新步骤取 label 串联（{0}）".format(hooks), hooks == "uv sync → pnpm install")
+    noLabel = _ProjectBlock._format([{"type": "baah_deps"}])
+    check("没有 label 时退回 type", noLabel == "baah_deps")
+    mixed = _ProjectBlock._format(["a", {"label": "b"}])
+    check("混着非字典时退回逗号连接（{0}）".format(mixed), mixed.startswith("a, "))
+
+    for widget in (page, page2, page3, page4, page5):
         try:
             widget.close()
         except Exception:
