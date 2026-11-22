@@ -405,7 +405,7 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 ```
 
 > `tests\smoke_baah.py` 需在 BAAH 自己的 venv 里跑（依赖 cv2）；
-> `tests\smoke_guiopen_real.py` / `smoke_embed_real.py` 会真实打开窗口，仅在需要时手动跑。
+> `tests\smoke_guiopen_real.py` 会真实打开窗口，仅在需要时手动跑。
 > `tests\smoke_isolation.py` 是隔离工具（被其它测试 import），不是独立测试。
 
 > ⚠️ 会运行任务链的测试必须调用 `tests/smoke_isolation.py` 的 `isolate_runtime()`：
@@ -430,8 +430,33 @@ powershell -ExecutionPolicy Bypass -File 40_apply_patches.ps1
 
 ## 新增挂机项目（预留位）
 
+除了上面说的「设置 → 新增挂机项目」，几条容易踩的规则：
+
+- **项目键**只能用能被 Windows 当文件名的那部分字符（它会变成 `configs\<键>` 目录名、
+  日志名、报告名）。带 `\ / : * ? " < > |` 或以点结尾的键会被拒绝并提示——
+  YAML 本身能接受它们，但建目录时直接 `OSError(123)`，链跑到那一步才炸。
+- **继承（`base`）**：同一个项目要出第二张卡片跑另一套配置时，不用整段复制规格，
+  只写差异即可：
+  ```yaml
+  projects:
+    BAAH:
+      # ... 原有的完整规格 ...
+    BAAH-日服:
+      base: BAAH
+      config_name: 日服挂机.json
+  ```
+  展开时映射递归合并、列表整体替换（所以实例能清空 `args`）；没写 `display_name`
+  时自动命名成「BAAH（BAAH-日服）」以便在总览里区分。`base` 指向不存在的项目、
+  循环引用（A→B→A）都会被打断并按独立项目处理，同时各留一条告警。
+- **参数占位符**：`args` 里可用 `{config_name}`、`{instance}` 以及规格里的任意字段。
+  写错的占位符（如 `{config-name}`）会在日志里留一条 warning，不再静默当成字面量
+  传给子项目。
+
+手写 YAML 的完整流程：
+
 1. 克隆或放置新项目到 `Auto-AFK\` 下；
-2. GUI「项目注册表」页签或直接编辑 `configs\core\afk_projects.yaml`：
+2. 直接编辑 `configs\core\afk_projects.yaml`（或走「设置 → 新增挂机项目」的新增卡，
+   它会写同一个文件）：
    ```yaml
    projects:
      新项目名:
