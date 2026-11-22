@@ -138,6 +138,28 @@ def main():
     pump(app, 150)
     check("清空显示后切过滤不会把日志画回来", window.log_view.document().blockCount() <= 1)
 
+    # 7) 日志很多时只重画最近若干行：_rerender_log 原来把 event_buffer 里所有匹配
+    #    事件逐条 appendHtml，实测 5000 行要 422ms，切一下过滤下拉框界面就僵半秒。
+    #    这里把上限临时调小验证截断逻辑与提示文案（真实上限 2000 行）。
+    window.event_buffer.clear()
+    window.log_view.clear()
+    for i in range(120):
+        window.event_buffer.append(
+            {"project": "core", "level": "info", "kind": "core", "message": "BULK-{0}".format(i)}
+        )
+    _orig_limit = gm.LOG_RERENDER_LIMIT
+    gm.LOG_RERENDER_LIMIT = 50
+    try:
+        window._rerender_log()
+        pump(app, 100)
+        text = window.log_view.toPlainText()
+    finally:
+        gm.LOG_RERENDER_LIMIT = _orig_limit
+    check("日志过多时只重画最近若干行（保留 BULK-70，丢掉 BULK-69）",
+          "BULK-70" in text and "BULK-69" not in text)
+    check("截断时说明更早的日志去了哪里", "更早的 70 条" in text and "events.jsonl" in text)
+    check("event_buffer 本身没有被截断", len(window.event_buffer) == 120)
+
     window.hide()
     window._quit()
     config.SETTINGS_YAML = _REAL
