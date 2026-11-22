@@ -1,4 +1,4 @@
-﻿"""离屏渲染 GUI 视觉预览截图（不启动 Supervisor/EventBus，只构建视觉外壳）。
+"""离屏渲染 GUI 视觉预览截图（不启动 Supervisor/EventBus，只构建视觉外壳）。
 
 用法：
     QT_QPA_PLATFORM=offscreen QT_QPA_FONTDIR="C:\\Windows\\Fonts" \
@@ -174,7 +174,7 @@ def build_overview():
     top.addWidget(logo)
     top.addLayout(title_box)
     top.addStretch(1)
-    chain_pill = AnimatedPill("空闲", gui_main.CHAIN_COLORS["idle"])
+    chain_pill = AnimatedPill("空闲", gui_main._theme_chain_colors()["idle"])
     chain_btn = AnimatedButton("一键挂机", variant="primary")
     chain_btn.setObjectName("primary")
     add_shadow(chain_btn, alpha=120, blur=18, dy=3)
@@ -279,10 +279,11 @@ def populate_log(log_view):
     for project, level, message in FAKE_LOG[:60]:
         ts = time.strftime("%H:%M:%S")
         project_color = gui_main.PROJECT_COLORS.get(project, "#4fc3f7")
+        level_colors = gui_main._theme_level_colors()
         if level == "error":
-            message_color = gui_main.LEVEL_COLORS["error"]
+            message_color = level_colors["error"]
         elif level == "warn":
-            message_color = gui_main.LEVEL_COLORS["warn"]
+            message_color = level_colors["warn"]
         else:
             message_color = project_color
         html = '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
@@ -311,7 +312,7 @@ def apply_state_shots(tabs, cards, chain_pill):
             card.dot.update()
     buttons = card.window().findChildren(AnimatedButton)
     header_btns = [b for b in buttons if b.text() in ("一键挂机", "全部停止")]
-    chain_pill.set_state("运行中", gui_main.CHAIN_COLORS["running"])
+    chain_pill.set_state("运行中", gui_main._theme_chain_colors()["running"])
     # 链在跑时真实界面会把这颗按钮置灰并换成「挂机中…」（MainWindow._sync_chain_controls）。
     # 预览若只改胶囊，图上就是「运行中 + 可点的一键挂机」，与实际交互不符。
     for b in header_btns:
@@ -395,10 +396,13 @@ def _navigate(stack, nav, key):
 
 def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "logs"
+    # 第二个参数可选：主题名（dark / light）。浅色主题的状态色是另一套，
+    # 肉眼看对比度只能靠出图，所以留个开关。
+    theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
     out_dir.mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
     # 与 gui.main.main() 一致：开窗前换肤，卡片/按钮按主题取色构造。
-    apply_theme(app, "dark")
+    apply_theme(app, theme)
 
     window, stack, nav, tabs, cards, chain_pill, settings_page, projects_page = build_shell()
     window.show()

@@ -118,6 +118,68 @@ THEME_LABELS = {"dark": "深色（默认）", "light": "浅色"}
 
 DEFAULT_THEME = "dark"
 
+# 状态语义色（运行结果、链状态）。这一组必须是「按主题给」，不能只用一套：
+# 深色底上的 #34d399 / #60a5fa 在白底上对比度只有 1.9 / 2.5，浅色主题下状态
+# 文字几乎看不见（实测卡片底色 #ffffff 时 7 个状态全低于 4.5:1）。
+# 下面浅色那一列是按 WCAG AA（≥4.5:1）挑过的深饱和同类色。
+STATUS_PALETTE = {
+    "dark": {
+        "success": "#34d399",
+        "success_unverified": "#a3e635",
+        "running": "#60a5fa",
+        "pending": "#7d879c",
+        "failed": "#f87171",
+        "hang": "#fb923c",
+        "stopped": "#c084fc",
+        "log_error": "#f87171",
+        "log_warn": "#fbbf24",
+    },
+    "light": {
+        "success": "#047857",
+        "success_unverified": "#4d7c0f",
+        "running": "#1d4ed8",
+        "pending": "#475569",
+        "failed": "#b91c1c",
+        "hang": "#b45309",
+        "stopped": "#6d28d9",
+        "log_error": "#b91c1c",
+        "log_warn": "#a16207",
+    },
+}
+
+# 链状态只有五种，取上面同含义的那几个，保证「卡片运行中」与「链运行中」
+# 是同一个颜色。
+CHAIN_STATES = {
+    "idle": "pending",
+    "running": "running",
+    "success": "success",
+    "failed": "failed",
+    "stopped": "stopped",
+}
+
+
+def status_color(theme, state):
+    """取某个主题下某状态的颜色；未知状态回退该主题的 pending。"""
+    table = STATUS_PALETTE.get(normalize_theme(theme), STATUS_PALETTE[DEFAULT_THEME])
+    key = str(state)
+    if key in table:
+        return table[key]
+    # 主题表缺这一项时回退到深色同名项，再不行就用本主题的 pending——
+    # 不能直接回深色的 pending，否则浅色主题下会混进一个深色值。
+    return STATUS_PALETTE[DEFAULT_THEME].get(key, table["pending"])
+
+
+def chain_color(theme, state):
+    """取某个主题下某「链状态」的颜色。"""
+    return status_color(theme, CHAIN_STATES.get(str(state), "pending"))
+
+
+def log_color(theme, level):
+    """日志行的级别色（error / warn）。其它级别由调用方按项目色处理。"""
+    return status_color(theme, "log_" + str(level))
+
+
+
 # 按钮配色。以前是 gui/modern.py 里的模块常量 _BUTTON_VARIANTS，只够深色用；
 # 现在按主题给两套。
 BUTTONS = {

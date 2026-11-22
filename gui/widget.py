@@ -21,15 +21,9 @@ from PySide6.QtWidgets import (
 )
 
 from afk_core.idle import format_idle
-from gui.modern import AnimatedButton, AnimatedPill, StatusDot
+from gui import themes
+from gui.modern import AnimatedButton, AnimatedPill, StatusDot, current_theme
 
-CHAIN_COLORS = {
-    "idle": "#7d879c",
-    "running": "#3d7dfa",
-    "success": "#5fd28a",
-    "failed": "#ff7a90",
-    "stopped": "#ffb74d",
-}
 CHAIN_TEXT = {
     "idle": "空闲",
     "running": "运行中",
@@ -37,6 +31,18 @@ CHAIN_TEXT = {
     "failed": "有失败",
     "stopped": "已停止",
 }
+
+# 过去这里是另一份写死的深色配色（running #3d7dfa / success #5fd28a …），和
+# 主窗口的 CHAIN_COLORS 并不是同一组颜色，同事物在托盘小组件与主窗口里显示成
+# 两种色；而且不跟主题——浅色主题下小组件的 #ffb74d「已停止」落在白底上对比度
+# 只有 1.7。现在统一从主题令牌取，保留这个模块级名字只为兼容老引用。
+CHAIN_COLORS = {key: themes.chain_color(themes.DEFAULT_THEME, key) for key in CHAIN_TEXT}
+
+
+def chain_colors(theme=None):
+    """当前主题下的链状态色（tick 每轮都会取，切主题后自动跟上）。"""
+    name = themes.normalize_theme(theme or current_theme())
+    return {key: themes.chain_color(name, key) for key in CHAIN_TEXT}
 
 
 class DesktopWidget(QWidget):
@@ -78,7 +84,7 @@ class DesktopWidget(QWidget):
         title_font.setPixelSize(12)
         title_font.setWeight(QFont.DemiBold)
         title.setFont(title_font)
-        self.state_dot = StatusDot(CHAIN_COLORS["idle"], pulse=False, period=1.2)
+        self.state_dot = StatusDot(chain_colors()["idle"], pulse=False, period=1.2)
         self.fold_btn = AnimatedButton("—", variant="mini")
         self.fold_btn.setFixedWidth(26)
         self.fold_btn.setToolTip("折叠 / 展开")
@@ -90,7 +96,7 @@ class DesktopWidget(QWidget):
         body.addLayout(head)
 
         # -- 状态行 ------------------------------------------------------------
-        self.chain_pill = AnimatedPill("空闲", CHAIN_COLORS["idle"])
+        self.chain_pill = AnimatedPill("空闲", chain_colors()["idle"])
         body.addWidget(self.chain_pill, 0, Qt.AlignLeft)
 
         self.run_label = QLabel("未运行")
@@ -133,14 +139,15 @@ class DesktopWidget(QWidget):
     def tick(self, snapshot, idle_status=None, threshold_sec=0, completed_today=False):
         """由主窗口轮询调用：snapshot 来自 supervisor.status_snapshot()。"""
         chain = (snapshot or {}).get("chain_status", "idle")
-        self.chain_pill.set_state(CHAIN_TEXT.get(chain, chain), CHAIN_COLORS.get(chain, CHAIN_COLORS["idle"]))
+        colors = chain_colors()
+        self.chain_pill.set_state(CHAIN_TEXT.get(chain, chain), colors.get(chain, colors["idle"]))
         running = [
             key
             for key, run in ((snapshot or {}).get("runs") or {}).items()
             if isinstance(run, dict) and run.get("status") == "running"
         ]
         self.state_dot.set_state(
-            CHAIN_COLORS.get(chain, CHAIN_COLORS["idle"]),
+            colors.get(chain, colors["idle"]),
             pulse=bool(running) or chain == "running",
             period=1.2,
         )

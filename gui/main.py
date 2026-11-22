@@ -75,15 +75,9 @@ from gui.settings_page import SettingsPage
 from gui.widget import DesktopWidget
 from gui import icons, themes
 
-STATUS_COLORS = {
-    "success": "#34d399",
-    "success_unverified": "#a3e635",
-    "running": "#60a5fa",
-    "pending": "#7d879c",
-    "failed": "#f87171",
-    "hang": "#fb923c",
-    "stopped": "#c084fc",
-}
+# 深色主题的状态色（兼容旧引用；真正用的时候请用 _theme_status_colors()，
+# 它会跟着当前主题走）。
+STATUS_COLORS = themes.STATUS_PALETTE[themes.DEFAULT_THEME]
 
 STATUS_TEXT = {
     "success": "完成",
@@ -139,8 +133,8 @@ DEFAULT_PALETTE = [
 ]
 
 LEVEL_COLORS = {
-    "error": "#f87171",
-    "warn": "#fbbf24",
+    "error": themes.status_color(themes.DEFAULT_THEME, "log_error"),
+    "warn": themes.status_color(themes.DEFAULT_THEME, "log_warn"),
 }
 
 CHAIN_TEXT = {
@@ -151,13 +145,30 @@ CHAIN_TEXT = {
     "stopped": "已停止",
 }
 
-CHAIN_COLORS = {
-    "idle": "#7d879c",
-    "running": "#60a5fa",
-    "success": "#34d399",
-    "failed": "#f87171",
-    "stopped": "#c084fc",
-}
+CHAIN_COLORS = {key: themes.chain_color(themes.DEFAULT_THEME, key) for key in CHAIN_TEXT}
+
+
+def _theme_status_colors(theme=None):
+    """当前主题下的状态色表（卡片状态点、状态文字）。
+
+    历史缺陷：STATUS_COLORS 是一份写死的深色配色，状态文字直接
+    `setStyleSheet("color: ...")`。切到浅色主题后 #34d399 / #60a5fa 落在白卡上
+    对比度只有 1.9 / 2.5，状态几乎看不见（7 个状态全部低于 WCAG AA 的 4.5）。
+    这里按主题取表，深浅两套都由 gui/themes.py 给。
+    """
+    name = themes.normalize_theme(theme or current_theme())
+    return themes.STATUS_PALETTE.get(name, themes.STATUS_PALETTE[themes.DEFAULT_THEME])
+
+
+def _theme_chain_colors(theme=None):
+    name = themes.normalize_theme(theme or current_theme())
+    return {key: themes.chain_color(name, key) for key in CHAIN_TEXT}
+
+
+def _theme_level_colors(theme=None):
+    name = themes.normalize_theme(theme or current_theme())
+    return {level: themes.log_color(name, level) for level in ("error", "warn")}
+
 
 # 首选窗口尺寸。1360x900 在 1920x1080 / 125% 缩放（可用 1536x824）、
 # 1366x768、1280x720 上都放不下，底部按钮会掉到屏幕外，所以要按实际可用
@@ -262,7 +273,7 @@ class ProjectCard(HoverGlowCard):
 
         head = QHBoxLayout()
         head.setSpacing(8)
-        self.dot = StatusDot(STATUS_COLORS["pending"])
+        self.dot = StatusDot(_theme_status_colors()["pending"])
         display_name = str(spec.get("display_name", key))
         # 用 ElidedLabel 而不是 QLabel：QLabel 的 minimumSizeHint 等于整段文字宽度，
         # 注册表里写个长 display_name（实测 128 字 → 1232px）会把项目卡和整个窗口
@@ -293,7 +304,7 @@ class ProjectCard(HoverGlowCard):
 
         self.status_label = QLabel("等待")
         self.status_label.setObjectName("cardStatus")
-        self.status_label.setStyleSheet("color: {0};".format(STATUS_COLORS["pending"]))
+        self.status_label.setStyleSheet("color: {0};".format(_theme_status_colors()["pending"]))
         layout.addWidget(self.status_label)
 
         self.detail_label = QLabel("未运行")
@@ -360,8 +371,8 @@ class ProjectCard(HoverGlowCard):
         else:
             tip = "注册表里这个项目是 enabled: false，跑链时会跳过；要启用请到「项目注册表」改成 true"
             self.status_label.setText("已禁用")
-            self.status_label.setStyleSheet("color: {0};".format(STATUS_COLORS["pending"]))
-            self.dot.set_state(STATUS_COLORS["pending"], pulse=False)
+            self.status_label.setStyleSheet("color: {0};".format(_theme_status_colors()["pending"]))
+            self.dot.set_state(_theme_status_colors()["pending"], pulse=False)
             self.detail_label.setText("注册表里 enabled: false，链会跳过它")
         self.start_btn.setToolTip(tip)
         self.parallel_btn.setEnabled(enabled)
@@ -494,7 +505,8 @@ class ProjectCard(HoverGlowCard):
         # 「在跑」= pending/running/hang 这三种都还没收尾（hang 卡死时更要能点停止）。
         # 用它决定启动/停止按钮谁可点：跑起来之后「启动」置灰、「停止」亮起。
         self._apply_buttons(busy=bool(run) and status in BUSY_STATUSES)
-        color = STATUS_COLORS.get(status, STATUS_COLORS["pending"])
+        palette = _theme_status_colors()
+        color = palette.get(status, palette["pending"])
         # 运行中/卡死时状态点呼吸脉冲（卡死闪得更快）
         period = 1.1 if status == "hang" else 1.6
         self.dot.set_state(color, pulse=status in ("running", "hang"), period=period)
@@ -724,7 +736,7 @@ class MainWindow(QMainWindow):
         top.addWidget(logo)
         top.addLayout(title_box)
         top.addStretch(1)
-        self.chain_pill = AnimatedPill("空闲", CHAIN_COLORS["idle"])
+        self.chain_pill = AnimatedPill("空闲", _theme_chain_colors()["idle"])
         self.chain_btn = AnimatedButton("一键挂机", variant="primary")
         self.chain_btn.setObjectName("primary")
         add_shadow(self.chain_btn, alpha=120, blur=18, dy=3)
@@ -2036,10 +2048,12 @@ class MainWindow(QMainWindow):
         follow = self._log_at_bottom() if autoscroll else False
         ts = time.strftime("%H:%M:%S")
         project_color = self._project_color(project)
+        # 级别色同样按主题取：浅色底上 #fbbf24 的警告色几乎看不见。
+        level_colors = _theme_level_colors()
         if level == "error":
-            message_color = LEVEL_COLORS["error"]
+            message_color = level_colors["error"]
         elif level == "warn":
-            message_color = LEVEL_COLORS["warn"]
+            message_color = level_colors["warn"]
         else:
             message_color = project_color
         html = '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
@@ -2099,7 +2113,7 @@ class MainWindow(QMainWindow):
             self.log_view.appendHtml(
                 '<span style="color:{0}">…… 更早的 {1} 条已经滚出显示区'
                 "（完整记录见 logs/events.jsonl），下面是最近 {2} 条</span>".format(
-                    LEVEL_COLORS["warn"], dropped, len(shown)
+                    _theme_level_colors()["warn"], dropped, len(shown)
                 )
             )
         for event in shown:
@@ -2151,7 +2165,8 @@ class MainWindow(QMainWindow):
             card.update_state(snapshot["runs"].get(key))
         chain = snapshot["chain_status"]
         text = CHAIN_TEXT.get(chain, chain)
-        color = CHAIN_COLORS.get(chain, CHAIN_COLORS["idle"])
+        chain_colors = _theme_chain_colors()
+        color = chain_colors.get(chain, chain_colors["idle"])
         self.chain_pill.set_state(text, color)
         self._sync_chain_controls(snapshot)
         if self.widget is not None and self.widget.isVisible():

@@ -213,6 +213,49 @@ def main():
     check("QTimeEdit 箭头用 SVG 而不是 Qt 默认三角", "QTimeEdit::up-arrow" in APP_QSS and "QTimeEdit::down-arrow" in APP_QSS)
     check("QComboBox 不再把 QTimeEdit 一起塞进 drop-down 规则", "QComboBox::drop-down, QTimeEdit::drop-down" not in APP_QSS)
 
+    # -- 10. 状态色必须按主题给（浅色底上看得见） -------------------------------
+    # 历史缺陷：DESKTOP/主窗口里的状态色是一份写死的深色配色，卡片状态文字直接
+    # setStyleSheet("color: ...")。切到浅色主题后 #34d399 / #60a5fa 落在白卡上
+    # 对比度只有 1.9 / 2.5，七个状态全部低于 WCAG AA 的 4.5，状态几乎看不见。
+    from gui import themes as th
+
+    def _rel_lum(hex_color):
+        h = hex_color.lstrip("#")
+        parts = []
+        for i in (0, 2, 4):
+            c = int(h[i:i + 2], 16) / 255.0
+            parts.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+    def _contrast(fg, bg):
+        a, b = _rel_lum(fg), _rel_lum(bg)
+        hi, lo = max(a, b), min(a, b)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for name in ("dark", "light"):
+        card_bg = th.resolve(name)["card"]
+        weak = [
+            state
+            for state in ("success", "success_unverified", "running", "pending",
+                          "failed", "hang", "stopped")
+            if _contrast(th.status_color(name, state), card_bg) < 4.5
+        ]
+        check("{0} 主题七个状态色都过 4.5:1（弱项 {1}）".format(name, weak), not weak)
+        weak_log = [
+            level
+            for level in ("error", "warn")
+            if _contrast(th.log_color(name, level), card_bg) < 4.5
+        ]
+        check("{0} 主题日志级别色都过 4.5:1（弱项 {1}）".format(name, weak_log), not weak_log)
+    check("深色主题没被改动（success 仍是 #34d399）",
+          th.status_color("dark", "success") == "#34d399")
+    check("浅色主题换了状态色（success 不再是 #34d399）",
+          th.status_color("light", "success") != th.status_color("dark", "success"))
+    check("链状态与卡片状态同色（running）",
+          th.chain_color("light", "running") == th.status_color("light", "running"))
+    check("未知状态回退 pending",
+          th.status_color("light", "no-such-state") == th.status_color("light", "pending"))
+
     print()
     if FAILURES:
         print("MODERN-UI {0} FAIL ({1})".format(len(FAILURES), ", ".join(FAILURES)))
