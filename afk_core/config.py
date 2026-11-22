@@ -329,6 +329,45 @@ def _normalize_groups(raw, data, warned):
     data["groups"] = cleaned
 
 
+def _prune_group_members(data, warned):
+    """把 groups 里引用了不存在项目的成员剔除。
+
+    历史缺陷：在「项目注册表」里删掉一个项目后，groups 的 members 仍留着它。
+    链的计划照旧把它排进去（`_chain_plan` 只看 enabled 与 only_keys，不看
+    项目是否存在），真正启动时才命中 `start_project` 的
+    `unknown project` 分支——而且那条分支用的是 `level="error"`，看起来像是
+    「项目跑失败了」，实际只是注册表里没有它。并行组里混进一个幽灵成员时，
+    `merge_parallel_blocks` 还会把整块判成「某个项目已经在另一个并行组里」，
+    用户点「并行」却完全没并行。
+
+    剔除后仍不足两人的组、或剔除后成员为空的组保持原样（组本身是配置，不是
+    派生数据；空组在 `_chain_plan` 里本来就会被跳过）。只有真发现幽灵成员时
+    才留 warning，避免每次读注册表都刷日志。
+    """
+    projects = data.get("projects") or {}
+    if not isinstance(projects, dict):
+        return
+    ghosts = []
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        members = group.get("members")
+        if not isinstance(members, list):
+            continue
+        kept = [m for m in members if m in projects]
+        for member in members:
+            if member not in projects:
+                ghosts.append("{0}:{1}".format(group.get("id", "?"), member))
+        if len(kept) != len(members):
+            group["members"] = kept
+    if ghosts and warned is not None and "groups:ghost" not in warned:
+        warned.add("groups:ghost")
+        logging.getLogger("afk.config").warning(
+            "afk_projects.yaml 的 groups 里有成员不在 projects 里，已剔除：%s",
+            ", ".join(ghosts),
+        )
+
+
 def _merge_spec(base, override):
     """把 override 深合并到 base 之上，返回新映射（两者都不被修改）。
 
@@ -420,6 +459,7 @@ def registry():
     _normalize_projects(data.get("projects"), data, warned)
     _normalize_groups(data.get("groups"), data, warned)
     _expand_bases(data.get("projects"), warned)
+    _prune_group_members(data, warned)
     projects = data.get("projects")
     if isinstance(projects, dict):
         for key, spec in projects.items():

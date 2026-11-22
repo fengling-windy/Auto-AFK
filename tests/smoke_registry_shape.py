@@ -94,6 +94,24 @@ def _probe(label):
     return errors
 
 
+def _plan(registry):
+    """用当前注册表排一次链的计划（只算步骤，不启动任何进程）。"""
+    from afk_core.events import EventBus
+    from afk_core.supervisor import Supervisor
+
+    bus = EventBus()
+    try:
+        sup = Supervisor(bus)
+        sup.registry = registry
+        order = ((sup.settings.get("chain") or {}).get("order")) or []
+        return sup._chain_plan(registry.get("groups") or [], order or None)
+    finally:
+        try:
+            bus.close_handles()
+        except Exception:
+            pass
+
+
 def _run(tmp):
     from afk_core import config
 
@@ -254,6 +272,48 @@ def _run(tmp):
         logger.propagate = old_prop
     missing = [m for m in records if "base 指向不存在的项目" in m]
     check("base 缺失告警只报一次", len(missing) == 1, "{0} 条: {1}".format(len(missing), records))
+
+    # -- groups 里引用已删除项目：不能排进链，也不能刷成「项目跑失败」 --------
+    _write(
+        "projects:\n"
+        + SPEC.format(name="A")
+        + SPEC.format(name="B")
+        + "groups:\n"
+        "  - id: g1\n    members: [A, Ghost]\n    parallel: true\n"
+        "  - id: g2\n    members: [B]\n    parallel: false\n"
+    )
+    reg = config.registry()
+    groups = reg.get("groups") or []
+    members = [g.get("members") for g in groups]
+    check("groups 里引用已删除项目的成员被剔除", members == [["A"], ["B"]], repr(members))
+    check("剔除幽灵成员后链计划里没有它",
+          not any("Ghost" in s.get("members", []) for s in _plan(reg)), _plan(reg))
+    check("剔除幽灵成员后并行块照常生效（不再被整块作废）",
+          all(len(s.get("members", [])) == 1 for s in _plan(reg)), _plan(reg))
+
+    records = []
+
+    class _GrabGhost(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("afk.config")
+    handler = _GrabGhost()
+    logger.addHandler(handler)
+    old_level = logger.level
+    old_prop = logger.propagate
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    try:
+        config._WARNED_SHAPE.clear()
+        for _ in range(5):
+            config.registry()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_prop
+    ghosts = [m for m in records if "不在 projects 里" in m]
+    check("幽灵成员告警只报一次", len(ghosts) == 1, "{0} 条: {1}".format(len(ghosts), records))
 
     # 结构告警只报一次
     _write("projects: hi\ngroups: nope\n")
