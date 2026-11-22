@@ -379,10 +379,13 @@ def test_main_window(app):
 
     gui_projects = [k for k, s in (config.registry().get("projects", {}) or {}).items() if s.get("gui")]
     try:
-        # 页面只有「总览 + 设置」：项目界面不再嵌入本窗口（历史实现是给每个带
-        # gui 段的项目建一个嵌入页，用 QWindow.fromWinId 把项目窗口抓进来）。
-        check("页面数 = 总览 + 设置页", window.stack.count() == 2)
-        check("导航含总览/设置项", window.nav.item_for_key("overview") is not None and window.nav.item_for_key("settings") is not None)
+        # 页面是「总览 + 项目状态 + 设置」：项目界面不再嵌入本窗口（历史实现是给
+        # 每个带 gui 段的项目建一个嵌入页，用 QWindow.fromWinId 把项目窗口抓进来）。
+        check("页面数 = 总览 + 项目状态 + 设置页", window.stack.count() == 3)
+        check("导航含总览/项目状态/设置项",
+              window.nav.item_for_key("overview") is not None
+              and window.nav.item_for_key("projects") is not None
+              and window.nav.item_for_key("settings") is not None)
         check("导航不再有项目嵌入页",
               not [k for k in window.nav.item_keys() if str(k).startswith("page:")])
         check("默认显示总览页", window.stack.currentIndex() == 0 and window.nav.active_key() == "overview")

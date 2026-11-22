@@ -32,7 +32,13 @@ def main():
 
 def _run():
     app = QApplication([])
-    app.setStyleSheet(module.APP_QSS)
+    # 与 gui.main.main() 保持一致：开窗前按主题应用 QSS + 调色板。
+    # 历史：这里曾直接 setStyleSheet(module.APP_QSS)，主题化之后 APP_QSS
+    # 只是 build_qss(DEFAULT_THEME) 的兼容别名，真入口是 apply_theme。
+    from gui import themes
+    from gui.modern import apply_theme
+
+    apply_theme(app, themes.DEFAULT_THEME)
     app.setQuitOnLastWindowClosed(False)
     window = module.MainWindow()
     window.show()

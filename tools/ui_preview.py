@@ -43,10 +43,11 @@ from gui.modern import (
     AnimatedTabWidget,
     FlowHost,
     add_shadow,
-    apply_palette,
+    apply_theme,
     enable_smooth_scroll,
 )
 from gui.nav_rail import NavRail
+from gui.project_status_page import ProjectStatusPage
 from gui.settings_page import SettingsPage
 
 FAKE_RUNS = {
@@ -60,11 +61,50 @@ FAKE_RUNS = {
 # 必须和 configs/core/afk_projects.yaml 保持 5 个项目：预览图是拿来核对布局的，
 # 少一个项目就看不到 FlowLayout 在 1360 宽度下真实的 3+2 折行（曾漏掉绝区零）。
 FAKE_PROJECTS = {
-    "March7thAssistant": {"display_name": "三月七小助手（崩坏：星穹铁道 / 云游戏）", "gui": {"args": ["app.py"]}},
-    "BAAH": {"display_name": "BAAH（蔚蓝档案 / MuMu 模拟器 ADB）", "gui": {"args": ["jsoneditor.py"]}},
-    "MaaEnd": {"display_name": "MaaEnd（明日方舟：终末地 / 独占前台）", "gui": {"exe": "install\\mxu.exe"}},
-    "ZenlessZoneZero-OneDragon": {"display_name": "绝区零一龙（绝区零 / CLI 独占）", "gui": {"args": ["one_dragon.py"]}},
-    "BetterGI": {"display_name": "BetterGI（原神 / 更好的原神）", "gui": {"exe": "publish\\BetterGI.exe"}},
+    "March7thAssistant": {
+        "display_name": "三月七小助手（崩坏：星穹铁道 / 云游戏）",
+        "gui": {"args": ["app.py"]},
+        "launch_type": "python", "path": "March7thAssistant",
+        "python": ".venv\\Scripts\\python.exe", "args": ["main.py"],
+        "config_dir": "configs\\March7thAssistant", "retry": 1,
+        "hang_timeout": 900, "require_admin": True, "require_finish": True,
+        "min_runtime_sec": 120, "repo": "moesnow/March7thAssistant",
+        "version": "v2026.11.20-2-gd7915805",
+    },
+    "BAAH": {
+        "display_name": "BAAH（蔚蓝档案 / MuMu 模拟器 ADB）",
+        "gui": {"args": ["jsoneditor.py"]},
+        "launch_type": "python", "path": "BAAH",
+        "python": ".venv\\Scripts\\python.exe",
+        "args": ["jsoneditor.py", "{config_name}"],
+        "config_name": "国际服挂机.json", "config_dir": "configs\\BAAH",
+        "retry": 1, "hang_timeout": 900, "require_admin": True,
+        "repo": "BlueArchiveArisHelper/BAAH", "version": "BAAH2.5.13",
+    },
+    "MaaEnd": {
+        "display_name": "MaaEnd（明日方舟：终末地 / 独占前台）",
+        "gui": {"exe": "install\\mxu.exe"},
+        "launch_type": "exe", "path": "MaaEnd", "exe": "install\\mxu.exe",
+        "retry": 1, "hang_timeout": 1800, "repo": "MaaEnd/MaaEnd",
+        "version": "v3.3.0-beta.1-6-g9e260d506",
+    },
+    "ZenlessZoneZero-OneDragon": {
+        "display_name": "绝区零一条龙（绝区零 / CLI 独占）",
+        "gui": {"args": ["one_dragon.py"]},
+        "launch_type": "python", "path": "ZenlessZoneZero-OneDragon",
+        "python": ".venv\\Scripts\\python.exe",
+        "args": ["src\\zzz_od\\gui\\app.py"],
+        "retry": 1, "hang_timeout": 1800,
+        "repo": "OneDragon-Anything/ZenlessZoneZero-OneDragon",
+        "version": "v2.6.1-11-g1d57ea8d",
+    },
+    "BetterGI": {
+        "display_name": "BetterGI（原神 / 更好的原神）",
+        "gui": {"exe": "publish\\BetterGI.exe"},
+        "launch_type": "exe", "path": "BetterGI", "exe": "publish\\BetterGI.exe",
+        "retry": 1, "hang_timeout": 1800,
+        "repo": "babalae/better-genshin-impact", "version": "0.66.0-106-gf24ea3e",
+    },
 }
 
 FAKE_REGISTRY = {"projects": FAKE_PROJECTS, "groups": [], "reserved": []}
@@ -177,7 +217,7 @@ def build_overview():
     for key, spec in FAKE_PROJECTS.items():
         card = gui_main.ProjectCard(
             key, spec, gui_main.PROJECT_COLORS.get(key, "#4fc3f7"),
-            _noop, _noop, _noop, on_gui=_noop,
+            _noop, _noop, _noop, on_gui=_noop, on_parallel=_noop, on_remove=_noop,
         )
         card.update_state(FAKE_RUNS.get(key))
         cards.append(card)
@@ -294,10 +334,11 @@ def build_shell():
     root.setSpacing(0)
 
     nav = NavRail()
-    # 与真实 MainWindow._build_ui 一致：只有「总览」「设置」两项。项目界面不再
+    # 与真实 MainWindow._build_ui 一致：总览 / 项目状态 / 设置三项。项目界面不再
     # 当作嵌入页挂进导航，点卡片上的「界面」是独立打开项目自己的窗口。
-    nav.add_item("overview", "总览")
-    nav.add_item("settings", "设置")
+    nav.add_item("overview", "总览", icon="home")
+    nav.add_item("projects", "项目状态", icon="status")
+    nav.add_item("settings", "设置", icon="settings")
     nav.finish()
     # 真实 MainWindow 在 _build_ui 末尾会 set_active("overview")；预览若跳过这一步，
     # 就没有任何导航项被选中，左侧高亮条也不会落位（此前正是这块未定位的
@@ -314,16 +355,25 @@ def build_shell():
     populate_log(log_view)
     stack.addWidget(overview)
 
+    projects_page = ProjectStatusPage(
+        registry_getter=lambda: FAKE_REGISTRY,
+        color_getter=lambda k: gui_main.PROJECT_COLORS.get(k, "#4fc3f7"),
+        log_fn=_noop,
+    )
+    stack.addWidget(projects_page)
+
     settings_page = SettingsPage(log_fn=_noop, registry=FAKE_REGISTRY)
     stack.addWidget(settings_page)
 
     nav.navigate.connect(lambda key: _navigate(stack, nav, key))
-    return central, stack, nav, tabs, cards, chain_pill, settings_page
+    return central, stack, nav, tabs, cards, chain_pill, settings_page, projects_page
 
 
 def _navigate(stack, nav, key):
     if key == "overview":
         page = stack.widget(0)
+    elif key == "projects":
+        page = stack.widget(1)
     elif key == "settings":
         page = stack.widget(stack.count() - 1)
     else:
@@ -338,10 +388,10 @@ def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "logs"
     out_dir.mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
-    app.setStyleSheet(gui_main.APP_QSS)
-    apply_palette(app)
+    # 与 gui.main.main() 一致：开窗前换肤，卡片/按钮按主题取色构造。
+    apply_theme(app, "dark")
 
-    window, stack, nav, tabs, cards, chain_pill, settings_page = build_shell()
+    window, stack, nav, tabs, cards, chain_pill, settings_page, projects_page = build_shell()
     window.show()
 
     def shot_overview():
@@ -351,6 +401,11 @@ def main():
 
     def shot_states():
         window.grab().save(str(out_dir / "ui_preview_states.png"))
+        nav.navigate.emit("projects")
+        QTimer.singleShot(120, shot_projects)
+
+    def shot_projects():
+        window.grab().save(str(out_dir / "ui_preview_projects.png"))
         nav.navigate.emit("settings")
         QTimer.singleShot(80, shot_settings)
 

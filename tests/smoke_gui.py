@@ -34,7 +34,11 @@ def main():
 
 def _run():
     app = QApplication([])
-    app.setStyleSheet(module.APP_QSS)
+    # 与 gui.main.main() 保持一致：开窗前按主题应用 QSS + 调色板。
+    from gui import themes
+    from gui.modern import apply_theme
+
+    apply_theme(app, themes.DEFAULT_THEME)
     app.setQuitOnLastWindowClosed(False)
     window = module.MainWindow()
     window.show()

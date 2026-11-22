@@ -61,9 +61,25 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
     窗口是**项目自己的原生窗口**（独立进程、独立任务栏项，不被 Auto-AFK 的界面接管或嵌入），
     仅打开窗口、**不运行任务也不受监管**，进程独立于 Auto-AFK（关掉 Auto-AFK 后仍保留）；
     也可用 `Auto-AFK-CLI.bat gui <项目名>` 打开。GUI 入口在各项目的 `gui:` 配置块中定义，新增项目照抄即可。
-  - **现代化深色界面**：圆角卡片 + 项目色条、状态圆点与状态胶囊、主/次按钮层级、标签页下划线指示、
-    深色等宽日志区；实时日志按**对象着色**（每个项目一种颜色，error 红、warn 橙保持不变），
+  - **现代化界面（深色 / 浅色两套主题）**：圆角卡片 + 项目色条、状态圆点与状态胶囊、主/次按钮层级、
+    标签页下划线指示、等宽日志区；实时日志按**对象着色**（每个项目一种颜色，error 红、warn 橙保持不变），
     颜色可在 `configs\core\settings.yaml` 的 `gui.project_colors` 中自定义。
+    左侧导航只有三页：**总览 / 项目状态 / 设置**。
+  - **总览卡片可拖动排序**：按住卡片标题右边的 `⠿` 把手拖动，松手后顺序立刻生效并写回
+    `chain.order`（「一键挂机」按这个顺序启动；未列出的项目按注册表原顺序垫底）。
+  - **卡片上的「×」把项目收进设置页**：只从总览里隐藏，注册表里仍然保留；在「设置 → 已隐藏的项目」
+    点「放回总览」即可恢复（`gui.hidden_projects`）。
+  - **相邻卡片可设为并行**：两张紧挨着的卡片各点一次「并行」按钮，卡片之间会画出连线，
+    「一键挂机」时它们同时启动（写入 `chain.parallel_blocks`）。只能两两相邻配对，
+    中间隔着别的项目时会被拒绝并提示；三张以上同理，相邻两两相连即可。
+  - **项目状态页**：逐个项目列出启动方式、目录、解释器/可执行文件、配置文件、重试与卡死超时、
+    来源仓库（可一键打开 GitHub）与当前版本（读子项目目录的 `git describe`，没有 `.git` 时显示「未知」）。
+  - **主题与背景**：「设置 → 外观」可切换深色/浅色主题、指定一张背景图与不透明度
+    （`gui.theme` / `gui.background_image` / `gui.background_opacity`）；
+    背景图只铺在主窗口底板上，卡片与日志区保持不透明，文字始终可读。
+  - **新增挂机项目**：「设置 → 新增挂机项目」可直接把项目写进 `configs\core\afk_projects.yaml`。
+    同一条目可以生成第二份实例：填一个新区块（如 `BAAH2`）并把「继承自」选成 `BAAH`，
+    其余参数全部继承，只需另填配置文件即可让同一项目跑两份不同配置。
 - **快捷方式（均为管理员模式，推荐）**：
   - `Auto-AFK(管理员).lnk`（根目录与桌面各一份）——管理员身份打开界面，**不自动运行任务**；
   - `Auto-AFK 自动挂机(管理员).lnk`（根目录与桌面各一份）——管理员身份打开界面并**自动开始一键挂机**（`--autorun`）；
@@ -99,6 +115,12 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 `cloud_and_emulator`（M7A 云游戏 + BAAH 走 ADB，互不抢输入，并行）→ `exclusive_foreground`（MaaEnd 独占前台）
 → `zzz_one_dragon`（绝区零一条龙，MaaEnd 之后独占前台）。
 组内 `parallel: false` 时成员按顺序串行执行（前一个结束后才启动下一个），`true` 时并行启动并等待全部完成。
+
+**总览卡片上临时改并行**：不想动注册表时，在两张相邻卡片上各点一次「并行」按钮，
+它们会被记进 `configs\core\settings.yaml` 的 `chain.parallel_blocks`（形如 `[[A, B], [C, D]]`），
+「一键挂机」时同组项目一起启动、卡片之间会画出连线。只能相邻配对：中间隔着别的项目、
+某个项目不在这次运行里、或已经属于另一组时，整组会被忽略并给出告警，回退成各跑各的。
+这个键与 `groups` 里的 `parallel` 互不冲突——它只是在本轮链里额外把若干步合并成一步。
 组内任一项目失败/卡死**默认不中断整条链**：该项目被跳过，后续组照常执行；等所有组跑完一轮后，
 在末尾自动重跑本轮失败的项目（`chain.retry_failed_at_end`，默认 `true`）；
 同一个项目在一次一键挂机中最多被启动 `chain.max_attempts_per_project` 次（默认 3，已含进程内重试），
@@ -355,7 +377,7 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 & .venv\Scripts\python.exe tests\smoke_idle.py       # 空闲阈值/武装冷却、三选一提示框、自启、background 组、小组件
 & .venv\Scripts\python.exe tests\smoke_idle_flow.py  # 空闲到点 -> 提示框 -> 启动任务（含 --tray 开机自启模式）
 & .venv\Scripts\python.exe tests\smoke_thread_qt.py  # 后台线程经 Signal 投递到 GUI 线程，不直接碰控件
-& .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/项目卡）
+& .venv\Scripts\python.exe tests\smoke_shell_ui.py   # 新外壳（导航栏/设置页/项目状态页/项目卡拖动/并行/删除）
 & .venv\Scripts\python.exe tests\smoke_modern_ui.py  # 主题与动效组件（按钮/滚动/Tab/状态点/胶囊）
 & .venv\Scripts\python.exe tests\smoke_real_launch.py # 真实 fork GUI 进程（入口/事件管道/CLI 远程/空闲初始化）
 & .venv\Scripts\python.exe tests\smoke_gui_log_events.py # GUI 动作进事件流 + 渲染不回声
