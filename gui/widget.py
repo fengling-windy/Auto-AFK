@@ -8,6 +8,8 @@ gui.widget_pos，下次启动回到原处。所有数据由主窗口的 300ms �
 tick() 推进（小组件自己不轮询、不碰 supervisor）。
 """
 
+import logging
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -276,8 +278,10 @@ class DesktopWidget(QWidget):
         if self._on_moved is not None:
             try:
                 self._on_moved(self.current_position())
-            except Exception:
-                pass
+            except Exception as exc:
+                # 回调是外部注入的（主窗口存小组件位置）。它坏了的话位置就不
+                # 会被记住，下次开窗小组件跳回默认坐标——留痕好定位。
+                logging.getLogger("afk.gui").debug("desktop widget move handler failed: %s", exc)
 
     def set_move_handler(self, handler):
         self._on_moved = handler
@@ -287,8 +291,8 @@ class DesktopWidget(QWidget):
             return
         try:
             callback()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("afk.gui").debug("desktop widget button callback failed: %s", exc)
 
 
 __all__ = ["CHAIN_COLORS", "CHAIN_TEXT", "DesktopWidget"]

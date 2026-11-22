@@ -387,8 +387,9 @@ class Supervisor:
                 for child in proc.children(recursive=True):
                     try:
                         child.kill()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.getLogger("afk.supervisor").debug(
+                            "kill orphan child %s failed: %s", child.pid, exc)
                 proc.kill()
                 self._emit(key, "cleanup", "killed orphan process from previous run (pid={0})".format(pid), level="warn")
             except Exception as exc:
@@ -728,8 +729,10 @@ class Supervisor:
                 if handle is not None:
                     try:
                         handle.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 日志句柄关不掉 = 下一次同名日志被占用，子进程的
+                        # stdout 也接不上。留一行便于排查「日志文件不更新」。
+                        logging.getLogger("afk.supervisor").debug("close log handle failed: %s", exc)
         run.status = "running"
         self._emit(key, "status", "started pid={0} attempt={1}".format(run.process.pid, attempt), data={"cmd": cmd})
         self._persist()
@@ -1137,8 +1140,10 @@ class Supervisor:
                 for child in proc.children(recursive=True):
                     try:
                         child.kill()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 子进程自己先退了是常态，只留 debug
+                        logging.getLogger("afk.supervisor").debug(
+                            "kill leftover child %s failed: %s", child.pid, exc)
                 proc.kill()
                 killed.append(pid)
             except Exception:

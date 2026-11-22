@@ -58,7 +58,10 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except queue.Full:
-                pass
+                # 订阅者（GUI/CLI 的读取队列）跟不上，这条事件对它丢了。
+                # 丢事件本身是既有设计（不能给发布方加阻塞），但「界面上
+                # 少了几行日志」必须能从这里查出来。
+                logging.getLogger("afk.events").debug("subscriber queue full, dropped event id=%s", event.get("id"))
         return event
 
     def _persist_event(self, event):
