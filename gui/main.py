@@ -1121,58 +1121,76 @@ class MainWindow(QMainWindow):
         )
 
     def toggle_parallel(self, key):
-        """卡片「并行」按钮：第一次点记下待配对，第二次点相邻的另一张组成一组。"""
+        """卡片「并行」按钮：第一次点记下待配对，第二次点相邻的另一张组成一组。
+
+        已经有一组（A-B）并行时，再点第三张 C、然后点组边缘的 B，就并成
+        A-B-C 三张同时跑——用户要求「多项目并行同理」，不能只支持两张。
+        """
         # 先把已经不相邻的失效组清掉：否则下面「已在某个组里 → 取消」的分支
         # 会把一张界面上根本没显示「并行中」的卡当成在并行组里。
         self._prune_parallel_blocks()
         pending = self._parallel_pending
-        # 已在某个组里 → 再点一次退出该组
-        for block in list(self._parallel_blocks):
-            if key in block:
-                block.remove(key)
-                if len(block) < 2:
-                    self._parallel_blocks = [b for b in self._parallel_blocks if b is not block]
-                self._parallel_pending = None
-                self._write_parallel_blocks(
-                    log_text="取消并行：{0}".format(key)
+
+        # -- 1. 「待配对的那张 + 这一张」→ 新建或扩展一组 --------------------
+        # 这一段必须排在下面的「已在组里 → 退出」之前。历史缺陷：A-B 已经并行
+        # 时点 C 再点 B，会先命中退出分支把 B 从 A-B 里摘掉、组里只剩 A 于是
+        # 整组作废——用户想让三张一起跑，结果一个并行都不剩，而且日志写的是
+        # 「取消并行」，看不出发生了什么。
+        if pending is not None and pending != key:
+            if not self._adjacent_pair(pending, key):
+                self._append_log(
+                    "core", "warn",
+                    "只能把相邻的两个项目设为并行：{0} 和 {1} 之间还隔着别的项目".format(pending, key),
                 )
+                self._parallel_pending = None
                 self._sync_parallel_state()
                 return
-
-        if pending is None or pending == key:
-            self._parallel_pending = None if pending == key else key
-            self._sync_parallel_state()
-            return
-
-        if not self._adjacent_pair(pending, key):
-            self._append_log(
-                "core", "warn",
-                "只能把相邻的两个项目设为并行：{0} 和 {1} 之间还隔着别的项目".format(pending, key),
-            )
+            # 与已有组共享端点时合并成一组（A-B 之后再点 C 和 B，变成 A-B-C）
+            target = None
+            for block in self._parallel_blocks:
+                if pending in block or key in block:
+                    target = block
+                    break
+            if target is None:
+                self._parallel_blocks.append([pending, key])
+            else:
+                if pending not in target:
+                    target.append(pending)
+                if key not in target:
+                    target.append(key)
+                # 组内按卡片顺序排一次，连线才连相邻的
+                visible = self.visible_card_keys()
+                target.sort(key=lambda k: visible.index(k) if k in visible else 999)
             self._parallel_pending = None
+            self._write_parallel_blocks(
+                log_text="并行：{0} 与 {1} 将同时运行".format(pending, key)
+            )
             self._sync_parallel_state()
             return
 
-        # 与已有组共享端点时合并成一组（A-B 之后再点 C，变成 A-B-C）
-        target = None
-        for block in self._parallel_blocks:
-            if pending in block or key in block:
-                target = block
-                break
-        if target is None:
-            self._parallel_blocks.append([pending, key])
-        else:
-            if pending not in target:
-                target.append(pending)
-            if key not in target:
-                target.append(key)
-            # 组内按卡片顺序排一次，连线才连相邻的
-            visible = self.visible_card_keys()
-            target.sort(key=lambda k: visible.index(k) if k in visible else 999)
+        # -- 2. 没有待配对的卡：这一张若已在组里就退出该组 --------------------
+        if pending is None:
+            for block in list(self._parallel_blocks):
+                if key in block:
+                    block.remove(key)
+                    if len(block) < 2:
+                        self._parallel_blocks = [b for b in self._parallel_blocks if b is not block]
+                    self._parallel_pending = None
+                    self._write_parallel_blocks(
+                        log_text="取消并行：{0}".format(key)
+                    )
+                    # 组里剩下的成员可能因此不再相邻（A-B-C 去掉中间的 B，只剩
+                    # A 和 C，中间隔着 B）。那时整组都失效，界面上已经不显示
+                    # 「并行中」，配置里不能还留着一个 supervisor 会告警的块。
+                    self._prune_parallel_blocks()
+                    self._sync_parallel_state()
+                    return
+            self._parallel_pending = key
+            self._sync_parallel_state()
+            return
+
+        # -- 3. pending == key：用户又点了一次同一张 → 取消待配对 -------------
         self._parallel_pending = None
-        self._write_parallel_blocks(
-            log_text="并行：{0} 与 {1} 将同时运行".format(pending, key)
-        )
         self._sync_parallel_state()
 
     def _sync_parallel_state(self):

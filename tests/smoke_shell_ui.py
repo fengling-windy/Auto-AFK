@@ -1159,6 +1159,43 @@ def test_main_window(app):
             window._apply_card_order(order_keys)
             pump(app, 120)
 
+        # 多项目并行：A-B 已经一组，再点 C 然后点组边的 B，要并成 A-B-C。
+        # 历史缺陷：toggle_parallel 把「已在组里 → 退出」分支放在最前面，点 B
+        # 时先把 B 从 A-B 摘掉、组里只剩 A 于是整组作废——用户想让三张一起跑，
+        # 结果一个并行都不剩，日志还写着「取消并行」。
+        if len(order_keys) >= 4:
+            first, second, third, fourth = order_keys[0], order_keys[1], order_keys[2], order_keys[3]
+            window.toggle_parallel(first)
+            window.toggle_parallel(second)
+            pump(app, 120)
+            check("两张组成一组（多项目并行起点）", window.parallel_groups() == [[first, second]])
+            window.toggle_parallel(third)
+            window.toggle_parallel(second)
+            pump(app, 120)
+            check("再加一张并成三张一组（{0}）".format(window.parallel_groups()),
+                  window.parallel_groups() == [[first, second, third]])
+            check("三张一组也写进配置", [first, second, third] in (
+                (config.settings().get("chain") or {}).get("parallel_blocks") or []
+            ))
+            window.toggle_parallel(fourth)
+            window.toggle_parallel(third)
+            pump(app, 120)
+            check("四张也能并成一组", window.parallel_groups() == [[first, second, third, fourth]])
+            # 从中间摘掉一张：剩下三张不再相邻（first/second/fourth 中间隔着 third
+            # 那个位置虽然空了，但 second 与 fourth 之间的卡片槽已按新顺序连续），
+            # 关键是界面与配置必须一致——不能在配置里留一个 supervisor 会告警的块。
+            window.toggle_parallel(third)
+            pump(app, 120)
+            check("点组内一张取消并行", window.parallel_groups() == [])
+            check("取消后配置里也不留无效块", not (
+                (config.settings().get("chain") or {}).get("parallel_blocks") or []
+            ))
+            window._parallel_blocks = []
+            window._parallel_pending = None
+            window._write_parallel_blocks()
+            window._sync_parallel_state()
+            pump(app, 120)
+
         # 从总览收起一张卡再从设置页放回来，卡片要回到原来的位置。
         # 历史缺陷：_reload_registry 末尾按「此刻的界面顺序」重排，而新补的卡片
         # 是 flow.addWidget 追加在尾部——用户只是点了 × 又点回来，运行顺序就被
