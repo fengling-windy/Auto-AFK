@@ -548,15 +548,19 @@ class MainWindow(QMainWindow):
                 daemon=True,
                 name="afk-housekeeping",
             ).start()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 日志清理跑不起来不该拦住开窗，但要留痕：用户看到 logs/ 一直变大、
+            # 报告目录越堆越多时，能从这里查到是不是清理线程没起来。
+            logging.getLogger("afk.gui").warning("housekeeping thread failed: %s", exc)
 
         # 刚启动就自动更新全部项目（pre_run.at_startup，默认开）
         try:
             if self.supervisor.run_startup_updates():
                 self._append_log("core", "info", "启动更新：正在后台更新全部项目...")
-        except Exception:
-            pass
+        except Exception as exc:
+            # 启动更新失败以前是静默的：用户以为「已经在更新」，实际一个都没跑。
+            self._append_log("core", "warn", "启动更新没能开始：{0}".format(exc))
+            logging.getLogger("afk.gui").warning("startup updates failed: %s", exc)
 
         if self.auto_run_requested:
             self._append_log("core", "info", "--autorun 已启用，2 秒后自动开始一键挂机")
@@ -1854,8 +1858,11 @@ class MainWindow(QMainWindow):
                         "origin": "gui",
                     }
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # 事件总线挂了不能影响界面日志渲染（这里在 GUI 主线程上，
+                # 抛出去就是一次未捕获异常），但也不能一声不响——排查问题时
+                # 「界面有日志、events.jsonl 里没有」最难查。
+                logging.getLogger("afk.gui").warning("emit gui log event failed: %s", exc)
 
     def _matches_filter(self, event, filter_project):
         if not filter_project:
@@ -1936,8 +1943,12 @@ class MainWindow(QMainWindow):
             if getattr(self, "settings_page", None) is not None:
                 try:
                     self.settings_page._refresh_completion_label()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 只是刷新「今天是否已完成」那行提示，失败不该影响主循环；
+                    # 但要留痕，否则用户会看到过期的完成状态却查不到原因。
+                    logging.getLogger("afk.gui").warning(
+                        "refresh completion label failed: %s", exc
+                    )
 
     def _on_change(self):
         pass
@@ -2193,8 +2204,10 @@ class MainWindow(QMainWindow):
         """
         try:
             self.idle_triggered.emit(float(idle_sec))
-        except Exception:
-            pass
+        except Exception as exc:
+            # 后台线程里的信号投递失败（窗口正在析构等）不该把线程打挂，
+            # 但要留痕：否则「空闲到点没弹提示」永远查不出原因。
+            logging.getLogger("afk.gui").warning("idle trigger dispatch failed: %s", exc)
 
     def _prompt_idle(self, idle_sec):
         """在 GUI 线程真正弹提示框（由 idle_triggered 信号投递进来）。"""
