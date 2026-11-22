@@ -1699,6 +1699,13 @@ class MainWindow(QMainWindow):
         settings_page = getattr(self, "settings_page", None)
         if settings_page is not None:
             settings_page.reload_from_disk()
+        # 「项目状态」页也按注册表现场建块。历史缺陷：它只在 __init__ 与
+        # _navigate("projects") 时 reload，用户停在总览页改完注册表存盘，界面上
+        # 新项目卡片出现了、侧栏也能点进「项目状态」，但那页还是开窗时那份清单——
+        # 摘要里写着 4 个项目、注册表里已有 5 个，且没有任何提示。
+        projects_page = getattr(self, "projects_page", None)
+        if projects_page is not None:
+            projects_page.reload()
         label = getattr(self, "_subtitle_label", None)
         if label is not None:
             text = self._subtitle_text()

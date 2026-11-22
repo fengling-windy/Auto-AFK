@@ -1031,6 +1031,13 @@ def test_main_window(app):
         check("保存注册表后不会新增项目导航项",
               not [k for k in window.nav.item_keys() if str(k).startswith("page:")])
         check("保存注册表后副标题跟随项目数量", "冒烟新增项目" in window._subtitle_label.text())
+        # 「项目状态」页同样要跟着注册表走。历史缺陷：它只在 __init__ 与切页时
+        # reload，用户停在总览页存盘后，那页还是开窗时那份清单（卡片有了、
+        # 状态页却说没有这个项目）。
+        check("保存注册表后项目状态页跟上新项目（{0}）".format(sorted(window.projects_page._blocks)),
+              extra_key in window.projects_page._blocks)
+        check("保存注册表后项目状态页去掉已删项目",
+              dropped_key not in window.projects_page._blocks)
         # 还原：把注册表写回原样，后续断言依赖原来的 5 个项目
         window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
         window._save_text(window.registry_edit, config.PROJECTS_YAML)
