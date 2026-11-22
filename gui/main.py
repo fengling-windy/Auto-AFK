@@ -2441,6 +2441,14 @@ class MainWindow(QMainWindow):
             central = self.centralWidget()
             width = (central.width() if central is not None else self.width()) - 24
         host.sync_height(width)
+        # 并行连线层是浮在卡片区上的独立控件（不在布局里），尺寸得跟着宿主走。
+        # 历史缺陷：只有 _sync_parallel_state 会 setGeometry，而它只在点「并行」
+        # 或改顺序时调用——用户拖动窗口边缘把窗口拉大/缩小后，连线层还停在
+        # 旧尺寸（实测窗口从 1360 拉到 1500 后，host 宽 1276 而连线层仍是 827），
+        # 相邻卡片之间的弧线就画在错误的位置、甚至整段画不出来。
+        links = getattr(self, "links", None)
+        if links is not None:
+            links.setGeometry(host.rect())
         scroll = getattr(self, "cards_scroll", None)
         if scroll is None:
             return
