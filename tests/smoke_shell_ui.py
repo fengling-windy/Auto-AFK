@@ -43,7 +43,7 @@ shutil.copy(_REAL_REPAIR, _TMP_REPAIR)
 config.REPAIR_YAML = _TMP_REPAIR
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 from afk_core.events import EventBus
 from afk_core.supervisor import Supervisor, apply_chain_order
@@ -987,6 +987,36 @@ def test_main_window(app):
             window.settings_page.order_list.item(i).data(Qt.UserRole)
             for i in range(window.settings_page.order_list.count())
         ])
+        # 在设置页里排好的运行顺序，必须同步到总览的卡片顺序。
+        # 历史缺陷：_on_settings_changed 只换肤不重排，第一次改顺序恰好因为首启
+        # 主题从空变成 dark 走了 _rebuild_cards 而「碰巧生效」，第二次就纹丝不动，
+        # 用户在设置里排好的顺序根本没落到卡片上（也看不出哪一步错了）。
+        _order_keys = window.settings_page._ordered_project_keys()
+        _rotated = _order_keys[1:] + _order_keys[:1]
+        window.settings_page.order_list.blockSignals(True)
+        window.settings_page.order_list.clear()
+        for _k in _rotated:
+            _item = QListWidgetItem(_k)
+            _item.setData(Qt.UserRole, _k)
+            window.settings_page.order_list.addItem(_item)
+        window.settings_page.order_list.blockSignals(False)
+        window.settings_page._save_order()
+        pump(app, 200)
+        check("设置页改运行顺序后卡片跟着重排（{0}）".format(window.visible_card_keys()),
+              window.visible_card_keys() == _rotated)
+        # 再改一次：确认不是「只在主题变化那次碰巧生效」
+        _rotated2 = _rotated[2:] + _rotated[:2]
+        window.settings_page.order_list.blockSignals(True)
+        window.settings_page.order_list.clear()
+        for _k in _rotated2:
+            _item = QListWidgetItem(_k)
+            _item.setData(Qt.UserRole, _k)
+            window.settings_page.order_list.addItem(_item)
+        window.settings_page.order_list.blockSignals(False)
+        window.settings_page._save_order()
+        pump(app, 200)
+        check("连续第二次改运行顺序卡片也跟随（{0}）".format(window.visible_card_keys()),
+              window.visible_card_keys() == _rotated2)
         # 设置页「启动时后台打开项目界面」的勾选项同样要按注册表重建。
         # 历史缺陷：这几个复选框只在 SettingsPage.__init__ 里建一次，新增的带界面
         # 项目永远没有勾选框（无法让它开机静默启动），删掉的项目反而留下一个勾上

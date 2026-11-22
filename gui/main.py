@@ -1301,6 +1301,12 @@ class MainWindow(QMainWindow):
         self._reload_project_colors()
         self._sync_settings_editor()
         self._apply_theme(self._theme_name(), persist=False)
+        # 设置页也能改运行顺序（拖动「运行顺序」列表）。主题真的变了时
+        # _apply_theme 会走 _rebuild_cards，那里已经按 chain.order 建卡；主题没变
+        # 时它只刷配色，卡片顺序原地不动——实测在设置里连拖两次顺序，第一次
+        # 恰好因为首启主题从空变成 dark 触发重建而跟上了，第二次就纹丝不动，
+        # 用户看到的是「在设置里排好的顺序根本没生效」。这里显式重排一次。
+        self._apply_card_order([key for key, _ in self._ordered_project_items()])
 
     def _theme_name(self):
         """当前主题名（settings.yaml 的 gui.theme，未知值回退默认）。"""
