@@ -145,6 +145,12 @@ class _ProjectBlock(QFrame):
                 continue
             label = KEY_LABELS.get(key_name, key_name)
             self._add_row(label, self._format(value, key_name))
+        # 注册表里没写 version 键时也要留一行：真实版本是后台去子项目目录里跑
+        # git describe 读出来的，读完要有地方显示。历史缺陷：只在 spec 里有
+        # version 键时才建这一行，于是「新增挂机项目」建出来（不填 version）
+        # 的项目，后台扫到了版本也没有标签可写，界面上永远看不到版本号。
+        if not hasattr(self, "_version_label"):
+            self._add_row(KEY_LABELS["version"], "未知")
 
     @staticmethod
     def _format(value, key_name=""):
@@ -173,8 +179,14 @@ class _ProjectBlock(QFrame):
     def set_version(self, text):
         if not hasattr(self, "_version_label"):
             return
-        self._version_label.setText(text or "未知")
-        self._version_label.setToolTip(text or "未知")
+        if not text:
+            # 子项目目录不是 git clone（发行包、手工解压）时扫不出东西，这时
+            # 别把注册表里手写的 version 抹成「未知」——那是用户填的唯一线索。
+            if self._version_label.text() not in ("", "未知"):
+                return
+            text = "未知"
+        self._version_label.setText(text)
+        self._version_label.setToolTip(text)
 
     def set_state(self, enabled):
         self.state_label.setText("已启用" if enabled else "已禁用")
