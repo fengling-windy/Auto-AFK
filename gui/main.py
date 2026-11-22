@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,19 +45,21 @@ from afk_core.scheduler import Scheduler
 from afk_core.supervisor import Supervisor
 
 from gui.modern import (
-    APP_QSS,
     AnimatedButton,
     AnimatedPill,
     AnimatedTabWidget,
+    CardBackground,
     ElidedLabel,
     FlowHost,
     HoverGlowCard,
+    ParallelLinks,
     StatusDot,
     add_shadow,
-    apply_palette,
+    apply_theme,
     enable_smooth_scroll,
     fade_in_widget,
     fade_in_window,
+    links_color,
 )
 from gui.idle_prompt import (
     DECISION_BACKGROUND,
@@ -67,8 +69,10 @@ from gui.idle_prompt import (
     decide_on_timeout,
 )
 from gui.nav_rail import NavRail
+from gui.project_status_page import ProjectStatusPage
 from gui.settings_page import SettingsPage
 from gui.widget import DesktopWidget
+from gui import icons, themes
 
 STATUS_COLORS = {
     "success": "#34d399",
@@ -204,7 +208,16 @@ _UNSET = object()
 
 
 class ProjectCard(HoverGlowCard):
-    def __init__(self, key, spec, color, on_start, on_stop, on_logs, on_gui=None):
+    # 按住卡片移动超过这么多像素才算拖拽（避免点按钮/微抖动误触发重排）
+    DRAG_THRESHOLD = 8
+
+    # 卡片被拖动、移动、松手；参数是该卡的 key / 全局坐标
+    drag_started = Signal(str)
+    drag_moved = Signal(str, QPoint)
+    drag_finished = Signal(str)
+
+    def __init__(self, key, spec, color, on_start, on_stop, on_logs, on_gui=None,
+                 on_parallel=None, on_remove=None):
         super().__init__()
         self.key = key
         self.spec = spec
@@ -213,6 +226,12 @@ class ProjectCard(HoverGlowCard):
         self.on_stop = on_stop
         self.on_logs = on_logs
         self.on_gui = on_gui
+        self.on_parallel = on_parallel
+        self.on_remove = on_remove
+        self._parallel = False
+        self._parallel_pending = False
+        self._press_pos = None
+        self._dragging = False
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -239,6 +258,22 @@ class ProjectCard(HoverGlowCard):
             self.name_label.setToolTip(display_name)
         head.addWidget(self.dot)
         head.addWidget(self.name_label, 1)
+        # 拖动把手（只能靠把手拖动卡片，避免点按钮时误拖）
+        self.drag_handle = QLabel()
+        self.drag_handle.setObjectName("cardGrip")
+        self.drag_handle.setPixmap(icons.make("grip", "#6b7688", 14).pixmap(14, 14))
+        self.drag_handle.setCursor(Qt.OpenHandCursor)
+        self.drag_handle.setToolTip("按住拖动可调整运行顺序")
+        self.drag_handle.installEventFilter(self)
+        head.addWidget(self.drag_handle)
+        # 删除卡片（只是从总览里藏起来，设置页里能恢复）
+        self.close_btn = AnimatedButton("", variant="mini")
+        self.close_btn.setObjectName("cardClose")
+        self.close_btn.setIcon(icons.make("close", "#7f8aa3", 12))
+        self.close_btn.setFixedSize(22, 22)
+        self.close_btn.setToolTip("从总览里移除这个项目（可在设置页恢复）")
+        self.close_btn.clicked.connect(lambda: self.on_remove(self.key) if self.on_remove else None)
+        head.addWidget(self.close_btn)
         layout.addLayout(head)
 
         self.status_label = QLabel("等待")
@@ -262,6 +297,14 @@ class ProjectCard(HoverGlowCard):
         self.start_btn = AnimatedButton("启动", variant="mini")
         self.stop_btn = AnimatedButton("停止", variant="mini")
         self.logs_btn = AnimatedButton("日志", variant="mini")
+        # 并行：点一次进入「待配对」，再点相邻的另一张卡就组成一组
+        self.parallel_btn = AnimatedButton("并行", variant="parallel")
+        self.parallel_btn.setObjectName("parallel")
+        self.parallel_btn.setCheckable(True)
+        self.parallel_btn.setToolTip("与相邻的项目同时运行：两张相邻的卡各点一次")
+        self.parallel_btn.clicked.connect(
+            lambda: self.on_parallel(self.key) if self.on_parallel else None
+        )
         # 点击时再看一眼 self.on_gui：注册表里的 gui 段可能在运行中被改掉，
         # apply_spec 会把 on_gui 置空，这里不能把回调固定死在构造时的值上。
         def _gui_clicked():
@@ -281,8 +324,60 @@ class ProjectCard(HoverGlowCard):
         buttons.addWidget(self.start_btn)
         buttons.addWidget(self.stop_btn)
         buttons.addWidget(self.logs_btn)
+        buttons.addWidget(self.parallel_btn)
         buttons.addStretch(1)
         layout.addLayout(buttons)
+
+    # -- 并行状态 -----------------------------------------------------------
+    def set_parallel(self, active, pending=False):
+        """active=已在并行组里，pending=点了一次正等相邻的那张。"""
+        self._parallel = bool(active)
+        self._parallel_pending = bool(pending) and not active
+        self.parallel_btn.blockSignals(True)
+        self.parallel_btn.setChecked(self._parallel or self._parallel_pending)
+        self.parallel_btn.blockSignals(False)
+        if self._parallel:
+            text, tip = "并行中", "已与相邻项目同时运行，再点一次取消"
+        elif self._parallel_pending:
+            text, tip = "待配对", "再点相邻的另一张卡的「并行」按钮即可组成一组"
+        else:
+            text, tip = "并行", "与相邻的项目同时运行：两张相邻的卡各点一次"
+        self.parallel_btn.setText(text)
+        self.parallel_btn.setToolTip(tip)
+
+    def is_parallel(self):
+        return self._parallel
+
+    def is_parallel_pending(self):
+        return self._parallel_pending
+
+    # -- 拖动排序 -----------------------------------------------------------
+    def eventFilter(self, obj, ev):
+        if obj is self.drag_handle:
+            if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._press_pos = ev.globalPosition().toPoint()
+                self._dragging = False
+                return True
+            if ev.type() == QEvent.MouseMove and self._press_pos is not None:
+                pos = ev.globalPosition().toPoint()
+                if not self._dragging:
+                    delta = pos - self._press_pos
+                    if delta.manhattanLength() >= self.DRAG_THRESHOLD:
+                        self._dragging = True
+                        self.drag_handle.setCursor(Qt.ClosedHandCursor)
+                        self.drag_started.emit(self.key)
+                if self._dragging:
+                    self.drag_moved.emit(self.key, pos)
+                return True
+            if ev.type() == QEvent.MouseButtonRelease and self._press_pos is not None:
+                was_dragging = self._dragging
+                self._press_pos = None
+                self._dragging = False
+                self.drag_handle.setCursor(Qt.OpenHandCursor)
+                if was_dragging:
+                    self.drag_finished.emit(self.key)
+                return True
+        return super().eventFilter(obj, ev)
 
     def apply_spec(self, spec, color=None, on_gui=_UNSET):
         """注册表里这个项目的显示名/颜色/gui 入口改了之后刷新卡片。
@@ -370,6 +465,17 @@ class MainWindow(QMainWindow):
         self.repair = RepairEngine(self.bus, self.settings)
         self.supervisor = Supervisor(self.bus, settings=self.settings, repair=self.repair, on_change=self._on_change)
         self.cards = {}
+        # 总览页里被「移除」掉的项目（只是不显示，注册表里仍在）。
+        # 单独存一份到 settings 的 gui.hidden_projects，设置页能把它们放回来——
+        # 直接删注册表里的项目太重了，用户常常只是想暂时收起两个。
+        self._hidden_projects = [
+            str(k) for k in ((self.settings.get("gui") or {}).get("hidden_projects") or [])
+        ]
+        # 并行组：与 chain.parallel_blocks 同步，卡片之间的连线按它画
+        self._parallel_blocks = self._read_parallel_blocks()
+        # 点了「并行」但还没配成对的那张卡
+        self._parallel_pending = None
+        self._drag_key = None
         self._log_line_count = 0
         self._did_intro = False
         self._last_chain_for_completion = None
@@ -465,6 +571,12 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("central")
+        # 背景图垫在最底层：单独一个控件而不是在 central 上自绘，避免 QSS 背景
+        # 与手绘图混在一起（会出现「一半黑一半图」）。见 CardBackground 注释。
+        self.background = CardBackground(central)
+        self.background.setGeometry(central.rect())
+        self.background.lower()
+        self.background.set_fill(themes.resolve(self._theme_name())["window"])
         root_layout = QHBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
@@ -476,8 +588,9 @@ class MainWindow(QMainWindow):
         # 残留），已整体移除。现在只保留「一键挂机」这一套编排入口，项目界面
         # 一律由卡片上的「界面」按钮用原生方式独立打开。
         self.nav = NavRail()
-        self.nav.add_item("overview", "总览")
-        self.nav.add_item("settings", "设置")
+        self.nav.add_item("overview", "总览", icon="home")
+        self.nav.add_item("projects", "项目状态", icon="status")
+        self.nav.add_item("settings", "设置", icon="settings")
         self.nav.finish()
         self.nav.navigate.connect(self._navigate)
         root_layout.addWidget(self.nav)
@@ -579,14 +692,25 @@ class MainWindow(QMainWindow):
         cards_host = FlowHost(h_spacing=12, v_spacing=12)
         cards_row = cards_host.flow()
         self.cards_host = cards_host
-        for key, spec in (config.registry().get("projects", {}) or {}).items():
+        # 卡片之间画并行连线的覆盖层：挂在 cards_host 上、跟它一样大，
+        # 鼠标事件穿透。放在这里而不是卡片上，是因为跨卡片的线会被卡片边界裁掉。
+        self.links = ParallelLinks(cards_host)
+        self.links.set_color(links_color())
+        for key, spec in self._ordered_project_items():
+            if key in self._hidden_projects:
+                continue
             card = ProjectCard(
                 key, spec, self._project_color(key),
                 self.start_project, self.stop_project, self.show_project_logs,
                 on_gui=self.open_project_page if spec.get("gui") else None,
+                on_parallel=self.toggle_parallel,
+                on_remove=self.hide_card,
             )
             self.cards[key] = card
             cards_row.addWidget(card)
+            card.drag_started.connect(self._on_card_drag_started)
+            card.drag_moved.connect(self._on_card_drag_moved)
+            card.drag_finished.connect(self._on_card_drag_finished)
         # 卡片区可滚动：卡片是等宽定宽的，窗口窄时折成两行、矮屏上就没地方放了。
         # 直接把它塞进 QVBoxLayout 会把主窗口最小高度顶到 821px——1366x768 的
         # 笔记本（可用 728）上窗口底部按钮直接掉出屏幕。套一层滚动区后最小高度
@@ -709,9 +833,20 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(overview)  # index 0 = 总览
 
+        # -- 项目状态页 ------------------------------------------------------------
+        self.projects_page = ProjectStatusPage(
+            registry_getter=lambda: config.registry(),
+            color_getter=self._project_color,
+            log_fn=self._append_log,
+        )
+        self.stack.addWidget(self.projects_page)
+
         # -- 设置页 ----------------------------------------------------------------
         self.settings_page = SettingsPage(log_fn=self._append_log)
         self.settings_page.changed.connect(self._on_settings_changed)
+        self.settings_page.theme_changed.connect(self._on_theme_changed)
+        self.settings_page.restore_requested.connect(self.restore_card)
+        self.settings_page.project_added.connect(self._on_project_added)
         self.stack.addWidget(self.settings_page)
 
         self.nav.set_active("overview", animate=False)
@@ -727,10 +862,13 @@ class MainWindow(QMainWindow):
         self.mumu_btn.clicked.connect(self.run_mumu_updater)
 
     def _navigate(self, key):
-        """导航栏切换页面（总览 / 设置）。"""
+        """导航栏切换页面（总览 / 项目状态 / 设置）。"""
         page = None
         if key == "overview":
             page = self.stack.widget(0)
+        elif key == "projects":
+            page = self.projects_page
+            page.reload()
         elif key == "settings":
             self.settings_page.reload_from_disk()
             page = self.settings_page
@@ -771,6 +909,297 @@ class MainWindow(QMainWindow):
                 self.gui_log.emit(key, "warn", "无法打开 {0} 的界面：注册表里没有配置 gui 入口".format(key))
 
         threading.Thread(target=worker, daemon=True, name="afk-gui-" + key).start()
+
+    # -- 卡片顺序 / 归属 -------------------------------------------------------
+    def _registry_projects(self):
+        return config.registry().get("projects", {}) or {}
+
+    def _ordered_project_items(self):
+        """按运行顺序（chain.order）列出 (key, spec)，未列出的垫底。
+
+        注册表里的键顺序是 yaml 的书写顺序，不等于运行顺序——chain.order 才是
+        supervisor 排程的依据（apply_chain_order）。总览上卡片的先后必须和它
+        一致，否则用户拖完卡片看到的顺序和真正跑的顺序是两套。
+        """
+        projects = self._registry_projects()
+        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        rank = {k: i for i, k in enumerate(order)}
+        keys = sorted(projects.keys(), key=lambda k: rank.get(k, len(rank)))
+        return [(k, projects[k]) for k in keys]
+
+    def _save_chain_order(self, keys, *, log_text=None):
+        """把卡片顺序写回 settings.yaml 的 chain.order。"""
+        keys = [str(k) for k in keys]
+
+        def mutate(settings):
+            chain = settings.setdefault("chain", {})
+            if not isinstance(chain, dict):
+                chain = {}
+                settings["chain"] = chain
+            chain["order"] = list(keys)
+
+        self._mutate_settings(mutate)
+        if log_text:
+            self._append_log("core", "info", log_text)
+        self._sync_parallel_state()
+
+    def _apply_card_order(self, keys):
+        """按给定 key 顺序重排卡片控件（不重建，保留运行状态与信号）。"""
+        host = getattr(self, "cards_host", None)
+        cards = getattr(self, "cards", {}) or {}
+        if host is None:
+            return
+        ordered = [cards[k] for k in keys if k in cards]
+        ordered += [c for k, c in cards.items() if k not in keys]
+        host.set_order(ordered)
+        self._sync_parallel_state()
+        self._sync_cards_height()
+
+    def hide_card(self, key):
+        """卡片上的 × —— 从总览收起（注册表不动，设置页可恢复）。"""
+        card = (getattr(self, "cards", {}) or {}).get(key)
+        if card is None:
+            return
+        hidden = [k for k in self._hidden_projects if k != key] + [key]
+
+        def mutate(settings):
+            gui_cfg = settings.setdefault("gui", {})
+            if not isinstance(gui_cfg, dict):
+                gui_cfg = {}
+                settings["gui"] = gui_cfg
+            gui_cfg["hidden_projects"] = list(hidden)
+
+        self._hidden_projects = hidden
+        self._mutate_settings(mutate)
+        # 并行组里如果有它，一并移除（不然连线指向一张不存在的卡）
+        self._parallel_blocks = [b for b in self._parallel_blocks if key not in b]
+        self._write_parallel_blocks()
+        flow = card.parentWidget()
+        host = getattr(self, "cards_host", None)
+        if host is not None:
+            host.flow().removeWidget(card)
+        elif flow is not None:
+            flow.layout().removeWidget(card)
+        card.setParent(None)
+        card.deleteLater()
+        self.cards.pop(key, None)
+        if self._parallel_pending == key:
+            self._parallel_pending = None
+        self._sync_parallel_state()
+        self._sync_cards_height()
+        page = getattr(self, "settings_page", None)
+        if page is not None:
+            page.reload_from_disk()
+        self._append_log("core", "info", "已从总览移除 {0}（设置页可恢复）".format(key))
+
+    def restore_card(self, key):
+        """把隐藏的项目放回总览（设置页「已隐藏的项目」用）。"""
+        if key in self._hidden_projects:
+            self._hidden_projects = [k for k in self._hidden_projects if k != key]
+
+            def mutate(settings):
+                gui_cfg = settings.setdefault("gui", {})
+                if not isinstance(gui_cfg, dict):
+                    gui_cfg = {}
+                    settings["gui"] = gui_cfg
+                gui_cfg["hidden_projects"] = list(self._hidden_projects)
+
+            self._mutate_settings(mutate)
+        self._reload_registry()
+
+    # -- 并行分组 -------------------------------------------------------------
+    def _read_parallel_blocks(self):
+        blocks = (self.settings.get("chain") or {}).get("parallel_blocks") or []
+        out = []
+        for block in blocks if isinstance(blocks, list) else []:
+            keys = [str(k) for k in (block or []) if isinstance(k, (str, int))]
+            if len(keys) >= 2:
+                out.append(keys)
+        return out
+
+    def _write_parallel_blocks(self, log_text=None):
+        blocks = [list(b) for b in self._parallel_blocks if len(b) >= 2]
+
+        def mutate(settings):
+            chain = settings.setdefault("chain", {})
+            if not isinstance(chain, dict):
+                chain = {}
+                settings["chain"] = chain
+            chain["parallel_blocks"] = blocks
+
+        self._mutate_settings(mutate)
+        if log_text:
+            self._append_log("core", "info", log_text)
+
+    def _card_index(self, key):
+        keys = [k for k in (getattr(self, "cards", {}) or {}).keys()]
+        host = getattr(self, "cards_host", None)
+        if host is not None:
+            widgets = host.ordered_widgets()
+            visible = [w.key for w in widgets if hasattr(w, "key")]
+            if key in visible:
+                return visible.index(key)
+        return keys.index(key) if key in keys else -1
+
+    def visible_card_keys(self):
+        """总览上卡片当前的实际顺序（测试与内部逻辑都用它）。"""
+        host = getattr(self, "cards_host", None)
+        if host is not None:
+            return [w.key for w in host.ordered_widgets() if hasattr(w, "key")]
+        return list((getattr(self, "cards", {}) or {}).keys())
+
+    def _adjacent_pair(self, first, second):
+        """两张卡在**运行顺序与界面顺序**上都必须相邻，才能组成并行组。
+
+        「只能相邻」是用户明确要求：把不相邻的两个项目设成并行等于跳过中间
+        那个项目的先后约束，实际执行顺序会变得没法解释。所以两边都要紧挨着。
+        """
+        visible = self.visible_card_keys()
+        if first in visible and second in visible:
+            i, j = visible.index(first), visible.index(second)
+            return abs(i - j) == 1
+        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        if first in order and second in order:
+            return abs(order.index(first) - order.index(second)) == 1
+        return True
+
+    def parallel_groups(self):
+        """当前有效的并行组（只保留组员都还显示着的）。"""
+        visible = set(self.visible_card_keys())
+        groups = []
+        for block in self._parallel_blocks:
+            members = [k for k in block if k in (getattr(self, "cards", {}) or {})]
+            if len(members) >= 2 and all(k in visible for k in members):
+                groups.append(members)
+        return groups
+
+    def toggle_parallel(self, key):
+        """卡片「并行」按钮：第一次点记下待配对，第二次点相邻的另一张组成一组。"""
+        pending = self._parallel_pending
+        # 已在某个组里 → 再点一次退出该组
+        for block in list(self._parallel_blocks):
+            if key in block:
+                block.remove(key)
+                if len(block) < 2:
+                    self._parallel_blocks = [b for b in self._parallel_blocks if b is not block]
+                self._parallel_pending = None
+                self._write_parallel_blocks(
+                    log_text="取消并行：{0}".format(key)
+                )
+                self._sync_parallel_state()
+                return
+
+        if pending is None or pending == key:
+            self._parallel_pending = None if pending == key else key
+            self._sync_parallel_state()
+            return
+
+        if not self._adjacent_pair(pending, key):
+            self._append_log(
+                "core", "warn",
+                "只能把相邻的两个项目设为并行：{0} 和 {1} 之间还隔着别的项目".format(pending, key),
+            )
+            self._parallel_pending = None
+            self._sync_parallel_state()
+            return
+
+        # 与已有组共享端点时合并成一组（A-B 之后再点 C，变成 A-B-C）
+        target = None
+        for block in self._parallel_blocks:
+            if pending in block or key in block:
+                target = block
+                break
+        if target is None:
+            self._parallel_blocks.append([pending, key])
+        else:
+            if pending not in target:
+                target.append(pending)
+            if key not in target:
+                target.append(key)
+            # 组内按卡片顺序排一次，连线才连相邻的
+            visible = self.visible_card_keys()
+            target.sort(key=lambda k: visible.index(k) if k in visible else 999)
+        self._parallel_pending = None
+        self._write_parallel_blocks(
+            log_text="并行：{0} 与 {1} 将同时运行".format(pending, key)
+        )
+        self._sync_parallel_state()
+
+    def _sync_parallel_state(self):
+        """把并行组的视觉状态刷到卡片与连线层上。"""
+        groups = self.parallel_groups()
+        member_of = {}
+        for block in groups:
+            for key in block:
+                member_of[key] = block
+        for key, card in (getattr(self, "cards", {}) or {}).items():
+            active = key in member_of
+            card.set_parallel(active, pending=(self._parallel_pending == key))
+        links = getattr(self, "links", None)
+        host = getattr(self, "cards_host", None)
+        if links is None or host is None:
+            return
+        links.setGeometry(host.rect())
+        widgets = []
+        for block in groups:
+            widgets.append([self.cards.get(k) for k in block])
+        active = []
+        if self._parallel_pending and self._parallel_pending in self.cards:
+            active = [self.cards[self._parallel_pending]]
+        links.set_groups(widgets, active=active)
+        links.raise_()
+
+    # -- 卡片拖动排序 ---------------------------------------------------------
+    def _on_card_drag_started(self, key):
+        self._drag_key = key
+        card = (getattr(self, "cards", {}) or {}).get(key)
+        if card is not None:
+            card.setWindowOpacity(0.75)
+            card.raise_()
+
+    def _on_card_drag_moved(self, key, global_pos):
+        """拖动中：按光标位置把这张卡插到最近的那张卡前面/后面。"""
+        host = getattr(self, "cards_host", None)
+        cards = getattr(self, "cards", {}) or {}
+        if host is None:
+            return
+        pos = host.mapFromGlobal(global_pos)
+        widgets = [w for w in host.ordered_widgets() if hasattr(w, "key")]
+        moving = cards.get(key)
+        if moving is None:
+            return
+        target_index = 0
+        for index, widget in enumerate(widgets):
+            if widget is moving:
+                continue
+            geo = widget.geometry()
+            # 落在卡片左半边就插到它前面，右半边插到它后面
+            if pos.x() < geo.center().x() or pos.y() < geo.top():
+                target_index = index
+                break
+            target_index = index + 1
+        current = host.index_of(moving)
+        if current != target_index:
+            host.flow().removeWidget(moving)
+            # removeWidget 之后序号可能变化，重新算一次插入点
+            widgets = [w for w in host.ordered_widgets() if hasattr(w, "key")]
+            insert_at = target_index
+            if current < target_index:
+                insert_at = max(0, target_index - 1)
+            host.insert_widget(min(insert_at, len(widgets)), moving)
+            host.sync_height(host.width())
+            self._sync_parallel_state()
+
+    def _on_card_drag_finished(self, key):
+        card = (getattr(self, "cards", {}) or {}).get(key)
+        if card is not None:
+            card.setWindowOpacity(1.0)
+        self._drag_key = None
+        keys = self.visible_card_keys()
+        # 拖动只改显示顺序时也要落盘：supervisor 的排程顺序就是 chain.order，
+        # 不写回去用户会觉得「拖了没生效」。
+        self._apply_card_order(keys)
+        self._save_chain_order(keys, log_text="运行顺序已更新：{0}".format(" → ".join(keys)))
 
 
     def _reload_project_colors(self):
@@ -819,6 +1248,58 @@ class MainWindow(QMainWindow):
             action.blockSignals(False)
         self._reload_project_colors()
         self._sync_settings_editor()
+        self._apply_theme(self._theme_name(), persist=False)
+
+    def _theme_name(self):
+        """当前主题名（settings.yaml 的 gui.theme，未知值回退默认）。"""
+        gui_cfg = self.settings.get("gui") or {}
+        return themes.normalize_theme(gui_cfg.get("theme"))
+
+    def _apply_theme(self, name, persist=True):
+        """换肤：重刷 QSS、重取按钮配色、重设背景底板与连线颜色。
+
+        控件颜色不是全部走 QSS：AnimatedButton 在 paintEvent 里自绘、卡片色条是
+        运行时写死的字符串，所以换主题必须把卡片重建一遍（apply_spec 只刷新文字
+        与色条，不动按钮 variant 快照）。其余情况（同一主题、只改背景图）不重建，
+        避免每次改设置都把卡片连同运行状态一起重来。
+        """
+        name = themes.normalize_theme(name)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, name)
+        background = getattr(self, "background", None)
+        gui_cfg = self.settings.get("gui") or {}
+        if background is not None:
+            background.set_fill(themes.resolve(name)["window"])
+            background.set_image(str(gui_cfg.get("background_image") or "").strip())
+            try:
+                opacity = int(gui_cfg.get("background_opacity", 100))
+            except (TypeError, ValueError):
+                opacity = 100
+            background.set_opacity(opacity)
+        nav = getattr(self, "nav", None)
+        if nav is not None and hasattr(nav, "set_icon_color"):
+            nav.set_icon_color(themes.resolve(name)["nav_text"])
+        links = getattr(self, "links", None)
+        if links is not None:
+            links.set_color(links_color())
+        changed = getattr(self, "_applied_theme", None) != name
+        self._applied_theme = name
+        if changed:
+            # 卡片里的按钮是 AnimatedButton（自绘），换肤后重建才能拿到新配色。
+            self._rebuild_cards()
+        else:
+            self._sync_parallel_state()
+
+    def _on_theme_changed(self, name):
+        """设置页切换主题：立刻换肤（settings 已由设置页写盘并 emit changed）。"""
+        self.settings = config.settings()
+        self._apply_theme(name)
+
+    def _on_project_added(self, key):
+        """设置页新增了挂机项目：重读注册表，让新卡片出现。"""
+        self._reload_registry()
+        self._append_log("core", "info", "已新增项目 {0}".format(key))
 
     def _open_silent_pages(self, keys):
         """启动时按设置打开（不嵌入、不隐藏）勾选项目的界面窗口。"""
@@ -994,6 +1475,45 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 
+    def _make_card(self, key, spec):
+        """建一张项目卡并接好所有信号（三处建卡路径共用，避免参数漏传）。"""
+        card = ProjectCard(
+            key, spec, self._project_color(key),
+            self.start_project, self.stop_project, self.show_project_logs,
+            on_gui=self.open_project_page if spec.get("gui") else None,
+            on_parallel=self.toggle_parallel,
+            on_remove=self.hide_card,
+        )
+        card.drag_started.connect(self._on_card_drag_started)
+        card.drag_moved.connect(self._on_card_drag_moved)
+        card.drag_finished.connect(self._on_card_drag_finished)
+        return card
+
+    def _rebuild_cards(self):
+        """按当前注册表 + chain.order + 隐藏列表整体重建卡片区。
+
+        为什么整体重建：卡片里的 AnimatedButton 是在 paintEvent 里自绘的，配色
+        是构造时抓的快照（themes.BUTTONS），换主题后不重建就还是旧色。注册表变更
+        与「恢复隐藏卡片」也走这条路，避免维护三份增量同步逻辑。
+        """
+        host = getattr(self, "cards_host", None)
+        if host is None:
+            return
+        flow = host.flow()
+        for card in (getattr(self, "cards", {}) or {}).values():
+            flow.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+        self.cards = {}
+        for key, spec in self._ordered_project_items():
+            if key in self._hidden_projects:
+                continue
+            card = self._make_card(key, spec)
+            self.cards[key] = card
+            flow.addWidget(card)
+        self._sync_parallel_state()
+        self._sync_cards_height()
+
     def _reload_registry(self):
         """「项目注册表」保存后让界面跟上新注册表。
 
@@ -1001,7 +1521,7 @@ class MainWindow(QMainWindow):
         supervisor、设置页全都还在用开窗时读到的那一份——用户新增的项目不出现
         在总览页和左侧导航、删掉的项目卡片还在、改过的显示名/启用状态不生效。
         重新读盘后按差异同步两处：项目卡、设置页（含运行顺序）。左侧导航只有
-        「总览」「设置」两项，不再随注册表增删。
+        「总览」「项目状态」「设置」三项，不再随注册表增删。
         """
         registry = config.registry()
         projects = registry.get("projects", {}) or {}
@@ -1020,13 +1540,9 @@ class MainWindow(QMainWindow):
                     self.open_project_page if spec.get("gui") else None,
                 )
                 continue
-            if flow is None:
+            if flow is None or key in self._hidden_projects:
                 continue
-            card = ProjectCard(
-                key, spec, self._project_color(key),
-                self.start_project, self.stop_project, self.show_project_logs,
-                on_gui=self.open_project_page if spec.get("gui") else None,
-            )
+            card = self._make_card(key, spec)
             cards[key] = card
             flow.addWidget(card)
         for key in [k for k in cards if k not in projects]:
@@ -1035,6 +1551,8 @@ class MainWindow(QMainWindow):
                 flow.removeWidget(card)
             card.setParent(None)
             card.deleteLater()
+        # 卡片顺序要跟 chain.order（用户拖动改的顺序）一致，并把并行连线重画
+        self._apply_card_order(self.visible_card_keys())
         # -- 2. 日志过滤器、设置页、副标题 -----------------------------------
         combo = getattr(self, "filter_combo", None)
         if combo is not None:
@@ -1887,6 +2405,11 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        # 背景底板不在布局里（在 central 里 lower 到底层），尺寸得手动跟
+        central = self.centralWidget()
+        background = getattr(self, "background", None)
+        if central is not None and background is not None:
+            background.setGeometry(central.rect())
         self._sync_cards_height()
         self._on_window_resized()
 
@@ -2101,8 +2624,12 @@ def _force_show(window):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_QSS)
-    apply_palette(app)
+    # 主题在开窗前就要生效：MainWindow 的卡片、按钮、背景底板都是按当前主题
+    # 取色构造的，先建窗口再换肤会有一帧旧配色（且 AnimatedButton 的快照已定）。
+    _startup_theme = themes.normalize_theme(
+        (config.settings().get("gui") or {}).get("theme")
+    )
+    apply_theme(app, _startup_theme)
     app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
     if window.start_in_tray:

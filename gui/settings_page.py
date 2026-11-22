@@ -1,15 +1,18 @@
-"""设置页：静默启动 / 运行顺序 / 运行结束后操作 / 空闲自动挂机 / 开机自启 / 桌面小组件。
+"""设置页：外观 / 隐藏项目 / 新增项目 / 静默启动 / 运行顺序 / 运行结束后操作 / 空闲自动挂机 / 开机自启 / 桌面小组件。
 
 所有修改即时写回 settings.yaml 并通过 changed 信号通知（刷新 supervisor.settings）。
+外观里的主题切换额外通过 theme_changed 通知主窗口立刻换肤。
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QScrollArea,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from afk_core import autostart, config
+from gui import themes
 from gui.modern import AnimatedButton, enable_smooth_scroll
 
 POST_ACTION_LABELS = [
@@ -55,6 +59,12 @@ class _SectionCard(QFrame):
 
 class SettingsPage(QWidget):
     changed = Signal()
+    # 主题切换要立刻重刷整套 QSS + 重建卡片配色，主窗口接这个信号
+    theme_changed = Signal(str)
+    # 「已隐藏的项目」里点了恢复：主窗口负责把卡片放回来
+    restore_requested = Signal(str)
+    # 新增挂机项目成功后通知主窗口重读注册表
+    project_added = Signal(str)
 
     def __init__(self, log_fn=None, registry=None, parent=None):
         super().__init__(parent)
@@ -85,6 +95,105 @@ class SettingsPage(QWidget):
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(4, 2, 8, 8)
         layout.setSpacing(10)
+
+        # -- 0. 外观（主题 / 背景图）--------------------------------------------
+        self.appearance_card = _SectionCard(
+            "外观",
+            "主题决定整套界面配色；背景图只作用在主窗口底板上，项目卡与日志面板保持不透明，避免文字压在图上看不清。",
+        )
+        theme_row = QHBoxLayout()
+        theme_row.setSpacing(8)
+        theme_cap = QLabel("主题")
+        theme_cap.setObjectName("hintLabel")
+        theme_row.addWidget(theme_cap)
+        self.theme_combo = QComboBox()
+        for name in ("dark", "light"):
+            self.theme_combo.addItem(themes.THEME_LABELS.get(name, name), name)
+        self.theme_combo.currentIndexChanged.connect(self._save_appearance)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch(1)
+        self.appearance_card.body.addLayout(theme_row)
+
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(8)
+        bg_cap = QLabel("背景图")
+        bg_cap.setObjectName("hintLabel")
+        bg_row.addWidget(bg_cap)
+        self.bg_edit = QLineEdit()
+        self.bg_edit.setPlaceholderText("留空表示不用背景图（可填相对仓库根的路径）")
+        self.bg_edit.editingFinished.connect(self._save_appearance)
+        bg_row.addWidget(self.bg_edit, 1)
+        bg_pick = AnimatedButton("选择…", variant="mini")
+        bg_pick.clicked.connect(self._pick_background)
+        bg_row.addWidget(bg_pick)
+        bg_clear = AnimatedButton("清除", variant="mini")
+        bg_clear.clicked.connect(self._clear_background)
+        bg_row.addWidget(bg_clear)
+        self.appearance_card.body.addLayout(bg_row)
+
+        op_row = QHBoxLayout()
+        op_row.setSpacing(8)
+        op_cap = QLabel("背景不透明度")
+        op_cap.setObjectName("hintLabel")
+        op_row.addWidget(op_cap)
+        self.bg_opacity = QSpinBox()
+        self.bg_opacity.setRange(0, 100)
+        self.bg_opacity.setSuffix(" %")
+        self.bg_opacity.setValue(100)
+        self.bg_opacity.valueChanged.connect(
+            lambda _v: self._queue_save("gui.background_opacity", self._save_appearance)
+        )
+        op_row.addWidget(self.bg_opacity)
+        op_row.addStretch(1)
+        self.appearance_card.body.addLayout(op_row)
+        layout.addWidget(self.appearance_card)
+
+        # -- 0.1 已隐藏的项目 ----------------------------------------------------
+        self.hidden_card = _SectionCard(
+            "已隐藏的项目",
+            "在总览的卡片上点 × 会把项目收起来（只在总览里不显示，注册表里仍然保留）。这里把它们放回总览。",
+        )
+        self._hidden_empty_hint = QLabel("（没有被隐藏的项目）")
+        self._hidden_empty_hint.setObjectName("hintLabel")
+        self.hidden_checks = {}
+        layout.addWidget(self.hidden_card)
+
+        # -- 0.2 新增挂机项目 ----------------------------------------------------
+        self.add_card = _SectionCard(
+            "新增挂机项目",
+            "直接把项目写进 afk_projects.yaml 的 projects 里，字段可以随后在「项目注册表」里细调。"
+            "同一个项目要跑第二份配置时，把「继承自」填成已有项目的键即可（它的参数全部继承，只需改配置文件）。",
+        )
+        add_grid = QHBoxLayout()
+        add_grid.setSpacing(8)
+        self.add_key_edit = QLineEdit()
+        self.add_key_edit.setPlaceholderText("项目键（唯一，如 BAAH2）")
+        add_grid.addWidget(self.add_key_edit, 1)
+        self.add_name_edit = QLineEdit()
+        self.add_name_edit.setPlaceholderText("显示名（可留空）")
+        add_grid.addWidget(self.add_name_edit, 1)
+        self.add_card.body.addLayout(add_grid)
+        add_grid2 = QHBoxLayout()
+        add_grid2.setSpacing(8)
+        self.add_base_combo = QComboBox()
+        self.add_base_combo.addItem("不继承（手填下面这些）", "")
+        add_grid2.addWidget(self.add_base_combo, 1)
+        self.add_path_edit = QLineEdit()
+        self.add_path_edit.setPlaceholderText("项目目录（相对仓库根，如 BAAH2）")
+        add_grid2.addWidget(self.add_path_edit, 1)
+        self.add_config_edit = QLineEdit()
+        self.add_config_edit.setPlaceholderText("配置文件（可选，如 config.json）")
+        add_grid2.addWidget(self.add_config_edit, 1)
+        self.add_card.body.addLayout(add_grid2)
+        add_actions = QHBoxLayout()
+        add_actions.setSpacing(8)
+        self.add_btn = AnimatedButton("新增项目", variant="primary")
+        self.add_btn.setObjectName("primary")
+        self.add_btn.clicked.connect(self._add_project)
+        add_actions.addWidget(self.add_btn)
+        add_actions.addStretch(1)
+        self.add_card.body.addLayout(add_actions)
+        layout.addWidget(self.add_card)
 
         # -- 1. 启动时自动打开项目界面 -----------------------------------------
         self.silent_card = _SectionCard(
@@ -253,7 +362,172 @@ class SettingsPage(QWidget):
         self._refresh_idle_hint()
         self._refresh_autostart_hint()
         self._refresh_completion_label()
+        self._build_hidden_checks()
+        self._build_base_combo()
+        self._load_appearance()
         self._loading = False
+
+    # -- 外观 ------------------------------------------------------------------
+    def _load_appearance(self):
+        """把 gui.theme / gui.background_image / gui.background_opacity 读进控件。"""
+        gui_cfg = config.settings().get("gui") or {}
+        theme = themes.normalize_theme(gui_cfg.get("theme"))
+        idx = self.theme_combo.findData(theme)
+        if idx < 0:
+            idx = self.theme_combo.findData(themes.DEFAULT_THEME)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.setCurrentIndex(max(0, idx))
+        self.theme_combo.blockSignals(False)
+        self.bg_edit.setText(str(gui_cfg.get("background_image") or ""))
+        try:
+            opacity = int(gui_cfg.get("background_opacity", 100))
+        except (TypeError, ValueError):
+            opacity = 100
+        self.bg_opacity.blockSignals(True)
+        self.bg_opacity.setValue(max(0, min(100, opacity)))
+        self.bg_opacity.blockSignals(False)
+
+    def _save_appearance(self, *_):
+        if self._loading:
+            return
+        theme = str(self.theme_combo.currentData() or themes.DEFAULT_THEME)
+        image = self.bg_edit.text().strip()
+        opacity = int(self.bg_opacity.value())
+
+        def mutate(settings):
+            gui_cfg = settings.setdefault("gui", {})
+            if not isinstance(gui_cfg, dict):
+                gui_cfg = {}
+                settings["gui"] = gui_cfg
+            gui_cfg["theme"] = theme
+            gui_cfg["background_image"] = image
+            gui_cfg["background_opacity"] = opacity
+
+        self._mutate_settings(mutate)
+        self.theme_changed.emit(theme)
+        self.changed.emit()
+        self._log(
+            "core", "info",
+            "外观已保存：主题 {0}，背景图 {1}（不透明度 {2}%）".format(
+                themes.THEME_LABELS.get(theme, theme), image or "无", opacity
+            ),
+        )
+
+    def _pick_background(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择背景图", str(config.ROOT), "图片 (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if not path:
+            return
+        self.bg_edit.setText(path)
+        self._save_appearance()
+
+    def _clear_background(self):
+        self.bg_edit.setText("")
+        self._save_appearance()
+
+    # -- 已隐藏的项目 ----------------------------------------------------------
+    def _hidden_project_keys(self):
+        projects = config.registry().get("projects", {}) or {}
+        keys = []
+        for key in ((config.settings().get("gui") or {}).get("hidden_projects") or []):
+            if str(key) in projects:
+                keys.append(str(key))
+        return keys
+
+    def _build_hidden_checks(self):
+        """按当前隐藏列表重建「恢复」行（注册表里已删掉的项目不再列）。"""
+        projects = config.registry().get("projects", {}) or {}
+        body = self.hidden_card.body
+        for row in getattr(self, "_hidden_rows", []):
+            row.setParent(None)
+            row.deleteLater()
+        self._hidden_rows = []
+        body.removeWidget(self._hidden_empty_hint)
+        keys = self._hidden_project_keys()
+        for key in keys:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            spec = projects.get(key) or {}
+            label = QLabel(str(spec.get("display_name", key)).split("（")[0])
+            label.setObjectName("cardDetail")
+            row.addWidget(label, 1)
+            btn = AnimatedButton("放回总览", variant="mini")
+            btn.clicked.connect(lambda _=False, k=key: self.restore_requested.emit(k))
+            row.addWidget(btn)
+            self._hidden_rows.append(row_widget)
+            body.addWidget(row_widget)
+        if not keys:
+            self._hidden_empty_hint.setText("（没有被隐藏的项目）")
+        self._hidden_empty_hint.setVisible(not keys)
+        body.addWidget(self._hidden_empty_hint)
+
+    # -- 新增项目 --------------------------------------------------------------
+    def _build_base_combo(self):
+        """「继承自」下拉：列出当前注册表里已有的项目键。"""
+        current = self.add_base_combo.currentData() or ""
+        projects = config.registry().get("projects", {}) or {}
+        self.add_base_combo.blockSignals(True)
+        self.add_base_combo.clear()
+        self.add_base_combo.addItem("不继承（手填下面这些）", "")
+        for key, spec in projects.items():
+            name = str((spec or {}).get("display_name", key)).split("（")[0]
+            self.add_base_combo.addItem("{0}（{1}）".format(name, key), key)
+        idx = self.add_base_combo.findData(current)
+        self.add_base_combo.setCurrentIndex(max(0, idx))
+        self.add_base_combo.blockSignals(False)
+
+    def _add_project(self):
+        key = self.add_key_edit.text().strip()
+        if not key:
+            self._log("core", "warn", "新增项目失败：项目键不能为空")
+            return
+        base = str(self.add_base_combo.currentData() or "")
+        name = self.add_name_edit.text().strip()
+        path = self.add_path_edit.text().strip()
+        config_name = self.add_config_edit.text().strip()
+        if not base and not path:
+            self._log("core", "warn", "新增项目失败：不继承已有项目时必须填目录")
+            return
+        try:
+            data = config.load_yaml(config.PROJECTS_YAML, {}) or {}
+        except Exception as exc:
+            self._log("core", "error", "读取项目注册表失败: {0}".format(exc))
+            return
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            self._log("core", "error", "项目注册表格式不对：projects 不是映射")
+            return
+        if key in projects:
+            self._log("core", "warn", "新增项目失败：{0} 已存在".format(key))
+            return
+        spec = {}
+        if base:
+            spec["base"] = base
+        if path:
+            spec["path"] = path
+        if config_name:
+            spec["config_name"] = config_name
+        if name:
+            spec["display_name"] = name
+        if not base:
+            # 不继承时必须自己给足启动所需的最小字段，否则 supervisor 起来也跑不动。
+            spec.setdefault("launch_type", "python")
+            spec.setdefault("python", ".venv\\Scripts\\python.exe")
+        projects[key] = spec
+        try:
+            config.save_yaml(config.PROJECTS_YAML, data)
+        except Exception as exc:
+            self._log("core", "error", "写入项目注册表失败: {0}".format(exc))
+            return
+        self.add_key_edit.clear()
+        self.add_name_edit.clear()
+        self.add_path_edit.clear()
+        self.add_config_edit.clear()
+        self._log("core", "info", "已新增项目 {0}（可在「项目注册表」里继续细调）".format(key))
+        self.project_added.emit(key)
 
     # -- 数据 ------------------------------------------------------------------
     def _projects_with_gui(self):
@@ -536,6 +810,9 @@ class SettingsPage(QWidget):
             self._refresh_idle_hint()
             self._refresh_autostart_hint()
             self._refresh_completion_label()
+            self._load_appearance()
+            self._build_hidden_checks()
+            self._build_base_combo()
         finally:
             self._loading = False
 

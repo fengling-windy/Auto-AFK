@@ -13,6 +13,9 @@ configsync:
   source_root: E:/GameAFK
 chain:
   order: []
+  # 需要同时运行的项目组，形如 [[A, B], [C, D]]。只有相邻的两个项目能配成一组
+  # （总览里卡片上的「并行」按钮各点一次即可生成），链式调度时同组项目一起启动。
+  parallel_blocks: []
   continue_on_failure: true
   retry_failed_at_end: true
   max_attempts_per_project: 3
@@ -61,6 +64,10 @@ gui:
   # 上次退出时的窗口尺寸 [宽, 高]，程序自己写回；空表示用屏幕自适应默认值。
   window_size: []
   widget_pos: []
+  # 外观：主题 dark / light；背景图可填相对仓库根的路径，留空表示不用。
+  theme: dark
+  background_image: ''
+  background_opacity: 100
   project_colors:
     March7thAssistant: '#4fc3f7'
     BAAH: '#81c784'
@@ -70,6 +77,8 @@ gui:
     core: '#ce93d8'
     emulator: '#4db6ac'
     update: '#90a4ae'
+  # 总览里被「×」收起的项目（注册表里仍然保留，可在设置页放回）。
+  hidden_projects: []
 schedule:
   enabled: false
   time: 04:00

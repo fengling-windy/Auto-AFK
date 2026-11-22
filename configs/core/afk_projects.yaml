@@ -29,6 +29,8 @@ reserved:
 projects:
   March7thAssistant:
     display_name: 三月七小助手（崩坏：星穹铁道 / 云游戏）
+    repo: moesnow/March7thAssistant
+    version: v2026.11.20-2-gd7915805
     enabled: true
     launch_type: python
     path: March7thAssistant
@@ -71,6 +73,8 @@ projects:
 
   BAAH:
     display_name: BAAH（蔚蓝档案 / MuMu 模拟器 ADB）
+    repo: BlueArchiveArisHelper/BAAH
+    version: BAAH2.5.13
     enabled: true
     launch_type: python
     path: BAAH
@@ -121,6 +125,8 @@ projects:
 
   MaaEnd:
     display_name: MaaEnd（明日方舟：终末地 / 独占前台）
+    repo: MaaEnd/MaaEnd
+    version: v3.3.0-beta.1-6-g9e260d506
     enabled: true
     launch_type: exe
     path: MaaEnd
@@ -189,6 +195,8 @@ projects:
 
   ZenlessZoneZero-OneDragon:
     display_name: 绝区零一条龙（PC 客户端）
+    repo: OneDragon-Anything/ZenlessZoneZero-OneDragon
+    version: v2.6.1-11-g1d57ea8d
     enabled: true
     launch_type: python
     path: E:\GameAFK\ZenlessZoneZero-OneDragon
@@ -227,6 +235,8 @@ projects:
         timeout_sec: 1800
   BetterGI:
     display_name: BetterGI（原神 / 更好的原神）
+    repo: babalae/better-genshin-impact
+    version: 0.66.0-106-gf24ea3e
     enabled: true
     launch_type: exe
     path: BetterGI
