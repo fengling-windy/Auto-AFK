@@ -170,7 +170,6 @@ class SettingsPage(QWidget):
         )
         self._hidden_empty_hint = QLabel("（没有被隐藏的项目）")
         self._hidden_empty_hint.setObjectName("hintLabel")
-        self.hidden_checks = {}
         layout.addWidget(self.hidden_card)
 
         # -- 0.2 新增挂机项目 ----------------------------------------------------

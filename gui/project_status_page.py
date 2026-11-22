@@ -59,8 +59,6 @@ KEY_LABELS = {
     "description": "说明",
 }
 
-BOOL_KEYS = {"require_admin", "require_finish", "enabled"}
-
 
 def read_version(project_dir):
     """读子项目的 git 版本号（describe 优先，退化到短 hash）。
