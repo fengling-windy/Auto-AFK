@@ -1211,6 +1211,25 @@ def test_main_window(app):
             check("放回来的卡片回到原来的位置（{0}）".format(window.visible_card_keys()),
                   window.visible_card_keys() == _pos_before)
 
+        # 收起一张「正在运行」的卡片要给出警告：× 只会把它从总览隐藏，进程不会停。
+        # 历史缺陷：日志一律写「已从总览移除 X（设置页可恢复）」，用户以为点了 ×
+        # 等于停掉，实际上进程、窗口、占用的模拟器都还在。
+        if len(_pos_before) >= 3:
+            from afk_core.supervisor import ProjectRun
+
+            _running = _pos_before[2]
+            _run = ProjectRun(_running, {"display_name": _running})
+            _run.status = "running"
+            window.supervisor.runs[_running] = _run
+            window.hide_card(_running)
+            pump(app, 200)
+            _hide_lines = [ln for ln in window.log_view.toPlainText().splitlines() if _running in ln]
+            check("收起正在运行的项目时警告「仍在运行」（{0}）".format(_hide_lines[-1:]),
+                  any("仍在运行" in ln for ln in _hide_lines))
+            window.restore_card(_running)
+            window.supervisor.runs.pop(_running, None)
+            pump(app, 200)
+
         # 注册表里删掉某个项目时，界面不能因为 QStackedWidget 移除页面而乱翻页。
         # 历史缺陷（嵌入页时代）：移除当前页会自己切到相邻下标，用户看到的是另一
         # 个项目。现在只有总览/设置两页，删项目后必须仍在原来那一页上。

@@ -1002,7 +1002,18 @@ class MainWindow(QMainWindow):
         page = getattr(self, "settings_page", None)
         if page is not None:
             page.reload_from_disk()
-        self._append_log("core", "info", "已从总览移除 {0}（设置页可恢复）".format(key))
+        # 卡片上的 × 只是「从总览收起」，不会停掉正在跑的项目。历史缺陷：日志
+        # 一律写「已从总览移除 X（设置页可恢复）」，用户以为点了 × 就等于停掉，
+        # 实际上进程、窗口、占用的模拟器都还在——等它跑到卡死也没人知道去哪停。
+        run = (getattr(self, "supervisor", None) and self.supervisor.runs.get(key)) or None
+        if run is not None and not run.terminal:
+            self._append_log(
+                "core", "warn",
+                "{0} 仍在运行，只是从总览收起了；要停止请先在「设置 → 已隐藏的项目」"
+                "把它放回总览再点「停止」".format(key),
+            )
+        else:
+            self._append_log("core", "info", "已从总览移除 {0}（设置页可恢复）".format(key))
 
     def restore_card(self, key):
         """把隐藏的项目放回总览（设置页「已隐藏的项目」用）。"""
