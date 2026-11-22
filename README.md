@@ -69,11 +69,11 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
     `chain.order`（「一键挂机」按这个顺序启动；未列出的项目按注册表原顺序垫底）。
   - **卡片上的「×」把项目收进设置页**：只从总览里隐藏，注册表里仍然保留；在「设置 → 已隐藏的项目」
     点「放回总览」即可恢复（`gui.hidden_projects`）。
-  - **相邻卡片可设为并行**：两张紧挨着的卡片各点一次「并行」按钮，卡片之间会画出连线，
-    「一键挂机」时它们同时启动（写入 `chain.parallel_blocks`）。只能两两相邻配对，
-    中间隔着别的项目时会被拒绝并提示；三张以上同理，相邻两两相连即可。
+  - **相邻卡片可设为并行**：点一张卡的「并行」，再点紧挨着它的另一张，卡片之间会画出连线，
+    「一键挂机」时它们同时启动（写入 `chain.parallel_blocks`）。中间隔着别的项目时会被拒绝并提示。
+    三张以上同理：已经有 A-B 一组时，点第三张 C、再点组边的 B，就并成 A-B-C（可以继续加到四张）。
     把其中一张拖到别处（不再相邻）后这一组自动作废：连线消失、按钮回到「并行」，
-    配置里那一对也会被清掉并记一条「并行组已取消」——避免界面说同时跑、实际顺序跑。
+    配置里那一组也会被清掉并记一条「并行组已取消」——避免界面说同时跑、实际顺序跑。
   - **项目状态页**：逐个项目列出启动方式、目录、解释器/可执行文件、配置文件、重试与卡死超时、
     来源仓库（可一键打开 GitHub）与当前版本（读子项目目录的 `git describe`，没有 `.git` 时显示「未知」）。
   - **主题与背景**：「设置 → 外观」可切换深色/浅色主题、指定一张背景图与不透明度
@@ -118,10 +118,11 @@ powershell -ExecutionPolicy Bypass -File 50_verify.ps1          # 导入配置 +
 → `zzz_one_dragon`（绝区零一条龙，MaaEnd 之后独占前台）。
 组内 `parallel: false` 时成员按顺序串行执行（前一个结束后才启动下一个），`true` 时并行启动并等待全部完成。
 
-**总览卡片上临时改并行**：不想动注册表时，在两张相邻卡片上各点一次「并行」按钮，
-它们会被记进 `configs\core\settings.yaml` 的 `chain.parallel_blocks`（形如 `[[A, B], [C, D]]`），
+**总览卡片上临时改并行**：不想动注册表时，点一张卡的「并行」再点紧挨着的另一张，
+它们会被记进 `configs\core\settings.yaml` 的 `chain.parallel_blocks`（形如 `[[A, B], [C, D, E]]`），
 「一键挂机」时同组项目一起启动、卡片之间会画出连线。只能相邻配对：中间隔着别的项目、
-某个项目不在这次运行里、或已经属于另一组时，整组会被忽略并给出告警，回退成各跑各的。
+某个项目不在这次运行里、或想借合并把某个已经并行的组员甩掉时，整组会被忽略并给出告警，回退成各跑各的。
+已有 A-B 一组时点 C 再点组边的 B 就并成 A-B-C（可继续加到四张），不必先解散再重配。
 这个键与 `groups` 里的 `parallel` 互不冲突——它只是在本轮链里额外把若干步合并成一步。
 组内任一项目失败/卡死**默认不中断整条链**：该项目被跳过，后续组照常执行；等所有组跑完一轮后，
 在末尾自动重跑本轮失败的项目（`chain.retry_failed_at_end`，默认 `true`）；
@@ -394,6 +395,7 @@ $env:QT_QPA_PLATFORM="offscreen"; $env:QT_QPA_FONTDIR="C:\Windows\Fonts"
 ```powershell
 & .venv\Scripts\python.exe tests\smoke_supervisor.py      # Supervisor 基础编排
 & .venv\Scripts\python.exe tests\smoke_chain.py           # 并行组 + 独占组的分组编排
+& .venv\Scripts\python.exe tests\smoke_parallel_merge.py # 总览点出的并行块如何变成一步（含三张以上）
 & .venv\Scripts\python.exe tests\smoke_sequential.py      # 组内串行执行顺序
 & .venv\Scripts\python.exe tests\smoke_startup_update.py  # 启动时更新项目 + 链跳过重复更新
 & .venv\Scripts\python.exe tests\smoke_cleanup.py         # 进程清理
