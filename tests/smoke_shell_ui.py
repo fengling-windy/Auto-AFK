@@ -1906,6 +1906,60 @@ def test_main_window(app):
             window.show()
             pump(app, 60)
 
+        # 两个「判不出来就放行」的判断必须留痕：
+        # 历史缺陷是静默 return False，现象分别是「挂机跑着突然弹出空闲提示」
+        # 和「开关明明开着却还是重复挂了一遍」，日志里查不到任何线索。
+        import logging
+
+        _records = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                _records.append(record)
+
+        _logger = logging.getLogger("afk.gui")
+        _handler = _Collect()
+        _old_level = _logger.level
+        _real_chain_running2 = window.supervisor.chain_running
+        _logger.addHandler(_handler)
+        _logger.setLevel(logging.WARNING)
+        try:
+            def _boom():
+                raise RuntimeError("supervisor down")
+
+            window.supervisor.chain_running = _boom
+            check("链是否在跑判断失败时按不忙放行", window._chain_is_busy() is False)
+            check(
+                "链是否在跑判断失败会写 warning",
+                any("check chain busy failed" in r.getMessage() for r in _records),
+            )
+            window.supervisor.chain_running = _real_chain_running2
+
+            _records.clear()
+            _real_settings = window.settings
+            window.settings = {}  # 缺 idle 节：走默认「跳过已完成」
+            _real_cached = None
+            try:
+                from afk_core import completion as _completion
+
+                _real_cached = _completion.completed_today_cached
+                _completion.completed_today_cached = _boom
+                check("今日完成判断失败时按未完成放行", window._is_done_today() is False)
+                check(
+                    "今日完成判断失败会写 warning",
+                    any("check done today failed" in r.getMessage() for r in _records),
+                )
+            finally:
+                if _real_cached is not None:
+                    from afk_core import completion as _completion2
+
+                    _completion2.completed_today_cached = _real_cached
+                window.settings = _real_settings
+        finally:
+            _logger.removeHandler(_handler)
+            _logger.setLevel(_old_level)
+            window.supervisor.chain_running = _real_chain_running
+
         # exit 后动作事件 → 调度退出
         bus_event = {"project": "core", "kind": "post_action", "level": "info", "message": "post action executed: exit", "data": {"action": "exit"}}
         window.bus.emit(bus_event)

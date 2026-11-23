@@ -2519,10 +2519,16 @@ class MainWindow(QMainWindow):
                 button.setEnabled(True)
 
     def _chain_is_busy(self):
-        """链或任一项目正在跑时，空闲检测不弹提示框。"""
+        """链或任一项目正在跑时，空闲检测不弹提示框。
+
+        失败时按「不忙」放行是有意的：宁可多弹一次提示，也不能因为一次异常
+        就永远不提醒。但必须留痕——否则「挂机跑着突然弹出空闲提示」这种最
+        让人费解的现象，日志里一个字都没有。
+        """
         try:
             return bool(self.supervisor.chain_running())
-        except Exception:
+        except Exception as exc:
+            logging.getLogger("afk.gui").warning("check chain busy failed: %s", exc)
             return False
 
     def _idle_status_cached(self):
@@ -2574,7 +2580,11 @@ class MainWindow(QMainWindow):
             from afk_core import completion
 
             return bool(completion.completed_today_cached())
-        except Exception:
+        except Exception as exc:
+            # 判不出来时按「今天还没完成」放行（宁可多跑一轮，也不要让用户以为
+            # 自动挂机坏了），但要留痕：这条静默的话，现象是「开关明明开着，
+            # 却还是重复挂了一遍」，没有任何线索可查。
+            logging.getLogger("afk.gui").warning("check done today failed: %s", exc)
             return False
 
     def _build_widget(self):
