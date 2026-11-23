@@ -98,6 +98,18 @@ BUSY_STATUSES = ("pending", "running", "hang")
 # 「够翻回去看」与「不卡」的折中。更早的记录仍在 event_buffer 与 events.jsonl。
 LOG_RERENDER_LIMIT = 2000
 
+# 每轮轮询最多取多少条事件、花多少毫秒在上面。历史缺陷：上限写死 500 条，
+# 而 300ms 一轮只能消化 1667 条/秒——2026-11-11 MaaEnd 刷屏时实测峰值
+# 14901 条/秒（`events.jsonl` 按秒统计），订阅队列（上限 5000）几秒就被灌满，
+# 之后的新事件直接被丢弃：界面上看到的是几分钟前的日志，用户以为程序卡死。
+# 改成「按时间预算收干」，洪峰时也不至于让 _poll 独占 GUI 主线程。
+LOG_DRAIN_LIMIT = 4000
+LOG_DRAIN_BUDGET_MS = 25.0
+# 一轮最多往日志区画多少行。逐条 appendHtml 实测 0.05ms × 行数，批量拼一次
+# "<br>".join 后 500 行约 29ms；洪峰期间只保留最近的若干行，其余仍在
+# event_buffer 与 events.jsonl 里（切过滤器时能看到），并写一行提示说明跳过了多少。
+LOG_RENDER_BATCH_LIMIT = 400
+
 # 没有 pid/exit/message 可显示时的详情行文案。必须按状态给，不能统一写
 # 「运行中…」，否则排队中的卡片会显示成「等待 / 运行中...」自相矛盾。
 STATUS_DETAIL_FALLBACK = {
@@ -628,6 +640,9 @@ class MainWindow(QMainWindow):
         self._last_chain_for_completion = None
         self._last_done_today = None
         self.event_buffer = deque(maxlen=5000)
+        # 洪峰期间是否有日志被跳过不画（累积条数 + 上次提示时间，用于节流）
+        self._skipped_since_notice = 0
+        self._skip_notice_at = 0.0
         self._build_ui()
         self._build_tray()
 
@@ -2109,11 +2124,8 @@ class MainWindow(QMainWindow):
         bar = self.log_view.verticalScrollBar()
         bar.setValue(bar.maximum())
 
-    def _append_log(self, project, level, message, autoscroll=True, emit_event=True):
-        # 先记下「追加之前」是不是在底部：一旦 appendHtml 把内容顶上去，
-        # maximum 就变了，那时再判断永远为假。
-        follow = self._log_at_bottom() if autoscroll else False
-        ts = time.strftime("%H:%M:%S")
+    def _log_html(self, project, level, message, ts=None):
+        """拼一行日志的富文本（颜色按主题、内容转义）。"""
         project_color = self._project_color(project)
         # 级别色同样按主题取：浅色底上 #fbbf24 的警告色几乎看不见。
         level_colors = _theme_level_colors()
@@ -2123,10 +2135,38 @@ class MainWindow(QMainWindow):
             message_color = level_colors["warn"]
         else:
             message_color = project_color
-        html = '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
-            project_color, ts, _escape_html(str(project)), message_color, _escape_html(str(message))
+        return '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
+            project_color,
+            ts or time.strftime("%H:%M:%S"),
+            _escape_html(str(project)),
+            message_color,
+            _escape_html(str(message)),
         )
-        self.log_view.appendHtml(html)
+
+    def _append_log_html(self, lines):
+        """一次把多行拼进日志区。
+
+        逐条 appendHtml 每行约 0.05ms 且各触发一次重排；实测 400 行逐条 ≈19ms。
+        拼成一次更快，但要按段落拼而不是 `<br>`：`<br>` 只产生 1 个文本块，
+        `setMaximumBlockCount(8000)` 就失去意义（整段历史算一行，永远不截断），
+        `toPlainText()` 也没有换行。用 `<p style="margin:0">` 连接实测 400 行
+        10.8ms、块数正好 400，比 `<br>` 的 23.2ms 还快。
+        """
+        lines = [line for line in lines if line]
+        if not lines:
+            return
+        if len(lines) == 1:
+            self.log_view.appendHtml(lines[0])
+            return
+        self.log_view.appendHtml(
+            '<p style="margin:0">' + '</p><p style="margin:0">'.join(lines) + "</p>"
+        )
+
+    def _append_log(self, project, level, message, autoscroll=True, emit_event=True):
+        # 先记下「追加之前」是不是在底部：一旦 appendHtml 把内容顶上去，
+        # maximum 就变了，那时再判断永远为假。
+        follow = self._log_at_bottom() if autoscroll else False
+        self.log_view.appendHtml(self._log_html(project, level, message))
         # 历史缺陷：只要勾着「自动滚动」，每来一行都强制拉到底。用户往上翻着
         # 看历史（或正在复制一段报错）时，链还在跑、日志还在刷，视图被不断
         # 拽回底部，那段历史根本读不了。现在只在「追加前本来就在底部」时才
@@ -2183,9 +2223,18 @@ class MainWindow(QMainWindow):
                     _theme_level_colors()["warn"], dropped, len(shown)
                 )
             )
-        for event in shown:
-            self._append_log(event.get("project", "core"), event.get("level", "info"),
-                             event.get("message", ""), autoscroll=False, emit_event=False)
+        # 逐条 append 实测 2000 行 156ms；改成先攒 HTML 再一次性拼进视图
+        # （400 行 10.8ms 量级），切换过滤下拉框不再卡半秒。
+        self._append_log_html(
+            [
+                self._log_html(
+                    event.get("project", "core"),
+                    event.get("level", "info"),
+                    event.get("message", ""),
+                )
+                for event in shown
+            ]
+        )
         if self.autoscroll_check.isChecked():
             self._scroll_log_to_bottom()
 
@@ -2207,7 +2256,10 @@ class MainWindow(QMainWindow):
         filter_project = self.filter_combo.currentData() or ""
         follow = self._log_at_bottom()
         drained = 0
-        while drained < 500:
+        skipped = 0
+        pending_html = []
+        deadline = time.monotonic() + LOG_DRAIN_BUDGET_MS / 1000.0
+        while drained < LOG_DRAIN_LIMIT:
             try:
                 event = self.queue.get_nowait()
             except Exception:
@@ -2215,7 +2267,7 @@ class MainWindow(QMainWindow):
             drained += 1
             self.event_buffer.append(event)
             if event.get("kind") == "post_action" and (event.get("data") or {}).get("action") == "exit":
-                self._append_log("core", "info", "结束后操作：关闭 Auto-AFK")
+                pending_html.append(self._log_html("core", "info", "结束后操作：关闭 Auto-AFK"))
                 QTimer.singleShot(800, self._quit)
                 continue
             # origin=gui 的事件是本进程自己刚画到日志区的，订阅队列回流时不能再画一遍，
@@ -2223,8 +2275,42 @@ class MainWindow(QMainWindow):
             # 里，切过滤下拉框重建视图时它会正常出现一次。
             if event.get("origin") == "gui":
                 continue
-            if self._matches_filter(event, filter_project):
-                self._append_log(event.get("project", "core"), event.get("level", "info"), event.get("message", ""), autoscroll=False, emit_event=False)
+            if not self._matches_filter(event, filter_project):
+                continue
+            if len(pending_html) >= LOG_RENDER_BATCH_LIMIT:
+                # 这一轮要画的已经够多，剩下的本轮只进 event_buffer，不再画：
+                # 洪峰时一轮几千行全画进视图会把主线程钉住几秒（实测 1000 行
+                # 逐条 append 68ms，且日志区只看得到最后一屏）。
+                skipped += 1
+                continue
+            pending_html.append(
+                self._log_html(
+                    event.get("project", "core"),
+                    event.get("level", "info"),
+                    event.get("message", ""),
+                )
+            )
+            # 时间预算：一次 _poll 最多占用主线程这么久，剩下的留到下一轮
+            # （事件仍在队列里，不会被丢）。
+            if drained % 128 == 0 and time.monotonic() > deadline:
+                break
+        if skipped:
+            self._skipped_since_notice += skipped
+            now = time.monotonic()
+            # 提示本身也要节流：洪峰期间每轮都写一行的话，日志区会被这条
+            # 说明自己刷满，真正的报错反而被顶走。
+            if now - self._skip_notice_at >= 2.0:
+                pending_html.append(
+                    self._log_html(
+                        "core",
+                        "warn",
+                        "日志刷得太快，最近 {0} 行没有画到界面上"
+                        "（完整记录见 logs/events.jsonl）".format(self._skipped_since_notice),
+                    )
+                )
+                self._skipped_since_notice = 0
+                self._skip_notice_at = now
+        self._append_log_html(pending_html)
         if drained and follow and self.autoscroll_check.isChecked():
             self._scroll_log_to_bottom()
         snapshot = self.supervisor.status_snapshot()

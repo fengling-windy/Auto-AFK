@@ -160,6 +160,45 @@ def main():
     check("截断时说明更早的日志去了哪里", "更早的 70 条" in text and "events.jsonl" in text)
     check("event_buffer 本身没有被截断", len(window.event_buffer) == 120)
 
+    # 8) 事件洪峰。订阅队列上限 5000，而 events.jsonl 实测峰值 14901 条/秒
+    #    （2026-11-11  MaaEnd 的 GetWindowRect failed 刷屏）。原实现一轮只取
+    #    500 条、且每条都单独 appendHtml：300ms 一轮只能消化 1667 条/秒，
+    #    队列几秒就被灌满，之后的新事件直接丢弃——界面上停在几分钟前的日志，
+    #    用户以为程序卡死。
+    window._clear_log()
+    window.event_buffer.clear()
+    window._skipped_since_notice = 0
+    window._skip_notice_at = 0.0
+    _orig_batch = gm.LOG_RENDER_BATCH_LIMIT
+    gm.LOG_RENDER_BATCH_LIMIT = 100
+    try:
+        for i in range(1000):
+            window.queue.put_nowait(
+                {"project": "core", "level": "info", "kind": "log",
+                 "message": "FLOOD-{0}".format(i)}
+            )
+        window._poll()
+        pump(app, 80)
+        text = window.log_view.toPlainText()
+        drawn = text.count("FLOOD-")
+        check("洪峰时一轮只画最近若干行（实测 {0} 行）".format(drawn), 0 < drawn <= 101)
+        check("一行日志一个文本块（不是全挤成一块）",
+              window.log_view.document().blockCount() >= drawn)
+        check("没画的行仍留在 event_buffer 里", len(window.event_buffer) == 1000)
+        check("跳过时说明日志刷得太快", "日志刷得太快" in text)
+        check("这条说明只写一次（洪峰期间不自己刷屏）",
+              text.count("日志刷得太快") == 1)
+        # 队列必须能在有限轮次内收干：原实现每轮 500 条的上限追不上洪峰。
+        rounds = 0
+        while window.queue.qsize() and rounds < 20:
+            window._poll()
+            pump(app, 20)
+            rounds += 1
+        check("积压能被收干（{0} 轮后队列为空）".format(rounds), window.queue.qsize() == 0)
+        check("收干用的轮次远小于 20", rounds < 5)
+    finally:
+        gm.LOG_RENDER_BATCH_LIMIT = _orig_batch
+
     window.hide()
     window._quit()
     config.SETTINGS_YAML = _REAL
