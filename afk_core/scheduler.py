@@ -13,6 +13,8 @@ class Scheduler:
         self._stop = threading.Event()
         self._thread = None
         self._last_date = None
+        # 上一次读到的坏 schedule.time 原文（None 表示正常），用于「只告警一次」
+        self._bad_time = None
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -31,15 +33,45 @@ class Scheduler:
             except Exception:
                 continue
 
+    def _parse_time(self, target):
+        """把 `schedule.time` 解析成 (hour, minute)；写坏了返回 None 并留痕。
+
+        历史缺陷：写坏时 `except: return` 一句话都不记。定时启动就这么静默地
+        永不触发——用户设了 08:00、程序每 20 秒看一眼、什么都不做，界面上
+        「定时启动」还打着勾。GUI 那边（`MainWindow._parse_schedule_time`）
+        已经会给时间框挂提示并写 warning，这里补上日志侧的同一条线索。
+
+        告警只写一次：`_tick` 每 20 秒跑一轮，坏值会一直被读到，逐轮告警
+        会把 events.jsonl 刷满。值变了（用户改了文件）才重新告警。
+        """
+        raw = str(target)
+        if raw == self._bad_time:
+            return None
+        try:
+            hour, minute = [int(x) for x in raw.split(":")[:2]]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("out of range: {0!r}".format(raw))
+        except Exception as exc:
+            self._bad_time = raw
+            log.warning(
+                "schedule.time %r 不是合法的 HH:MM（%s），定时启动不会触发", raw, exc
+            )
+            return None
+        if self._bad_time is not None:
+            # 从坏值恢复成合法值时也留一句，否则用户只记得自己改过、不知道成了
+            self._bad_time = None
+            log.info("schedule.time 已恢复为 %r", raw)
+        return hour, minute
+
     def _tick(self):
         cfg = (self.get_settings() or {}).get("schedule") or {}
         if not cfg.get("enabled"):
             return
         target = str(cfg.get("time", "04:00"))
-        try:
-            hour, minute = [int(x) for x in target.split(":")[:2]]
-        except Exception:
+        parsed = self._parse_time(target)
+        if parsed is None:
             return
+        hour, minute = parsed
         now = time.localtime()
         days = [str(d).lower() for d in (cfg.get("days") or ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
         weekday = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.tm_wday]

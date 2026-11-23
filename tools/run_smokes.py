@@ -63,6 +63,7 @@ SUITE = [
     ("smoke_stop_error", "core", "出错即止"),
     ("smoke_softstop", "core", "软停止"),
     ("smoke_stop_all", "core", "「全部停止」空闲时不该把状态改成已停止"),
+    ("smoke_scheduler", "core", "定时启动：坏时间留痕、窗口外不补跑"),
     ("smoke_hang_flow", "core", "卡死 -> 修复 -> 重试 -> 报告"),
     ("smoke_hang", "core", "卡死判定"),
     ("smoke_window", "core", "窗口完成判定 + 启动器秒退保护"),
