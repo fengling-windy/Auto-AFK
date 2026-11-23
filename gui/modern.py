@@ -1500,9 +1500,10 @@ class StatusDot(QWidget):
 
     def set_state(self, color, pulse, period=None):
         target = QColor(str(color))
+        pulse = bool(pulse)
         changed = target != self._color or pulse != self._pulse
         self._color = target
-        self._pulse = bool(pulse)
+        self._pulse = pulse
         if period is not None:
             self._period = float(period)
         timer = self._ensure_timer()
@@ -1513,7 +1514,11 @@ class StatusDot(QWidget):
         else:
             timer.stop()
             self._phase = 0.0
-        self.update()
+        # 状态没变就不用重画：脉冲态本身每 33ms 自己 update；静止态本来就不动。
+        # 300ms 轮询下每张卡每轮都会调到这里，无条件 update 等于 5 张卡 ×
+        # 每轮一次无效重绘（实测空转 20 轮 100 次）。
+        if changed:
+            self.update()
 
     def paintEvent(self, ev):
         painter = QPainter(self)
@@ -1572,12 +1577,19 @@ class AnimatedPill(QWidget):
         self.update()
 
     def set_state(self, text, color):
-        self._text = str(text)
+        text = str(text)
+        text_changed = text != self._text
+        self._text = text
         target = QColor(str(color))
-        self.updateGeometry()
+        if text_changed:
+            # 只有文字变了才需要让布局重算 sizeHint；配色变了不影响尺寸。
+            # 300ms 轮询下胶囊每轮都会被 set_state 一次，无条件 updateGeometry
+            # 会把整条布局链都标脏（实测空转 20 轮白打 20 次布局失效）。
+            self.updateGeometry()
         if target == self._target:
             # 状态未变（如 300ms 轮询重复设置）：不打断进行中的过渡动画
-            self.update()
+            if text_changed:
+                self.update()
             return
         self._target = target
         self._anim.stop()

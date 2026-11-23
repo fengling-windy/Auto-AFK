@@ -170,6 +170,65 @@ def main():
     pump(app, 100)
     check("重复设置同色不重启动画", pill._cur.toRgb() == target.toRgb())
 
+    # 6b. 轮询去重：主窗口每 300ms 把所有胶囊/状态点重设一遍，文字与配色都没变时
+    #     不能再去标脏布局（updateGeometry）或触发重绘，否则空转就是纯浪费。
+    _pill_geom = {"n": 0}
+    _pill_update = {"n": 0}
+    _orig_geom = AnimatedPill.updateGeometry
+    _orig_pill_update = AnimatedPill.update
+
+    def _count_geom(self):
+        _pill_geom["n"] += 1
+        return _orig_geom(self)
+
+    def _count_pill_update(self):
+        _pill_update["n"] += 1
+        return _orig_pill_update(self)
+
+    AnimatedPill.updateGeometry = _count_geom
+    AnimatedPill.update = _count_pill_update
+    try:
+        for _ in range(5):
+            pill.set_state("运行中", "#60a5fa")
+        check("胶囊状态没变时不重复标脏布局（实测 {0} 次）".format(_pill_geom["n"]),
+              _pill_geom["n"] == 0)
+        check("胶囊状态没变时不重复重绘（实测 {0} 次）".format(_pill_update["n"]),
+              _pill_update["n"] == 0)
+        pill.set_state("失败", "#60a5fa")
+        check("胶囊换文字时才标脏布局一次", _pill_geom["n"] == 1)
+        _before = _pill_update["n"]
+        pill.set_state("失败", "#f87171")
+        # 起动画会立刻推一帧（valueChanged → _on_value → update），所以这里
+        # 只要求「确实重绘了」，不锁死次数。
+        check("胶囊换配色时重绘（实测 {0} 次）".format(_pill_update["n"] - _before),
+              _pill_update["n"] > _before)
+    finally:
+        AnimatedPill.updateGeometry = _orig_geom
+        AnimatedPill.update = _orig_pill_update
+
+    # 6c. StatusDot 同理：颜色与脉冲态都没变时不该每轮 update。
+    _dot = StatusDot("#60a5fa", pulse=False)
+    _dot.show()
+    pump(app, 40)
+    _dot_update = {"n": 0}
+    _orig_dot_update = StatusDot.update
+
+    def _count_dot_update(self):
+        _dot_update["n"] += 1
+        return _orig_dot_update(self)
+
+    StatusDot.update = _count_dot_update
+    try:
+        for _ in range(5):
+            _dot.set_state("#60a5fa", pulse=False)
+        check("状态点没变时不重复重绘（实测 {0} 次）".format(_dot_update["n"]),
+              _dot_update["n"] == 0)
+        _dot.set_state("#f87171", pulse=False)
+        check("状态点换色时才重绘", _dot_update["n"] == 1)
+    finally:
+        StatusDot.update = _orig_dot_update
+    _dot.hide()
+
     # -- 7. fade_in_widget: 效果挂载与清理 --------------------------------------
     host = QWidget()
     host.resize(100, 100)
