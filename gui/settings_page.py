@@ -93,9 +93,14 @@ class SettingsPage(QWidget):
     # 新增挂机项目成功后通知主窗口重读注册表
     project_added = Signal(str)
 
-    def __init__(self, log_fn=None, registry=None, parent=None):
+    def __init__(self, log_fn=None, registry=None, advanced=None, parent=None):
         super().__init__(parent)
         self._log = log_fn or (lambda *a, **k: None)
+        # 「高级设置」区块（错误报告 / 注册表 / 设置原文 / 修复规则 / 环境自检）。
+        # 2026-11-23 用户要求把这些从总览页的页签栏搬到这里，页签只留实时日志
+        # ——实际上实时日志连页签都不需要，于是整条页签栏都去掉了。区块本身由
+        # gui/advanced_panel.py 实现，构造参数是主窗口注入的回调。
+        self.advanced = advanced
         self._registry_injected = registry is not None
         self._registry = registry if registry is not None else config.registry()
         # 构造期间各段都要读 settings（运行结束后操作、空闲、小组件、外观、
@@ -389,6 +394,12 @@ class SettingsPage(QWidget):
         self.widget_check.toggled.connect(self._save_widget)
         self.widget_card.body.addWidget(self.widget_check)
         layout.addWidget(self.widget_card)
+
+        # -- 高级设置（错误报告 / 注册表 / 设置原文 / 修复规则 / 环境自检）--------
+        # 这五项原先是总览页下方页签栏里的页。用户要求把页签栏去掉、除实时日志
+        # 之外的都收进设置，于是统一放到这里，每块默认收起，避免把设置页拉长。
+        if self.advanced is not None:
+            layout.addWidget(self.advanced)
 
         layout.addStretch(1)
         scroll.setWidget(inner)
@@ -924,6 +935,15 @@ class SettingsPage(QWidget):
             self._load_appearance(settings)
             self._build_hidden_checks(settings, registry)
             self._build_base_combo(registry)
+            # 高级设置里的「设置原文」编辑器也要跟上磁盘：用户在头部开关或本页
+            # 控件里改了配置，那个编辑器若不刷新，下次点「保存设置」会把旧文本
+            # 整份写回，刚改的配置被静默覆盖。它自己带有脏标记，不会吃掉用户
+            # 正在写的内容。错误报告列表按目录 mtime 判断，没变就不重扫。
+            advanced = self.advanced
+            if advanced is not None:
+                advanced.sync_settings_editor()
+                if advanced.expanded_name() == "reports":
+                    advanced.maybe_refresh_reports()
         finally:
             self._loading = False
 

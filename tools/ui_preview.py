@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QRectF, QTime, Qt, QTimer
+from PySide6.QtCore import QTime, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,8 +27,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QPlainTextEdit,
     QSplitter,
     QTimeEdit,
@@ -40,13 +38,13 @@ from gui import main as gui_main
 from gui.modern import (
     AnimatedButton,
     AnimatedPill,
-    AnimatedTabWidget,
     FlowHost,
     add_shadow,
     apply_theme,
     enable_smooth_scroll,
 )
 from gui.nav_rail import NavRail
+from gui.advanced_panel import AdvancedPanel
 from gui.project_status_page import ProjectStatusPage
 from gui.settings_page import SettingsPage
 
@@ -226,10 +224,10 @@ def build_overview():
 
     splitter = QSplitter(Qt.Vertical)
     splitter.setChildrenCollapsible(False)
-    tabs = AnimatedTabWidget()
-
-    log_tab = QWidget()
-    log_layout = QVBoxLayout(log_tab)
+    # 页签栏已按用户要求移除：实时日志直接铺在总览页下半部分，错误报告 /
+    # 注册表 / 设置原文 / 修复规则 / 环境自检搬进了设置页的高级设置。
+    log_panel = QWidget()
+    log_layout = QVBoxLayout(log_panel)
     log_layout.setContentsMargins(10, 10, 10, 10)
     log_layout.setSpacing(8)
     log_controls = QHBoxLayout()
@@ -253,26 +251,10 @@ def build_overview():
     enable_smooth_scroll(log_view)
     log_layout.addLayout(log_controls)
     log_layout.addWidget(log_view, 1)
-    tabs.addTab(log_tab, "实时日志")
 
-    reports_tab = QWidget()
-    reports_layout = QVBoxLayout(reports_tab)
-    reports_layout.setContentsMargins(10, 10, 10, 10)
-    report_controls = QHBoxLayout()
-    report_controls.addWidget(AnimatedButton("刷新"))
-    report_controls.addWidget(AnimatedButton("打开选中报告"))
-    report_controls.addStretch(1)
-    report_list = QListWidget()
-    enable_smooth_scroll(report_list)
-    for _ in range(8):
-        report_list.addItem(QListWidgetItem("2026-10-03_detect-fail_1551  [BetterGI]  连续 3 次识别超时"))
-    reports_layout.addLayout(report_controls)
-    reports_layout.addWidget(report_list, 1)
-    tabs.addTab(reports_tab, "错误报告")
-
-    splitter.addWidget(tabs)
+    splitter.addWidget(log_panel)
     root.addWidget(splitter, 1)
-    return overview, tabs, cards, chain_pill, log_view
+    return overview, cards, chain_pill, log_view
 
 
 def populate_log(log_view):
@@ -292,17 +274,7 @@ def populate_log(log_view):
         log_view.appendHtml(html)
 
 
-def apply_state_shots(tabs, cards, chain_pill):
-    bar = tabs.tabBar()
-    if bar.count() >= 2:
-        start = QRectF(bar.tabRect(0))
-        end = QRectF(bar.tabRect(1))
-        mid = QRectF(
-            (start.left() + end.left()) / 2.0, end.top(),
-            (start.width() + end.width()) / 2.0, end.height(),
-        )
-        bar._indicator = mid
-        bar.update()
+def apply_state_shots(cards, chain_pill):
     for card in cards:
         card._hover = 1.0
         card.update()
@@ -361,7 +333,7 @@ def build_shell():
     stack = QStackedWidget()
     root.addWidget(stack, 1)
 
-    overview, tabs, cards, chain_pill, log_view = build_overview()
+    overview, cards, chain_pill, log_view = build_overview()
     populate_log(log_view)
     stack.addWidget(overview)
 
@@ -372,11 +344,12 @@ def build_shell():
     )
     stack.addWidget(projects_page)
 
-    settings_page = SettingsPage(log_fn=_noop, registry=FAKE_REGISTRY)
+    advanced = AdvancedPanel()
+    settings_page = SettingsPage(log_fn=_noop, registry=FAKE_REGISTRY, advanced=advanced)
     stack.addWidget(settings_page)
 
     nav.navigate.connect(lambda key: _navigate(stack, nav, key))
-    return central, stack, nav, tabs, cards, chain_pill, settings_page, projects_page
+    return central, stack, nav, cards, chain_pill, settings_page, projects_page, advanced
 
 
 def _navigate(stack, nav, key):
@@ -404,12 +377,12 @@ def main():
     # 与 gui.main.main() 一致：开窗前换肤，卡片/按钮按主题取色构造。
     apply_theme(app, theme)
 
-    window, stack, nav, tabs, cards, chain_pill, settings_page, projects_page = build_shell()
+    window, stack, nav, cards, chain_pill, settings_page, projects_page, advanced = build_shell()
     window.show()
 
     def shot_overview():
         window.grab().save(str(out_dir / "ui_preview_default.png"))
-        apply_state_shots(tabs, cards, chain_pill)
+        apply_state_shots(cards, chain_pill)
         QTimer.singleShot(80, shot_states)
 
     def shot_states():

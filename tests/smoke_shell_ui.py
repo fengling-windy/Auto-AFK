@@ -530,8 +530,8 @@ def test_main_window(app):
         cards_bottom = max(
             card.mapTo(window, card.rect().bottomLeft()).y() for card in window.cards.values()
         )
-        tabs_top = window.tabs.mapTo(window, window.tabs.rect().topLeft()).y()
-        check("折行后的项目卡不会压住下方页签", cards_bottom <= tabs_top)
+        log_top = window.log_view.mapTo(window, window.log_view.rect().topLeft()).y()
+        check("折行后的项目卡不会压住下方日志区", cards_bottom <= log_top)
         host = window.cards_host
         check(
             "卡片容器的要求高度随折行数变化（宽屏一行、窄屏两行）",
@@ -771,60 +771,58 @@ def test_main_window(app):
         pump(app, 60)
         check("导航切回总览", window.stack.currentIndex() == 0)
 
-        # 「错误报告」页不能在用户首次打开时显示空列表。
-        # 历史缺陷：report_list 只在点「刷新」按钮时填充，切到本页永远 0 条
+        # 「错误报告」区块不能在用户首次展开时显示空列表。
+        # 历史缺陷：report_list 只在点「刷新」按钮时填充，展开后永远 0 条
         # （磁盘上实际有 40+ 份报告），用户会以为没有错误报告。
-        reports_index = None
-        for i in range(window.tabs.count()):
-            if window.tabs.widget(i) is window._reports_tab:
-                reports_index = i
-                break
-        check("错误报告页存在", reports_index is not None)
-        if reports_index is not None:
-            window.tabs.setCurrentIndex(reports_index)
-            pump(app, 120)
-            check("切到错误报告页会加载列表", window._reports_loaded)
-            # 空目录时也应给出一条不可选中的说明项，而不是空白
-            has_placeholder = (
-                window.report_list.count() == 1
-                and window.report_list.item(0).data(Qt.UserRole) is None
-            )
-            check("错误报告页不会是完全空白", window.report_list.count() > 0 or has_placeholder)
+        # 页签栏已按用户要求移除，这一块现在挂在设置页的「高级设置」里。
+        window._navigate("settings")
+        pump(app, 60)
+        advanced = window.advanced
+        check("高级设置面板挂在设置页里", advanced is not None)
+        check("高级设置默认全部收起", advanced.expanded_name() is None or advanced.expanded_name() == "")
+        advanced.expand("reports")
+        pump(app, 120)
+        check("展开错误报告区块会加载列表", advanced._reports_loaded)
+        # 空目录时也应给出一条不可选中的说明项，而不是空白
+        has_placeholder = (
+            advanced.report_list.count() == 1
+            and advanced.report_list.item(0).data(Qt.UserRole) is None
+        )
+        check("错误报告区块不会是完全空白", advanced.report_list.count() > 0 or has_placeholder)
 
         # 开窗之后才产生的报告必须能被看到。
         # 历史缺陷：「只在第一次进入时扫盘」实现成 _reports_loaded 之后永不重扫，
         # 链跑挂了生成的报告（正是最需要看的那种）切过来仍然是「还没有错误报告」，
         # 界面与磁盘状态相反。现在按报告目录 mtime 判断是否需要重扫。
-        if reports_index is not None:
-            # 只数真实报告条目：空目录时会有一条 data 为 None 的占位说明项，
-            # 它会被第一条真报告顶掉，所以不能拿总条数当基线。
-            def _real_reports():
-                return [
-                    window.report_list.item(i).data(Qt.UserRole)
-                    for i in range(window.report_list.count())
-                    if window.report_list.item(i).data(Qt.UserRole) is not None
-                ]
+        # 只数真实报告条目：空目录时会有一条 data 为 None 的占位说明项，
+        # 它会被第一条真报告顶掉，所以不能拿总条数当基线。
+        def _real_reports():
+            return [
+                advanced.report_list.item(i).data(Qt.UserRole)
+                for i in range(advanced.report_list.count())
+                if advanced.report_list.item(i).data(Qt.UserRole) is not None
+            ]
 
-            before = len(_real_reports())
-            new_dir = Path(config.REPORTS_DIR) / "20260101_000000_SmokeProbe"
-            new_dir.mkdir(parents=True, exist_ok=True)
-            (new_dir / "snapshot.json").write_text(
-                '{"project": "SmokeProbe", "reason": "smoke"}', encoding="utf-8"
-            )
-            window.tabs.setCurrentIndex(0)
-            pump(app, 60)
-            window.tabs.setCurrentIndex(reports_index)
-            pump(app, 150)
-            names = _real_reports()
-            check("开窗后新生成的错误报告会出现在列表里", str(new_dir) in names)
-            check("重扫后列表条数增加", len(names) == before + 1)
-            # 目录没变时不该重复扫盘（否则每次切页都要 stat 200 个目录）
-            mtime_before = window._reports_mtime
-            window.tabs.setCurrentIndex(0)
-            pump(app, 60)
-            window.tabs.setCurrentIndex(reports_index)
-            pump(app, 120)
-            check("报告目录没变时不重复扫盘", window._reports_mtime == mtime_before)
+        before = len(_real_reports())
+        new_dir = Path(config.REPORTS_DIR) / "20260101_000000_SmokeProbe"
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (new_dir / "snapshot.json").write_text(
+            '{"project": "SmokeProbe", "reason": "smoke"}', encoding="utf-8"
+        )
+        advanced.maybe_refresh_reports()
+        pump(app, 150)
+        names = _real_reports()
+        check("开窗后新生成的错误报告会出现在列表里", str(new_dir) in names)
+        check("重扫后列表条数增加", len(names) == before + 1)
+        # 目录没变时不该重复扫盘（否则每次切页都要 stat 200 个目录）
+        mtime_before = advanced._reports_mtime
+        advanced.maybe_refresh_reports()
+        pump(app, 120)
+        check("报告目录没变时不重复扫盘", advanced._reports_mtime == mtime_before)
+        # 切页时也会顺手同步；再切回来不该重复扫盘
+        window._navigate("settings")
+        pump(app, 60)
+        check("切回设置页后报告列表仍有内容", advanced.report_list.count() > 0)
 
         # 在「设置」tab 直接改 settings.yaml 保存后，总览页头部的开关必须跟着变。
         # 历史缺陷：_save_text 只重读了 self.settings，头部三个控件（运行前更新 /
@@ -832,8 +830,8 @@ def test_main_window(app):
         dirty = dict(window.settings)
         dirty["pre_run"] = dict(dirty.get("pre_run") or {}, enabled=False)
         dirty["schedule"] = {"enabled": True, "time": "07:30"}
-        window.settings_edit.setPlainText(yaml.safe_dump(dirty, allow_unicode=True, sort_keys=False))
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window.advanced.settings_edit.setPlainText(yaml.safe_dump(dirty, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 60)
         check("设置 tab 保存后「运行前更新」跟随文件", window.pre_run_check.isChecked() is False)
         check("设置 tab 保存后「定时启动」跟随文件", window.schedule_check.isChecked() is True)
@@ -860,11 +858,11 @@ def test_main_window(app):
             for bad in ("abc", "25:99", ""):
                 broken = dict(config.settings())
                 broken["schedule"] = dict(broken.get("schedule") or {}, time=bad)
-                window.settings_edit.setPlainText(
+                window.advanced.settings_edit.setPlainText(
                     yaml.safe_dump(broken, allow_unicode=True, sort_keys=False)
                 )
                 _log_records.clear()
-                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
                 pump(app, 60)
                 check(
                     "定时时间写成 {0!r} 时退回 04:00".format(bad),
@@ -880,10 +878,10 @@ def test_main_window(app):
                 )
             fixed = dict(config.settings())
             fixed["schedule"] = dict(fixed.get("schedule") or {}, time="06:45")
-            window.settings_edit.setPlainText(
+            window.advanced.settings_edit.setPlainText(
                 yaml.safe_dump(fixed, allow_unicode=True, sort_keys=False)
             )
-            window._save_text(window.settings_edit, config.SETTINGS_YAML)
+            window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
             pump(app, 60)
             check(
                 "改回合法时间后时间框跟上",
@@ -996,8 +994,8 @@ def test_main_window(app):
         sync_cfg = dict(window.settings)
         sync_cfg["idle"] = dict(sync_cfg.get("idle") or {}, enabled=False)
         sync_cfg["gui"] = dict(sync_cfg.get("gui") or {}, widget_enabled=True)
-        window.settings_edit.setPlainText(yaml.safe_dump(sync_cfg, allow_unicode=True, sort_keys=False))
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window.advanced.settings_edit.setPlainText(yaml.safe_dump(sync_cfg, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 60)
         check("设置 tab 保存后托盘「空闲自动挂机」跟随文件", window.idle_action.isChecked() is False)
         check("设置 tab 保存后托盘「桌面小组件」跟随文件", window.widget_action.isChecked() is True)
@@ -1012,27 +1010,27 @@ def test_main_window(app):
         # 被静默覆盖（实测 pre_run.enabled 改成 False 又被写回 True）。
         window.pre_run_check.setChecked(True)
         pump(app, 60)
-        editor_cfg = yaml.safe_load(window.settings_edit.toPlainText()) or {}
+        editor_cfg = yaml.safe_load(window.advanced.settings_edit.toPlainText()) or {}
         check(
             "头部开关改动会同步进设置 tab 编辑器",
             bool((editor_cfg.get("pre_run") or {}).get("enabled")) is True,
         )
         window.pre_run_check.setChecked(False)
         pump(app, 60)
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 60)
         check(
             "保存设置 tab 不会把头部刚改的值覆盖回旧值",
             bool((config.settings().get("pre_run") or {}).get("enabled")) is False,
         )
         # 用户手动编辑过编辑器时，程序不得覆盖他正在写的内容
-        window.settings_edit.setPlainText("# user editing\n" + window.settings_edit.toPlainText())
+        window.advanced.settings_edit.setPlainText("# user editing\n" + window.advanced.settings_edit.toPlainText())
         pump(app, 60)
-        check("用户编辑后编辑器被标记为脏", window._settings_edit_dirty is True)
-        typed = window.settings_edit.toPlainText()
+        check("用户编辑后编辑器被标记为脏", window.advanced._settings_edit_dirty is True)
+        typed = window.advanced.settings_edit.toPlainText()
         window.settings_page.idle_check.setChecked(not window.settings_page.idle_check.isChecked())
         pump(app, 60)
-        check("用户正在编辑的内容不会被程序覆盖", window.settings_edit.toPlainText() == typed)
+        check("用户正在编辑的内容不会被程序覆盖", window.advanced.settings_edit.toPlainText() == typed)
 
         # 顶层不是映射的 YAML 也能通过语法校验（`just a string` / `- a`），
         # 存进去之后每处 settings().get(...) 都会 AttributeError，程序从此打不开、
@@ -1046,8 +1044,8 @@ def test_main_window(app):
         try:
             before_bytes = config.SETTINGS_YAML.read_bytes()
             for bad_text in ("just a string", "- a\n- b\n"):
-                window.settings_edit.setPlainText(bad_text)
-                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                window.advanced.settings_edit.setPlainText(bad_text)
+                window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
                 pump(app, 30)
                 check(
                     "非映射的 YAML 被拒绝保存（{0}）".format(bad_text.split(chr(10))[0][:12]),
@@ -1059,8 +1057,8 @@ def test_main_window(app):
             before_bytes = config.SETTINGS_YAML.read_bytes()
             saved_msgs.clear()
             for empty_text in ("", "# 读取失败: 磁盘只读\n", "\n\n"):
-                window.settings_edit.setPlainText(empty_text)
-                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                window.advanced.settings_edit.setPlainText(empty_text)
+                window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
                 pump(app, 30)
                 check(
                     "空内容的 YAML 被拒绝保存（{0!r}）".format(empty_text[:8]),
@@ -1070,8 +1068,8 @@ def test_main_window(app):
         finally:
             _QMB.critical = orig_critical
             # 把编辑器恢复成合法内容，避免影响后续断言
-            window._load_text(window.settings_edit, config.SETTINGS_YAML)
-            window._settings_edit_dirty = False
+            window._load_text(window.advanced.settings_edit, config.SETTINGS_YAML)
+            window.advanced._settings_edit_dirty = False
 
         # 底层读取也要兜住：即使文件被外部改坏，settings() 也不能把字符串
         # 直接返回给调用方（否则每处 .get() 都 AttributeError，程序打不开）。
@@ -1150,8 +1148,8 @@ def test_main_window(app):
         window._mutate_settings(_pin_silent)
         pump(app, 120)
         check("动手前注册表里确实有那个项目", dropped_key in window.cards)
-        window.registry_edit.setPlainText(yaml.safe_dump(mutated, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(mutated, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("保存注册表后新项目出现在项目卡", extra_key in window.cards)
         check("保存注册表后删掉的项目卡片消失", dropped_key not in window.cards)
@@ -1233,8 +1231,8 @@ def test_main_window(app):
         check("保存注册表后项目状态页去掉已删项目",
               dropped_key not in window.projects_page._blocks)
         # 还原：把注册表写回原样，后续断言依赖原来的 5 个项目
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("还原注册表后卡片数量回到原来", sorted(window.cards) == sorted(original_registry["projects"]))
 
@@ -1244,9 +1242,9 @@ def test_main_window(app):
         disabled_key = [k for k in original_registry["projects"] if k != extra_key][0]
         disabled_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         disabled_registry["projects"][disabled_key]["enabled"] = False
-        window.registry_edit.setPlainText(
+        window.advanced.registry_edit.setPlainText(
             yaml.safe_dump(disabled_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         _dcard = window.cards[disabled_key]
         check("注册表里禁用后卡片标出「已禁用」（{0}）".format(_dcard.status_label.text()),
@@ -1262,8 +1260,8 @@ def test_main_window(app):
         pump(app, 60)
         check("刷新状态后禁用提示仍在（{0}）".format(_dcard.status_label.text()),
               _dcard.status_label.text() == "已禁用")
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         _dcard = window.cards[disabled_key]
         check("重新启用后卡片恢复可点（{0}）".format(_dcard.status_label.text()),
@@ -1299,9 +1297,9 @@ def test_main_window(app):
 
         # 已经跑起来之后才被禁用：卡片写「已禁用」，但「停止」必须还能点，
         # 否则用户只能去点「全部停止」把别的项目也一起停掉。
-        window.registry_edit.setPlainText(
+        window.advanced.registry_edit.setPlainText(
             yaml.safe_dump(disabled_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 300)
         _live_run = ProjectRun(disabled_key, {"display_name": disabled_key})
         _live_run.status = "running"
@@ -1321,9 +1319,9 @@ def test_main_window(app):
         check("跑完之后卡片回落成「已禁用」（{0}）".format(_lcard.status_label.text()),
               _lcard.status_label.text() == "已禁用")
         window.supervisor.runs.pop(disabled_key, None)
-        window.registry_edit.setPlainText(
+        window.advanced.registry_edit.setPlainText(
             yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 300)
 
         # 改已存在项目的显示名，卡片标题要跟着变。
@@ -1332,12 +1330,12 @@ def test_main_window(app):
         rename_key = next(iter(original_registry["projects"]))
         renamed = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         renamed["projects"][rename_key]["display_name"] = "冒烟改名项目（测试）"
-        window.registry_edit.setPlainText(yaml.safe_dump(renamed, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(renamed, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("改显示名后项目卡标题跟随", window.cards[rename_key].name_label.text() == "冒烟改名项目")
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
 
         # 长 display_name 不能把窗口最小宽度顶出去。历史缺陷：三处文本控件
@@ -1348,8 +1346,8 @@ def test_main_window(app):
         long_name = "超长项目名与显示名测试" * 6
         long_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         long_registry["projects"][rename_key]["display_name"] = long_name
-        window.registry_edit.setPlainText(yaml.safe_dump(long_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(long_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         long_card = window.cards[rename_key]
         check("超长显示名不把窗口最小宽度顶出 1366", window.minimumSizeHint().width() <= 1366)
@@ -1363,8 +1361,8 @@ def test_main_window(app):
             "超长显示名下副标题不撑宽头部",
             window._subtitle_label.minimumSizeHint().width() <= 200,
         )
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check(
             "还原显示名后卡片标题回到原名",
@@ -1377,11 +1375,11 @@ def test_main_window(app):
         color_key = rename_key
         color_before = window.cards[color_key].color
         probe_color = "#ff00aa"
-        settings_text = window.settings_edit.toPlainText()
+        settings_text = window.advanced.settings_edit.toPlainText()
         mutated_settings = yaml.safe_load(settings_text) or {}
         mutated_settings.setdefault("gui", {})["project_colors"] = {color_key: probe_color}
-        window.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window.advanced.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 400)
         check("改项目配色后卡片颜色跟随", window.cards[color_key].color == probe_color)
         check(
@@ -1391,8 +1389,8 @@ def test_main_window(app):
         check("改项目配色后日志前缀用新颜色", window._project_color(color_key) == probe_color)
         # 还原配色，避免影响后面的断言
         mutated_settings["gui"]["project_colors"] = {}
-        window.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window.advanced.settings_edit.setPlainText(yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 300)
         check("还原配色后卡片颜色回到原来", window.cards[color_key].color == color_before)
 
@@ -1533,17 +1531,20 @@ def test_main_window(app):
         # 历史缺陷：gui_btn 只在 ProjectCard 构造时决定一次可见性，之后改注册表
         # 存盘，按钮还在，点下去会去拉起一个已经没有界面入口的进程。
         gui_key = next(k for k, spec in original_registry["projects"].items() if spec.get("gui"))
-        check("有界面入口的项目卡片显示「界面」按钮", window.cards[gui_key].gui_btn.isVisible())
+        # 用 isHidden() 而不是 isVisible()：这时界面停在「设置」页，总览页整个
+        # 被 QStackedWidget 藏起来，卡片上任何控件的 isVisible() 都是 False
+        # ——包括正常运行的那些，断言会变成「只有当前页可见的控件才算通过」。
+        check("有界面入口的项目卡片显示「界面」按钮", not window.cards[gui_key].gui_btn.isHidden())
         no_gui = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         no_gui["projects"][gui_key]["gui"] = None
-        window.registry_edit.setPlainText(yaml.safe_dump(no_gui, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(no_gui, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
-        check("去掉 gui 段后卡片「界面」按钮收起", not window.cards[gui_key].gui_btn.isVisible())
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        check("去掉 gui 段后卡片「界面」按钮收起", window.cards[gui_key].gui_btn.isHidden())
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
-        check("还原 gui 段后「界面」按钮回来", window.cards[gui_key].gui_btn.isVisible())
+        check("还原 gui 段后「界面」按钮回来", not window.cards[gui_key].gui_btn.isHidden())
 
         # 拖动把原本相邻的并行组拆开之后，界面不能再显示「并行中」。
         # 历史缺陷：parallel_groups() 只检查组员「还显示着」，不检查是否仍然相邻，
@@ -1758,13 +1759,13 @@ def test_main_window(app):
         pump(app, 300)
         removed_view = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         removed_view["projects"].pop(gui_key, None)
-        window.registry_edit.setPlainText(yaml.safe_dump(removed_view, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(removed_view, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("删掉项目后仍停在总览页", window.stack.currentWidget() is window.stack.widget(0))
         check("删掉项目后导航高亮仍是总览", window.nav.active_key() == "overview")
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
 
         # 删掉「当前正被日志过滤器选中的项目」后，日志区要跟着回到全部项目。
@@ -1779,16 +1780,16 @@ def test_main_window(app):
         check("过滤器选中断项目时只剩它的日志", "SMOKE-FILTER-CORE" not in window.log_view.toPlainText())
         filter_registry = yaml.safe_load(yaml.safe_dump(original_registry, allow_unicode=True))
         filter_registry["projects"].pop(rename_key, None)
-        window.registry_edit.setPlainText(yaml.safe_dump(filter_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(filter_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
         check("删掉被过滤的项目后下拉框回到全部项目", (combo.currentData() or "") == "")
         check(
             "删掉被过滤的项目后日志区恢复全部项目",
             "SMOKE-FILTER-CORE" in window.log_view.toPlainText(),
         )
-        window.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
-        window._save_text(window.registry_edit, config.PROJECTS_YAML)
+        window.advanced.registry_edit.setPlainText(yaml.safe_dump(original_registry, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.registry_edit, config.PROJECTS_YAML)
         pump(app, 400)
 
         # 日志自动滚动：只有「本来就在底部」才跟着滚。
@@ -1863,7 +1864,7 @@ def test_main_window(app):
         # 的规则永远不生效，用户只能重启程序；同理关掉 repair.enabled 也不生效。
         engine = window.supervisor.repair
         rules_before = len(engine.rules)
-        mutated_rules = yaml.safe_load(window.repair_edit.toPlainText()) or {}
+        mutated_rules = yaml.safe_load(window.advanced.repair_edit.toPlainText()) or {}
         mutated_rules.setdefault("rules", [])
         mutated_rules["rules"].append(
             {
@@ -1873,8 +1874,8 @@ def test_main_window(app):
                 "actions": [{"type": "rerun"}],
             }
         )
-        window.repair_edit.setPlainText(yaml.safe_dump(mutated_rules, allow_unicode=True, sort_keys=False))
-        window._save_text(window.repair_edit, config.REPAIR_YAML)
+        window.advanced.repair_edit.setPlainText(yaml.safe_dump(mutated_rules, allow_unicode=True, sort_keys=False))
+        window._save_text(window.advanced.repair_edit, config.REPAIR_YAML)
         pump(app, 300)
         check("保存修复规则后引擎规则数 +1", len(engine.rules) == rules_before + 1)
         check(
@@ -1888,13 +1889,13 @@ def test_main_window(app):
 
         # 保存「设置」后引擎手上的 repair 配置也要跟着换。
         settings_before = dict(engine.settings.get("repair") or {})
-        mutated_settings = yaml.safe_load(window.settings_edit.toPlainText()) or {}
+        mutated_settings = yaml.safe_load(window.advanced.settings_edit.toPlainText()) or {}
         mutated_settings.setdefault("repair", {})
         mutated_settings["repair"]["max_rounds"] = int(settings_before.get("max_rounds", 2)) + 5
-        window.settings_edit.setPlainText(
+        window.advanced.settings_edit.setPlainText(
             yaml.safe_dump(mutated_settings, allow_unicode=True, sort_keys=False)
         )
-        window._save_text(window.settings_edit, config.SETTINGS_YAML)
+        window._save_text(window.advanced.settings_edit, config.SETTINGS_YAML)
         pump(app, 300)
         check(
             "保存设置后修复引擎同步 repair 配置",

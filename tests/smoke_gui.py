@@ -53,7 +53,17 @@ def _run():
     text_all = window.log_view.toPlainText()
     filter_ok = filter_ok and "maaend-line-1" in text_all
     html = window.log_view.document().toHtml()
-    color_ok = "#81c784" in html and "#ffb74d" in html
+    # 日志里的项目前缀色走的是「当前主题」的项目身份色（深色 #81c784 /
+    # 浅色 #15803d 各一套）。历史缺陷：这里把深色那套写死，只要 settings.yaml
+    # 里的 gui.theme 是 light（用户切过、或上一次冒烟写回），断言就假失败。
+    from gui import themes
+
+    html_low = html.lower()
+    expect_colors = [
+        (themes.project_color(window._active_theme(), key) or "").lower()
+        for key in ("BAAH", "MaaEnd")
+    ]
+    color_ok = all(color and color in html_low for color in expect_colors)
 
     def save_preview():
         try:

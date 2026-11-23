@@ -21,8 +21,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -37,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import config, doctor, idle, listval, numval, report
+from afk_core import config, doctor, idle, listval, numval
 from afk_core.events import EventBus
 from afk_core.idle import IdleWatcher
 from afk_core.repair import RepairEngine
@@ -47,7 +45,6 @@ from afk_core.supervisor import Supervisor
 from gui.modern import (
     AnimatedButton,
     AnimatedPill,
-    AnimatedTabWidget,
     CardBackground,
     ElidedLabel,
     FlowHost,
@@ -69,6 +66,7 @@ from gui.idle_prompt import (
     IdlePromptDialog,
     decide_on_timeout,
 )
+from gui.advanced_panel import AdvancedPanel
 from gui.nav_rail import NavRail
 from gui.project_status_page import ProjectStatusPage
 from gui.settings_page import SettingsPage
@@ -923,10 +921,13 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         splitter.setMinimumHeight(SPLITTER_MIN_HEIGHT)
         self._log_splitter = splitter
-        self.tabs = AnimatedTabWidget()
-
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
+        # 实时日志直接铺在总览页下方。历史：这里原先是 AnimatedTabWidget，页签
+        # 「实时日志 / 错误报告 / 项目注册表 / 设置 / 修复规则 / 环境自检」六页
+        # 挤在一条栏里（2026-11-23 用户反馈：这排当导航太重）。后五项已经收进
+        # 设置页的「高级设置」，只剩日志一项，再套一层页签纯属白占一行高度。
+        log_panel = QWidget()
+        self.log_panel = log_panel
+        log_layout = QVBoxLayout(log_panel)
         log_layout.setContentsMargins(10, 10, 10, 10)
         log_layout.setSpacing(8)
         log_controls = QHBoxLayout()
@@ -953,76 +954,10 @@ class MainWindow(QMainWindow):
         enable_smooth_scroll(self.log_view)
         log_layout.addLayout(log_controls)
         log_layout.addWidget(self.log_view)
-        self.tabs.addTab(log_tab, "实时日志")
 
-        reports_tab = QWidget()
-        reports_layout = QVBoxLayout(reports_tab)
-        reports_layout.setContentsMargins(10, 10, 10, 10)
-        report_controls = QHBoxLayout()
-        refresh_reports = AnimatedButton("刷新")
-        refresh_reports.clicked.connect(self.refresh_reports)
-        open_report = AnimatedButton("打开选中报告")
-        open_report.clicked.connect(self.open_selected_report)
-        report_controls.addWidget(refresh_reports)
-        report_controls.addWidget(open_report)
-        report_controls.addStretch(1)
-        self.report_list = QListWidget()
-        enable_smooth_scroll(self.report_list)
-        reports_layout.addLayout(report_controls)
-        reports_layout.addWidget(self.report_list)
-        # 记录引用：切到本页时按需刷新（列表不预先加载——启动时扫盘会拖慢开窗，
-        # 但只在点「刷新」时加载又会让用户打开本页看到空列表，误以为没有报告）。
-        self._reports_tab = reports_tab
-        self._reports_loaded = False
-        # 上次扫盘时报告目录的 mtime：目录没变就不重复扫（每次 200 个目录约 6ms，
-        # 但每次切页都扫一遍没有意义）；变了说明有新报告/被清理，必须重扫。
-        self._reports_mtime = None
-        self.report_list.itemDoubleClicked.connect(lambda _item: self.open_selected_report())
-        self.tabs.addTab(reports_tab, "错误报告")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-
-        self.registry_edit = QPlainTextEdit()
-        self._load_text(self.registry_edit, config.PROJECTS_YAML)
-        enable_smooth_scroll(self.registry_edit)
-        registry_tab = self._file_tab(self.registry_edit, config.PROJECTS_YAML, "保存项目注册表")
-        self.tabs.addTab(registry_tab, "项目注册表")
-
-        self.settings_edit = QPlainTextEdit()
-        self._load_text(self.settings_edit, config.SETTINGS_YAML)
-        enable_smooth_scroll(self.settings_edit)
-        # 编辑器只在开窗时读过一次盘。用户在别处改设置（头部开关 / 设置页 / 托盘）
-        # 后回到本页按「保存设置」，会把界面里这份过期文本整份写回，刚改的配置
-        # 就这么被覆盖没了。用「脏标记」区分：用户动过就绝不覆盖，没动过就跟随磁盘。
-        self._settings_edit_dirty = False
-        self._settings_edit_loading = False
-        self.settings_edit.textChanged.connect(self._mark_settings_edit_dirty)
-        settings_tab = self._file_tab(self.settings_edit, config.SETTINGS_YAML, "保存设置")
-        self.tabs.addTab(settings_tab, "设置")
-
-        self.repair_edit = QPlainTextEdit()
-        self._load_text(self.repair_edit, config.REPAIR_YAML)
-        enable_smooth_scroll(self.repair_edit)
-        repair_tab = self._file_tab(self.repair_edit, config.REPAIR_YAML, "保存修复规则")
-        self.tabs.addTab(repair_tab, "修复规则")
-
-        doctor_tab = QWidget()
-        doctor_layout = QVBoxLayout(doctor_tab)
-        doctor_layout.setContentsMargins(10, 10, 10, 10)
-        doctor_controls = QHBoxLayout()
-        run_doctor = AnimatedButton("运行自检")
-        run_doctor.clicked.connect(self.run_doctor)
-        doctor_controls.addWidget(run_doctor)
-        doctor_controls.addStretch(1)
-        self.doctor_view = QPlainTextEdit()
-        self.doctor_view.setReadOnly(True)
-        self.doctor_view.setFont(QFont("Consolas", 9))
-        enable_smooth_scroll(self.doctor_view)
-        doctor_layout.addLayout(doctor_controls)
-        doctor_layout.addWidget(self.doctor_view)
-        self.tabs.addTab(doctor_tab, "环境自检")
-
-        splitter.addWidget(self.tabs)
+        splitter.addWidget(log_panel)
         root.addWidget(splitter, 1)
+
 
         self.stack.addWidget(overview)  # index 0 = 总览
 
@@ -1035,7 +970,17 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.projects_page)
 
         # -- 设置页 ----------------------------------------------------------------
-        self.settings_page = SettingsPage(log_fn=self._append_log)
+        # 高级设置（错误报告 / 项目注册表 / 设置原文 / 修复规则 / 环境自检）原来
+        # 是总览页下的五个页签，用户要求整条页签栏去掉、只留实时日志，其余搬进
+        # 设置。面板要拿主窗口的回调（保存校验、自检、打开目录），所以先建面板
+        # 再把它交给 SettingsPage，由它挂在页面末尾。
+        self.advanced = AdvancedPanel(
+            save_text=self._save_text,
+            load_text=self._load_text,
+            open_path=self._open_path,
+            run_doctor=self._run_doctor_task,
+        )
+        self.settings_page = SettingsPage(log_fn=self._append_log, advanced=self.advanced)
         self.settings_page.changed.connect(self._on_settings_changed)
         self.settings_page.theme_changed.connect(self._on_theme_changed)
         self.settings_page.restore_requested.connect(self.restore_card)
@@ -1465,6 +1410,12 @@ class MainWindow(QMainWindow):
         if self._drag_grab is not None:
             return self._drag_grab
         local = card.mapFromParent(pos)
+        # 抓取点必须落在卡片自己身上：正常拖动时第一次 move 只挪了 8px（拖动
+        # 阈值），偏移一定在卡内；但「一次跳很远」的场景（光标已经在外面的
+        # 另一张卡上）算出来的偏移会大于卡片尺寸，pos - grab 直接变成负数，
+        # 卡片被夹到 (0,0) —— 用户看到的是「拖起来就弹回左上角」。
+        local.setX(max(0, min(local.x(), max(0, card.width() - 1))))
+        local.setY(max(0, min(local.y(), max(0, card.height() - 1))))
         self._drag_grab = local
         return local
 
@@ -1659,6 +1610,12 @@ class MainWindow(QMainWindow):
         changed = getattr(self, "_applied_theme", None) != name
         self._applied_theme = name
         if changed:
+            # 卡片以外的按钮（头部、日志工具栏、设置页、项目状态页、
+            # 高级设置区块里那些）都不随 _rebuild_cards 一起重建，
+            # 而 AnimatedButton 的配色是构造时的快照 —— 不主动刷一遍，
+            # 切到浅色主题后它们仍然画着深色底（实测 33 个按钮里 9 个
+            # 还是 #1a2130 / #3d7dfa / #251821 这套深色值）。
+            self._refresh_button_variants()
             # 卡片里的按钮是 AnimatedButton（自绘），换肤后重建才能拿到新配色。
             self._rebuild_cards()
             # 「项目状态」页有自己的色条与文字色，同样按主题取色，需要就地重建。
@@ -1667,6 +1624,17 @@ class MainWindow(QMainWindow):
                 projects_page.reload()
         else:
             self._sync_parallel_state()
+
+    def _refresh_button_variants(self):
+        """让所有已存在的 AnimatedButton 重新取一遍本主题的配色。
+
+        AnimatedButton 在 paintEvent 里自绘背景/边框，配色是 __init__ 时的
+        快照（`button_spec(variant)`）。卡片会随 _rebuild_cards() 重建，但
+        头部、日志工具栏、设置页、项目状态页、高级设置里的按钮不会，于是
+        切主题后它们停在旧主题的深色底上。
+        """
+        for button in self.findChildren(AnimatedButton):
+            button.set_variant(button.variant_name)
 
     def _on_theme_changed(self, name):
         """设置页切换主题：立刻换肤（settings 已由设置页写盘并 emit changed）。"""
@@ -1682,26 +1650,6 @@ class MainWindow(QMainWindow):
         """启动时按设置打开（不嵌入、不隐藏）勾选项目的界面窗口。"""
         for key in keys:
             self._open_project_gui(key)
-
-    def _file_tab(self, edit, path, button_text):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(10, 10, 10, 10)
-        controls = QHBoxLayout()
-        save = AnimatedButton(button_text, variant="primary")
-        save.setObjectName("primary")
-        save.clicked.connect(lambda: self._save_text(edit, path))
-        reload_btn = AnimatedButton("重新加载")
-        reload_btn.clicked.connect(lambda: self._load_text(edit, path))
-        open_btn = AnimatedButton("打开所在目录")
-        open_btn.clicked.connect(lambda: self._open_path(path.parent))
-        controls.addWidget(save)
-        controls.addWidget(reload_btn)
-        controls.addWidget(open_btn)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-        layout.addWidget(edit)
-        return tab
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(make_icon(), self)
@@ -1750,43 +1698,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "不存在", "路径不存在: {0}".format(path))
 
     def _load_text(self, edit, path):
-        try:
-            # config.read_text 会退避重试：别的线程刚做了原子替换时目标文件会被
-            # 短暂占用，直接 read_text 会抛 PermissionError，界面就显示
-            # 「# 读取失败: …」——用户以为文件坏了，其实只是撞了一下。
-            text = config.read_text(Path(path))
-        except Exception as exc:
-            edit.setPlainText("# 读取失败: {0}".format(exc))
+        """把文件内容读进编辑器（面板搬进 gui/advanced_panel.py，脏标记归它管）。"""
+        advanced = getattr(self, "advanced", None)
+        if advanced is None:
             return
-        # 程序化回填不能算「用户编辑」，否则脏标记会一直为真，磁盘改动再也同步不过来
-        if edit is getattr(self, "settings_edit", None):
-            self._settings_edit_loading = True
-            try:
-                edit.setPlainText(text)
-            finally:
-                self._settings_edit_loading = False
-                self._settings_edit_dirty = False
-            return
-        edit.setPlainText(text)
-
-    def _mark_settings_edit_dirty(self):
-        """「设置」tab 的 yaml 编辑器被用户改动过（程序回填不算）。"""
-        if getattr(self, "_settings_edit_loading", False):
-            return
-        self._settings_edit_dirty = True
+        advanced.load_text(edit, path)
+        if edit is advanced.settings_edit:
+            advanced.mark_settings_loaded()
 
     def _sync_settings_editor(self):
-        """设置文件在别处被改后，若编辑器没被用户动过就跟着刷新。
+        """设置文件在别处被改后，若「设置原文」编辑器没被用户动过就跟着刷新。
 
-        历史缺陷：settings_edit 只在开窗时读一次盘，用户在头部开关或设置页里
-        改了配置，再回到「设置」tab 点「保存设置」，会把过期文本整份写回，
-        刚改的配置被静默覆盖回旧值（实测 pre_run.enabled 改 False 后又被写回
-        True）。用户动过的编辑器不覆盖，避免吃掉他正在写的内容。
+        历史缺陷：那个编辑器只在开窗时读一次盘，用户在头部开关或设置页里改了
+        配置，再回到高级设置点「保存设置」，会把过期文本整份写回，刚改的配置
+        被静默覆盖回旧值（实测 pre_run.enabled 改 False 后又被写回 True）。
+        编辑器搬进 gui/advanced_panel.py 后这套判断跟着搬过去，这里只转发。
         """
-        edit = getattr(self, "settings_edit", None)
-        if edit is None or getattr(self, "_settings_edit_dirty", False):
-            return
-        self._load_text(edit, config.SETTINGS_YAML)
+        advanced = getattr(self, "advanced", None)
+        if advanced is not None:
+            advanced.sync_settings_editor()
 
     def _save_text(self, edit, path):
         text = edit.toPlainText()
@@ -1838,8 +1768,9 @@ class MainWindow(QMainWindow):
                 # 托盘菜单仍显示旧勾选、小组件既不出现也不消失。
                 self._on_settings_changed()
                 # 刚写进去的就是编辑器里这一份，脏标记清掉，后续外部改动可以再同步
-                if edit is getattr(self, "settings_edit", None):
-                    self._settings_edit_dirty = False
+                advanced = getattr(self, "advanced", None)
+                if advanced is not None and edit is advanced.settings_edit:
+                    advanced.mark_settings_loaded()
             elif saved == Path(config.PROJECTS_YAML):
                 self._reload_registry()
             elif saved == Path(config.REPAIR_YAML):
@@ -2199,7 +2130,6 @@ class MainWindow(QMainWindow):
 
     def show_project_logs(self, key):
         self.filter_combo.setCurrentIndex(max(0, self.filter_combo.findData(key)))
-        self.tabs.setCurrentIndex(0)
         self.stack.setCurrentWidget(self.stack.widget(0))
         self.nav.set_active("overview", animate=False)
 
@@ -2536,68 +2466,37 @@ class MainWindow(QMainWindow):
     def _on_change(self):
         pass
 
-    def _reports_dir_mtime(self):
-        """错误报告目录的修改时间，用来判断「列表是否需要重扫」。"""
-        try:
-            return config.REPORTS_DIR.stat().st_mtime_ns
-        except OSError:
-            return None
-
-    def _on_tab_changed(self, index):
-        """切到「错误报告」页时刷新列表。
-
-        历史缺陷一：报告列表只在点「刷新」时填充，打开程序切到本页永远是空列表，
-        用户会以为没有错误报告（实际磁盘上有 44 份）。
-        历史缺陷二：改成「只在第一次进入时加载」之后走向另一个极端——开窗之后
-        才产生的报告（链跑挂了正是这时候生成的）在本进程里永远看不到，切过来
-        仍然是「还没有错误报告」，与磁盘状态相反。现在按报告目录的 mtime 判断：
-        目录没变就直接复用列表（一次 stat，微秒级），变了才重扫。
-        """
-        if self.tabs.widget(index) is not getattr(self, "_reports_tab", None):
-            return
-        if self._reports_loaded and self._reports_dir_mtime() == self._reports_mtime:
-            return
-        self.refresh_reports()
-
+    # -- 错误报告（面板搬进 gui/advanced_panel.py，这里只转发） -----------------
     def refresh_reports(self):
-        """重扫报告目录并重建列表；尽量保留用户当前选中的报告。"""
-        selected = None
-        current = self.report_list.currentItem()
-        if current is not None:
-            selected = current.data(Qt.UserRole)
-        self.report_list.clear()
-        for item in report.list_reports(limit=200):
-            entry = "{0}  [{1}] {2}".format(item["name"], item.get("project", ""), item.get("reason", ""))
-            list_item = QListWidgetItem(entry)
-            list_item.setData(Qt.UserRole, item["dir"])
-            self.report_list.addItem(list_item)
-        self._reports_loaded = True
-        self._reports_mtime = self._reports_dir_mtime()
-        if self.report_list.count() == 0:
-            placeholder = QListWidgetItem("（还没有错误报告：项目异常退出时才会生成）")
-            placeholder.setFlags(Qt.NoItemFlags)
-            placeholder.setData(Qt.UserRole, None)
-            self.report_list.addItem(placeholder)
-        elif selected:
-            for row in range(self.report_list.count()):
-                if self.report_list.item(row).data(Qt.UserRole) == selected:
-                    self.report_list.setCurrentRow(row)
-                    break
+        advanced = getattr(self, "advanced", None)
+        if advanced is not None:
+            advanced.refresh_reports()
 
     def open_selected_report(self):
-        item = self.report_list.currentItem()
-        if item is None:
-            return
-        path = item.data(Qt.UserRole)
-        if not path:
-            return
-        self._open_path(path)
+        advanced = getattr(self, "advanced", None)
+        if advanced is not None:
+            advanced.open_selected_report()
 
     def run_doctor(self):
+        """总览页头部「环境自检」按钮：结果要写在设置页的「环境自检」区块里，
+        所以先切过去并把那一块展开，再走统一入口。"""
+        advanced = getattr(self, "advanced", None)
+        if advanced is not None:
+            advanced.expand("doctor")
+            self._navigate("settings")
+        self._run_doctor_task()
+
+    def _run_doctor_task(self):
+        """真正的自检任务（头部按钮与高级设置区块里的按钮共用）。"""
         if not self._begin_task("doctor"):
             return
-        self.doctor_view.setPlainText("环境自检运行中...")
-        self.tabs.setCurrentIndex(self.tabs.count() - 1)
+        advanced = getattr(self, "advanced", None)
+        if advanced is not None:
+            # 旧实现靠 tabs.setCurrentIndex(最后一个页签) 把结果页翻出来，页签
+            # 已整体移除；现在结果落在设置页的折叠区块里，必须先展开，否则
+            # 用户点「自检」跑完什么也看不到。
+            advanced.expand("doctor")
+            advanced.doctor_view.setPlainText("环境自检运行中...")
 
         def worker():
             try:
@@ -2909,7 +2808,10 @@ class MainWindow(QMainWindow):
             lines.append("[{0:<4}] {1:<30} {2}".format(item["status"], item["name"], item.get("detail", "")))
         lines.append("")
         lines.append("ok={ok} warn={warn} fail={fail} total={total}".format(**summary))
-        self.doctor_view.setPlainText("\n".join(lines))
+        advanced = getattr(self, "advanced", None)
+        view = advanced.doctor_view if advanced is not None else getattr(self, "doctor_view", None)
+        if view is not None:
+            view.setPlainText("\n".join(lines))
 
     def verify_patches(self):
         import importlib.util

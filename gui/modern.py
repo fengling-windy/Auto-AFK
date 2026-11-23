@@ -143,6 +143,10 @@ class FlowLayout(QLayout):
     单张卡的宽度。
     """
 
+
+    # 卡片宽度上限 = sizeHint 宽 × 这个系数（见 _do_layout 里的说明）。
+    MAX_CELL_SCALE = 1.15
+
     def __init__(self, parent=None, margin=0, h_spacing=12, v_spacing=12):
         super().__init__(parent)
         self._items = []
@@ -343,28 +347,42 @@ class FlowLayout(QLayout):
         if not visible:
             return margins.top() + margins.bottom()
 
-        # 一行能放几张就均分成几张的宽度：所有卡片等宽，换行后最后一行
-        # 左对齐（不拉伸成一张超宽卡，那样视觉上像出错）。
-        per_row = max(1, int((effective.width() + self._h_spacing) // (widest + self._h_spacing)))
+        # 卡片一律保持「小巧」：cell 最多比 sizeHint 宽 15%（下限再给 24px），
+        # 宁可每行多放一张也不把卡片拉成长条。历史缺陷：原来只按 `widest`
+        # 算能放几张、再把整行宽度均分给它们，宽窗口下单张卡会被拉成
+        # sizeHint 的 1.5–2.5 倍（实测可用宽 838px 时一张卡就占满整行，
+        # 1600px 时四张各 391px），看着像横条而不是卡片。
+        max_cell = max(float(widest) * self.MAX_CELL_SCALE, float(widest) + 24.0)
+        per_row = max(
+            1,
+            min(
+                len(visible),
+                int((effective.width() + self._h_spacing) // (max_cell + self._h_spacing)),
+            ),
+        )
         # 末尾那行只剩一张卡时（例如 5 张卡排成 4+1），把每行减一张换成
         # 3+2 这种更均衡的分行，避免第二行孤零零一张。
         if per_row > 2 and len(visible) % per_row == 1:
             per_row -= 1
         cell = (effective.width() - (per_row - 1) * self._h_spacing) / per_row
-        cell = max(cell, float(widest))
+        cell = max(min(cell, max_cell), float(widest))
 
         y = effective.y()
-        x = effective.x()
         row_height = 0
         placed = 0
         for item, _width, height in visible:
-            if placed and placed % per_row == 0:
+            column = placed % per_row
+            if placed and column == 0:
                 y += row_height + self._v_spacing
-                x = effective.x()
                 row_height = 0
+            # 每行居中：被 max_cell 限宽后行右侧会空出一截，靠左对齐看起来
+            # 像「少画了一块」，居中才像正常留白。
+            in_row = min(per_row, len(visible) - (placed - column))
+            row_width = in_row * cell + max(0, in_row - 1) * self._h_spacing
+            offset = max(0.0, (effective.width() - row_width) / 2.0)
+            x = effective.x() + offset + column * (cell + self._h_spacing)
             if not test_only:
                 self._place(item, QRectF(x, y, cell, height).toAlignedRect())
-            x += cell + self._h_spacing
             row_height = max(row_height, height)
             placed += 1
 
@@ -617,6 +635,12 @@ class ParallelLinks(QWidget):
         # 才定义，但这里只在构造时求值，届时模块早已初始化完毕。
         self._color = QColor(themes.resolve(_current_theme)["accent"])
         self._active = None        # 正在编辑（还没成为正式一组）的那一组，画虚线
+        self._flow = 0.0           # 流动光效相位（0..1），有组时由 _tick 推进
+        from PySide6.QtCore import QTimer
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.FLOW_INTERVAL_MS)
+        self._timer.timeout.connect(self._tick)
 
     def set_color(self, color):
         self._color = QColor(color)
@@ -626,6 +650,32 @@ class ParallelLinks(QWidget):
         """groups: 每个并行组一个卡片列表（相邻的两张或多张）。"""
         self._groups = [[w for w in group if w is not None] for group in (groups or [])]
         self._active = [w for w in (active or []) if w is not None]
+        self._sync_flow_timer()
+        self.update()
+
+    # -- 流动光效 ---------------------------------------------------------------
+    # 有并行组时让虚线「跑」起来（只改 dashOffset 与一颗流动光点的位置）。
+    # 没组就停表，空转时一个定时器都不留。
+    FLOW_INTERVAL_MS = 40
+    FLOW_SPEED = 0.012      # 每 tick 前进的相位（1.0 = 跑完整条线）
+
+    def _sync_flow_timer(self):
+        wanted = bool(self._groups) and self.isVisible()
+        if wanted and not self._timer.isActive():
+            self._timer.start(self.FLOW_INTERVAL_MS)
+        elif not wanted and self._timer.isActive():
+            self._timer.stop()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._sync_flow_timer()
+
+    def hideEvent(self, ev):
+        self._timer.stop()
+        super().hideEvent(ev)
+
+    def _tick(self):
+        self._flow = (self._flow + self.FLOW_SPEED) % 1.0
         self.update()
 
     def _centers(self):
@@ -651,46 +701,95 @@ class ParallelLinks(QWidget):
             for left, right in zip(rects, rects[1:]):
                 self._draw_link(painter, left, right, is_active)
 
-    def _draw_link(self, painter, left, right, dashed):
-        """两张相邻卡片之间的连线：同行走弧线，折行时绕到下方。"""
-        color = QColor(self._color)
-        pen = QPen(color, 2.0)
-        pen.setCapStyle(Qt.RoundCap)
-        if dashed:
-            pen.setStyle(Qt.DashLine)
-            pen.setDashPattern([4.0, 3.0])
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
+    # -- 连线几何：卡片右缘中点 → 下一张左缘中点 ------------------------------
+    @staticmethod
+    def _link_path(left, right):
+        """从 left 卡片右侧中点连到 right 卡片左侧中点。
 
-        same_row = abs(left.center().y() - right.center().y()) < 4.0
+        历史：原先走「两张卡底部 - 6px 的水平弧线」，看着像在卡片下面兜了个
+        袋子；用户要求「从中间连接」，于是两个端点都取卡片竖直中点。同行时
+        用水平贝塞尔的 S 形，折行时用一条带竖直切线的 S 形，避免线贴着卡片
+        边缘走。
+        """
+        start = QPointF(left.right(), left.center().y())
+        end = QPointF(right.left(), right.center().y())
+        path = QPainterPath(start)
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        same_row = abs(dy) < 4.0
         if same_row:
-            y = min(left.bottom(), right.bottom()) - 6.0
-            start = QPointF(left.right() - 2.0, y)
-            end = QPointF(right.left() + 2.0, y)
-            path = QPainterPath(start)
-            span = max(8.0, end.x() - start.x())
+            span = max(24.0, abs(dx))
+            handle = span * 0.5
             path.cubicTo(
-                QPointF(start.x() + span * 0.35, y + 14.0),
-                QPointF(end.x() - span * 0.35, y + 14.0),
+                QPointF(start.x() + handle, start.y()),
+                QPointF(end.x() - handle, end.y()),
                 end,
             )
         else:
-            start = QPointF(left.center().x(), left.bottom() - 2.0)
-            end = QPointF(right.center().x(), right.top() + 2.0)
-            path = QPainterPath(start)
-            span = max(20.0, abs(end.y() - start.y()))
+            # 折行：从右缘出来先横向走一段，再竖直，最后从左侧进卡片。
+            handle = max(28.0, min(abs(dx) * 0.6, 90.0))
+            drop = max(18.0, abs(dy) * 0.5)
             path.cubicTo(
-                QPointF(start.x(), start.y() + span * 0.5),
-                QPointF(end.x(), end.y() - span * 0.5),
+                QPointF(start.x() + handle, start.y()),
+                QPointF(end.x() - handle, end.y() - drop if dy > 0 else end.y() + drop),
                 end,
             )
+        return path
+
+    def _draw_link(self, painter, left, right, dashed):
+        """相邻两张卡片之间的连线：中间对中间，外发光 + 流动虚线 + 端点光环。"""
+        color = QColor(self._color)
+        path = self._link_path(left, right)
+
+        painter.setBrush(Qt.NoBrush)
+        # 1) 外发光：粗、极淡，铺一层柔和的底
+        glow = QColor(color)
+        glow.setAlpha(38 if dashed else 60)
+        pen = QPen(glow, 9.0)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        # 2) 中层光晕
+        halo = QColor(color)
+        halo.setAlpha(70 if dashed else 110)
+        pen = QPen(halo, 4.2)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
+        # 3) 芯线：流动虚线（未成组的「待配对」用更疏的虚线，视觉上还没接通）
+        core = QColor(color)
+        if dashed:
+            core.setAlpha(190)
+            pen = QPen(core, 1.6)
+            pen.setStyle(Qt.CustomDashLine)
+            pen.setDashPattern([3.0, 5.0])
+            pen.setDashOffset(-self._flow * 16.0)
+        else:
+            pen = QPen(core, 1.9)
+            pen.setStyle(Qt.SolidLine)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
         painter.drawPath(path)
 
-        # 两端各点一个小圆，读起来像「接上了」
+        # 4) 端点：外环 + 实心点，像接口插上了
         painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
         for point in (path.pointAtPercent(0.0), path.pointAtPercent(1.0)):
-            painter.drawEllipse(point, 3.0, 3.0)
+            ring = QColor(color)
+            ring.setAlpha(120)
+            painter.setBrush(ring)
+            painter.drawEllipse(point, 4.6, 4.6)
+            painter.setBrush(color)
+            painter.drawEllipse(point, 2.2, 2.2)
+
+        # 5) 流动光点：一组已接通时沿着线跑，提示「这两张是一起跑的」
+        if not dashed:
+            head = path.pointAtPercent(self._flow)
+            core_glow = QColor(color)
+            core_glow.setAlpha(90)
+            painter.setBrush(core_glow)
+            painter.drawEllipse(head, 6.0, 6.0)
+            painter.setBrush(QColor(255, 255, 255, 210))
+            painter.drawEllipse(head, 2.6, 2.6)
 
 
 APP_QSS_TEMPLATE = """
