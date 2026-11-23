@@ -2080,18 +2080,35 @@ class MainWindow(QMainWindow):
         self.nav.set_active("overview", animate=False)
 
     def _open_project_logs(self, key):
-        """项目页「打开日志」：打开该项目的日志目录（含 .out.log/.err.log）。
+        """项目页「打开日志」：打开该项目本次运行自己的日志文件。
 
-        先找本项目最近一次运行的具体日志文件，没有就退到日志根目录。
+        取文件的顺序是「本地运行对象 → 状态快照 → 磁盘上最新的同名文件 →
+        日志根目录」。历史缺陷：`ProjectRun.to_dict()` 没有输出 `out_log`，
+        而这里只读快照的 `run["out_log"]`，于是永远取不到，每次都退到
+        `glob("{key}_*.out.log")[-1]`——多次运行后碰巧也是最新那份，但语义
+        并不是「你点的这张卡这一次运行」；项目从没跑过、或日志被清理过时，
+        还会退成打开整个 logs 目录。
         """
         out_log = None
-        try:
-            run = (self.supervisor.status_snapshot().get("runs") or {}).get(key) or {}
-            candidate = run.get("out_log")
-            if candidate and Path(candidate).exists():
-                out_log = Path(candidate)
-        except Exception:
-            out_log = None
+        # 1. 本地运行对象：最准，连刚启动还没落盘的那次也能定位。
+        run = (getattr(self.supervisor, "runs", None) or {}).get(key)
+        candidate = getattr(run, "out_log", None) if run is not None else None
+        if candidate is not None:
+            try:
+                if Path(candidate).exists():
+                    out_log = Path(candidate)
+            except OSError as exc:
+                logging.getLogger("afk.gui").debug("check run out_log failed: %s", exc)
+        # 2. 状态快照（跨进程/从 state.json 恢复出来的运行）。
+        if out_log is None:
+            try:
+                entry = (self.supervisor.status_snapshot().get("runs") or {}).get(key) or {}
+                snapshot_path = entry.get("out_log")
+                if snapshot_path and Path(snapshot_path).exists():
+                    out_log = Path(snapshot_path)
+            except Exception as exc:
+                logging.getLogger("afk.gui").debug("read snapshot out_log failed: %s", exc)
+        # 3. 磁盘上最新的同名日志（老版本留下的运行没有 out_log 记录）。
         if out_log is None:
             project_dir = config.PROJECT_LOGS
             if project_dir.exists():

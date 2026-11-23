@@ -126,6 +126,13 @@ class ProjectRun:
             "managed_main": self.managed_main,
             "window_seen": self.window_seen,
             "pid": self.process.pid if self.process else None,
+            # 本次运行自己的日志文件。历史缺陷：这里一直没输出，而
+            # gui/main.py 的「打开日志」正是按 run["out_log"] 去找「最近一次
+            # 运行的具体日志」，拿不到就只能退到 glob(项目_*.out.log) 取最后
+            # 一个文件——多次运行后碰巧也是最新那份，但语义不是「你点的这张卡
+            # 这一次运行」。转成字符串，方便 JSON 落盘与跨进程传给 GUI。
+            "out_log": str(self.out_log),
+            "err_log": str(self.err_log),
         }
 
 

@@ -683,6 +683,56 @@ def test_main_window(app):
         pump(app, 400)
         check("「界面」按钮拉起项目自己的进程", spawn_calls == [gui_projects[0]])
         check("打开界面失败时写告警日志", "无法打开" in window.log_view.toPlainText())
+
+        # 「打开日志」要打开这一张卡这一次运行自己的日志文件。
+        # 历史缺陷：ProjectRun.to_dict() 不输出 out_log，而 _open_project_logs
+        # 只读快照的 run["out_log"]，于是永远取不到，每次退到
+        # glob("{key}_*.out.log")[-1]——多次运行后碰巧也是最新那份，语义却不是
+        # 「你点的这一次运行」；从没跑过的项目还会退成打开整个 logs 目录。
+        opened = []
+        _real_open_path = window._open_path
+        window._open_path = lambda path: opened.append(Path(path))
+        _log_key = "SmokeLogProj"
+        try:
+            _run_dir = config.PROJECT_LOGS
+            _run_dir.mkdir(parents=True, exist_ok=True)
+            # 有意让「本次运行自己的日志」不是磁盘上最新的那个文件：
+            # 这样才能把「按运行记录定位」和「按文件名取最新」区分开。
+            _own_log = _run_dir / "{0}_20000101_000000_smoke.out.log".format(_log_key)
+            _own_log.write_text("own run\n", encoding="utf-8")
+            _old_log = _run_dir / "{0}_20990101_000000_newer.out.log".format(_log_key)
+            _old_log.write_text("newer run\n", encoding="utf-8")
+            _log_run = ProjectRun(_log_key, {"display_name": _log_key})
+            _log_run.out_log = _own_log
+            window.supervisor.runs[_log_key] = _log_run
+            window._open_project_logs(_log_key)
+            check("「打开日志」打开本次运行自己的日志文件", opened == [_own_log])
+            # 快照里也带 out_log：跨进程恢复出来的运行同样能定位
+            _entry = (window.supervisor.status_snapshot().get("runs") or {}).get(_log_key) or {}
+            check(
+                "状态快照里带本次运行的日志路径",
+                _entry.get("out_log") == str(_own_log),
+            )
+            opened.clear()
+            # 本地运行对象拿不到时（老版本 state.json 里的记录没有日志路径）
+            # 退到磁盘上最新的那份同名日志。
+            window.supervisor.runs.pop(_log_key, None)
+            _real_snapshot = window.supervisor.status_snapshot
+            window.supervisor.status_snapshot = lambda: {"chain_status": "idle", "runs": {}}
+            try:
+                window._open_project_logs(_log_key)
+            finally:
+                window.supervisor.status_snapshot = _real_snapshot
+            check("没有运行记录时退到磁盘上最新的日志", opened == [_old_log])
+            for _p in (_own_log, _old_log):
+                try:
+                    _p.unlink()
+                except OSError:
+                    pass
+        finally:
+            window.supervisor.runs.pop(_log_key, None)
+            window._open_path = _real_open_path
+
         window._navigate("settings")
         pump(app, 60)
         check("导航切到设置页", window.stack.currentWidget() is window.settings_page)
