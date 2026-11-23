@@ -599,6 +599,11 @@ class MainWindow(QMainWindow):
     # 后台线程直接写 log_view 属跨线程操作控件，必须走 Signal。
     gui_log = Signal(str, str, str)
 
+    # 拖动过程中邻居让位用的补间时长（毫秒）。160ms 是「松手归位」那种一次性
+    # 过渡的合适值，但拖动时每次鼠标移动都会重启一轮，160ms 追不上手速，邻居
+    # 看起来像「松手才变」；缩到 90ms 才跟手，同时保留了滑动感而非瞬移。
+    DRAG_ANIM_MS = 90
+
     def __init__(self):
         super().__init__()
         self.settings = config.settings()
@@ -1472,7 +1477,7 @@ class MainWindow(QMainWindow):
         # 注意顺序：必须先置补间标志再 set_order。set_order 内部会立刻
         # invalidate/activate 触发一次布局，晚一步置位的话那次布局把卡片直接
         # 钉到终点，后面的动画找不到位移差（实测 running_animations() 恒 0）。
-        host.animate_next_layout()
+        host.animate_next_layout(self.DRAG_ANIM_MS)
         host.set_order(order)
         host.sync_height(host.width())
         self._sync_parallel_state()

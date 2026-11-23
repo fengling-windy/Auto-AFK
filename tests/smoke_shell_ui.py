@@ -1706,6 +1706,20 @@ def test_main_window(app):
             check("拖动只有 N 个卡，没丢控件", len(after_order) == len(before_order))
             check("邻居靠动画让位（running={0}）".format(host.running_animations()),
                   host.running_animations() > 0)
+            # 用户 2026-11-23 的第二条抱怨是「等松开才变位置」：顺序必须在拖动
+            # 过程中（鼠标还没松）就已经跟着光标换了，而且补间要用短时长，否则
+            # 每次鼠标移动都重启一轮 160ms 动画，追不上手速看起来像没动。
+            mid_order = window.visible_card_keys()
+            check("拖动中（未松手）顺序就已经变了（{0}）".format(mid_order),
+                  mid_order != before_order)
+            check("拖动补间用短时长（{0}ms < 默认 160ms）".format(
+                window.DRAG_ANIM_MS), 0 < window.DRAG_ANIM_MS < 160)
+            # 再往回拖一格，顺序要继续实时跟着变（不是只有第一次生效）
+            window._on_card_drag_moved(moving_key, host.mapToGlobal(drag_keys and
+                                                                    window.cards[drag_keys[1]].geometry().center()))
+            pump(app, 40)
+            check("继续拖动时顺序仍在实时跟随（{0}）".format(window.visible_card_keys()),
+                  window.visible_card_keys() != mid_order)
 
             window._on_card_drag_finished(moving_key)
             pump(app, 400)
