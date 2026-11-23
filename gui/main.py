@@ -322,7 +322,10 @@ class ProjectCard(HoverGlowCard):
 
         self.status_label = QLabel("等待")
         self.status_label.setObjectName("cardStatus")
-        self.status_label.setStyleSheet("color: {0};".format(_theme_status_colors()["pending"]))
+        # 记住当前画出来的状态文字/颜色，update_state 里据此跳过无变化的写入
+        self._status_text = "等待"
+        self._status_color = _theme_status_colors()["pending"]
+        self.status_label.setStyleSheet("color: {0};".format(self._status_color))
         layout.addWidget(self.status_label)
 
         self.detail_label = QLabel("未运行")
@@ -377,6 +380,28 @@ class ProjectCard(HoverGlowCard):
         self._apply_enabled()
 
     # -- 启用状态 -----------------------------------------------------------
+    @staticmethod
+    def _set_text_if_changed(label, text):
+        """文本没变就不写控件（setText 会触发重排，300ms 轮询下纯属浪费）。"""
+        if label.text() != text:
+            label.setText(text)
+
+    def _set_status_text(self, text, color):
+        """写状态文字与颜色，并记住上次画的内容（没变就不碰控件）。
+
+        _poll 每 300ms 对每张卡调一次 update_state，而 setText/setStyleSheet
+        都会让 Qt 重算样式（实测 5 张卡空转 20 轮打了 100 次 setStyleSheet、
+        3.0ms/轮）。缓存必须和控件内容一起改：`_apply_enabled` 也会直接写这
+        个标签（写「已禁用」），漏同步缓存的话，恢复启用后 update_state 会
+        以为「还是等待」而跳过写入，卡片永远停在「已禁用」（冒烟实测）。
+        """
+        if text == self._status_text and color == self._status_color:
+            return
+        self._status_text = text
+        self._status_color = color
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet("color: {0};".format(color))
+
     def _apply_enabled(self, busy=None):
         """enabled: false 时把卡片标灰、禁用启动按钮并说明原因。
 
@@ -388,10 +413,9 @@ class ProjectCard(HoverGlowCard):
             tip = ""
         else:
             tip = "注册表里这个项目是 enabled: false，跑链时会跳过；要启用请到「项目注册表」改成 true"
-            self.status_label.setText("已禁用")
-            self.status_label.setStyleSheet("color: {0};".format(_theme_status_colors()["pending"]))
+            self._set_status_text("已禁用", _theme_status_colors()["pending"])
             self.dot.set_state(_theme_status_colors()["pending"], pulse=False)
-            self.detail_label.setText("注册表里 enabled: false，链会跳过它")
+            self._set_text_if_changed(self.detail_label, "注册表里 enabled: false，链会跳过它")
         self.start_btn.setToolTip(tip)
         self.parallel_btn.setEnabled(enabled)
         self.parallel_btn.setToolTip(tip or "与相邻的项目同时运行：两张相邻的卡各点一次")
@@ -528,11 +552,14 @@ class ProjectCard(HoverGlowCard):
         # 运行中/卡死时状态点呼吸脉冲（卡死闪得更快）
         period = 1.1 if status == "hang" else 1.6
         self.dot.set_state(color, pulse=status in ("running", "hang"), period=period)
-        self.status_label.setText(STATUS_TEXT.get(status, status))
-        self.status_label.setStyleSheet("color: {0};".format(color))
+        # 状态文字只在真的变了才写（_set_status_text 自己比对缓存）：_poll 每
+        # 300ms 对每张卡调一次 update_state，setText/setStyleSheet 都会让 Qt
+        # 重算样式，全量重写一遍纯属无效工作（实测空转 20 轮打了 100 次
+        # setStyleSheet、3.0ms/轮）。
+        self._set_status_text(STATUS_TEXT.get(status, status), color)
         if run is None:
-            self.detail_label.setText("未运行")
-            self.attempt_label.setText("")
+            self._set_text_if_changed(self.detail_label, "未运行")
+            self._set_text_if_changed(self.attempt_label, "")
             return
         parts = []
         if run.get("pid"):
@@ -544,8 +571,9 @@ class ProjectCard(HoverGlowCard):
         # 兜底文案必须跟状态走：历史缺陷是无条件写「运行中...」，于是排队中的
         # 卡片（status=pending、还没有 pid/exit/message）也显示成「等待 / 运行中...」，
         # 状态行和详情行互相矛盾，用户以为项目已经在跑。
-        self.detail_label.setText(" | ".join(parts) if parts else STATUS_DETAIL_FALLBACK.get(status, ""))
-        self.attempt_label.setText("尝试 {0} 次".format(run.get("attempt", 1)))
+        detail = " | ".join(parts) if parts else STATUS_DETAIL_FALLBACK.get(status, "")
+        self._set_text_if_changed(self.detail_label, detail)
+        self._set_text_if_changed(self.attempt_label, "尝试 {0} 次".format(run.get("attempt", 1)))
 
 
 class MainWindow(QMainWindow):

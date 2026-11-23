@@ -43,7 +43,7 @@ shutil.copy(_REAL_REPAIR, _TMP_REPAIR)
 config.REPAIR_YAML = _TMP_REPAIR
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem
 
 from afk_core.events import EventBus
 from afk_core.supervisor import ProjectRun, Supervisor, apply_chain_order
@@ -450,6 +450,34 @@ def test_main_window(app):
         check("卡死的卡片不显示成「运行中」", "运行中" not in card.detail_label.text())
         # 复原：上面改了卡片文案，卡片高度跟着变，会影响后面「整行吸附」那条
         # 断言的单行高度（同一份 content_height 却按新行高取模）。
+        card.update_state(None)
+        window._sync_cards_height()
+        pump(app, 60)
+
+        # 状态文字/颜色没变化时不该重复写控件。_poll 每 300ms 对每张卡调一次
+        # update_state，而 setText/setStyleSheet 会触发 Qt 重算样式：实测 5 张卡
+        # 空转 20 轮会打 100 次 setStyleSheet（3.0ms/轮），全是无效工作。
+        writes = {"n": 0}
+        _orig_set_style = QLabel.setStyleSheet
+
+        def _count_style(widget, text):
+            if widget is card.status_label:
+                writes["n"] += 1
+            return _orig_set_style(widget, text)
+
+        QLabel.setStyleSheet = _count_style
+        try:
+            card.update_state(None)
+            card.update_state(None)
+            card.update_state({"status": "pending"})
+            check("状态没变时不重复写状态标签（实测 {0} 次）".format(writes["n"]),
+                  writes["n"] == 0)
+            card.update_state({"status": "running", "pid": 5})
+            check("状态变了才写一次状态标签", writes["n"] == 1)
+            card.update_state({"status": "running", "pid": 5})
+            check("同一状态再来一轮不再写", writes["n"] == 1)
+        finally:
+            QLabel.setStyleSheet = _orig_set_style
         card.update_state(None)
         window._sync_cards_height()
         pump(app, 60)
