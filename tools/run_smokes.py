@@ -62,6 +62,7 @@ SUITE = [
     ("smoke_retry_round", "core", "链级容错与重试上限"),
     ("smoke_stop_error", "core", "出错即止"),
     ("smoke_softstop", "core", "软停止"),
+    ("smoke_stop_all", "core", "「全部停止」空闲时不该把状态改成已停止"),
     ("smoke_hang_flow", "core", "卡死 -> 修复 -> 重试 -> 报告"),
     ("smoke_hang", "core", "卡死判定"),
     ("smoke_window", "core", "窗口完成判定 + 启动器秒退保护"),

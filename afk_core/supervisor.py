@@ -1290,12 +1290,43 @@ class Supervisor:
         return True
 
     def stop_all(self):
+        """停掉挂机链与所有在跑的项目；返回真正停掉的项目数。
+
+        历史缺陷：这里无条件把 chain_status 写成 "stopped" 并落盘。空闲时点
+        「全部停止」（或关窗口走 _quit）会把界面上的「空闲」改成一个从没发生
+        过的「已停止」，state.json 里也留下 stopped，下次开窗读回来还是「已
+        停止」——用户以为上次是异常中断的。而且整个过程一条日志都没有，点了
+        看不出任何反应。
+        """
+        chain_work = self.chain_status == "running" or (
+            self._chain_thread is not None and self._chain_thread.is_alive()
+        )
+        alive = [key for key, run in self.runs.items() if run.alive]
+        pending_action = self._post_action_timer is not None
+        if not chain_work and not alive and not pending_action:
+            # 什么都不用做，但也别让这次点击彻底无声（否则用户会连点）。
+            self._emit("core", "status", "stop all: nothing running", level="info")
+            return 0
+        # 计划中的关机/睡眠/退出也要一起取消——只取消挂起的定时任务时不必
+        # 把链状态写成 stopped（链早就正常结束了）。
+        if pending_action:
+            self.cancel_post_action()
+        if not chain_work and not alive:
+            return 0
         self._chain_stop.set()
         self.chain_status = "stopped"
-        self.cancel_post_action()
+        stopped = 0
         for key in list(self.runs.keys()):
-            self.stop_project(key)
+            if self.stop_project(key):
+                stopped += 1
+        self._emit(
+            "core",
+            "status",
+            "stop all: {0} project(s) stopping".format(stopped),
+            level="warn",
+        )
         self._persist()
+        return stopped
 
     def run_startup_updates(self):
         """Update all projects once, right after Auto-AFK starts
