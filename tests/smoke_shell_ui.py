@@ -1574,6 +1574,31 @@ def test_main_window(app):
             window._apply_card_order(order_keys)
             pump(app, 120)
 
+        # 并行连线层必须跟卡片区一样大，否则最右列的卡片落在浮层之外、弧线
+        # 起点被裁掉。历史缺陷：只有 _sync_parallel_state / MainWindow.resizeEvent
+        # 会给它 setGeometry，而卡片区在滚动区里——滚动条出现/消失时宿主自己
+        # 变宽变窄，这两条路径都不会被触发（实测 1360x900 下宿主 1122 → 1136，
+        # 连线层仍停在 1122）。
+        check("卡片区挂了尺寸回调（浮层要能被通知）",
+              callable(getattr(window.cards_host, "_resize_hook", None)))
+        check("连线层与卡片区等宽（{0} vs {1}）".format(
+            window.links.width(), window.cards_host.width()),
+              window.links.width() == window.cards_host.width())
+        original_size = window.size()
+        window.resize(1200, original_size.height())
+        pump(app, 300)
+        check("窗口变窄后连线层跟着卡片区（{0} vs {1}）".format(
+            window.links.width(), window.cards_host.width()),
+              window.links.width() == window.cards_host.width())
+        window.resize(original_size)
+        pump(app, 300)
+        check("窗口恢复后连线层仍然等宽（{0} vs {1}）".format(
+            window.links.width(), window.cards_host.width()),
+              window.links.width() == window.cards_host.width())
+        check("连线层高度也跟着卡片区（{0} vs {1}）".format(
+            window.links.height(), window.cards_host.height()),
+              window.links.height() == window.cards_host.height())
+
         # 多项目并行：A-B 已经一组，再点 C 然后点组边的 B，要并成 A-B-C。
         # 历史缺陷：toggle_parallel 把「已在组里 → 退出」分支放在最前面，点 B
         # 时先把 B 从 A-B 摘掉、组里只剩 A 于是整组作废——用户想让三张一起跑，

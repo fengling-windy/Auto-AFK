@@ -13,6 +13,7 @@
 - fade_in_widget / fade_in_window: 淡入工具
 """
 
+import logging
 import math
 import time
 from pathlib import Path
@@ -274,6 +275,11 @@ class FlowHost(QWidget):
         super().__init__(parent)
         self._flow = FlowLayout(self, h_spacing=h_spacing, v_spacing=v_spacing)
         self._syncing = False
+        # 尺寸变化后的回调（MainWindow 用它把浮在上面的并行连线层一起跟上）。
+        # 为什么不能只靠父窗口手算：卡片区在 QScrollArea 里，滚动条出现/消失
+        # 会让本控件宽度自己变（实测 1360x900 下从 1122 变到 1136），而这条
+        # 路径不经过 MainWindow 的 resizeEvent——没有任何外部调用点。
+        self._resize_hook = None
         # 纵向 Fixed + 自己按当前宽度算高度（见 sync_height）：不用 heightForWidth。
         # 早期版本走 heightForWidth，Qt 在窗口首轮布局前会用 QWidget 默认宽度
         # (640) 问一次 sizeHint，5 张卡被算成 5 行 848px，于是主窗口最小高度
@@ -312,6 +318,10 @@ class FlowHost(QWidget):
 
     def hasHeightForWidth(self):
         return False
+
+    def set_resize_hook(self, hook):
+        """注册「本控件尺寸变了」的回调（可以是 None）。"""
+        self._resize_hook = hook
 
     def v_spacing(self):
         """行间距（取自内部 FlowLayout），供滚动区做整行吸附。"""
@@ -361,6 +371,15 @@ class FlowHost(QWidget):
             finally:
                 self._syncing = False
         self.updateGeometry()
+        # 宽度/高度变了就把浮层一起跟上：连线层不在布局里，靠外部在
+        # resizeEvent 里手算漏掉了「滚动条出现/消失」这条路（卡片区宽度自己变，
+        # 主窗口根本没收到 resize），于是最右列的卡片超出连线层、弧线画不出来。
+        hook = self._resize_hook
+        if hook is not None:
+            try:
+                hook()
+            except Exception as exc:
+                logging.getLogger("afk.gui").warning("resize hook failed: %s", exc)
 
     # -- 顺序调整（卡片拖动排序）------------------------------------------
     def insert_widget(self, index, widget):

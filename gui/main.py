@@ -874,6 +874,12 @@ class MainWindow(QMainWindow):
         # 鼠标事件穿透。放在这里而不是卡片上，是因为跨卡片的线会被卡片边界裁掉。
         self.links = ParallelLinks(cards_host)
         self.links.set_color(links_color())
+        # 卡片区宽度有两种变化路径：一种是窗口被拖动（MainWindow.resizeEvent 会
+        # 调 _sync_cards_height），另一种是滚动条出现/消失、或卡片增删导致的
+        # 「宿主自己变宽变窄」——后者不经过主窗口，谁也不通知连线层。实测
+        # 1360x900 下宿主从 1122 变到 1136 后，连线层还停在 1122，最右列卡片
+        # 的后 14px 落在浮层之外（弧线起点被裁掉）。挂个钩子由宿主自己报。
+        cards_host.set_resize_hook(lambda: self.links.setGeometry(cards_host.rect()))
         for key, spec in self._ordered_project_items():
             if key in self._hidden_projects:
                 continue
