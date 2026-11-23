@@ -874,7 +874,10 @@ class MainWindow(QMainWindow):
         # 1366/1440 宽的笔记本上窗口撑出屏幕。流式布局按可用宽度自动折行；
         # 外层 FlowHost 负责把「折成几行就有多高」报给父布局，否则第二行会被
         # 画到下面的页签上面（窄窗口下实测重叠）。
-        cards_host = FlowHost(h_spacing=12, v_spacing=12)
+        # 横向间距 20 而不是 12：并行连线要画在两张卡的缝隙里，缝隙只有 12px
+        # 时连线两端的光环会叠在一起、看不出是「一条线连着两张卡」。20px 下
+        # 连线本体有 20px 以上，发光与能量脉冲都放得下。
+        cards_host = FlowHost(h_spacing=20, v_spacing=12)
         cards_row = cards_host.flow()
         self.cards_host = cards_host
         # 卡片之间画并行连线的覆盖层：挂在 cards_host 上、跟它一样大，

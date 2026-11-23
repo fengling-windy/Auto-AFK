@@ -1652,16 +1652,22 @@ def test_main_window(app):
                 path = window.links._link_path(left.geometry(), right.geometry())
                 start = path.pointAtPercent(0.0)
                 end = path.pointAtPercent(1.0)
+                # 端点往卡片内侧收几像素（LINK_INSET），让接口环压在卡片边缘上
+                # 而不是悬在缝隙里；期望值要按同一个公式算，不能写死边缘坐标。
+                inset = window.links._link_inset(left.geometry(), right.geometry())
                 check("连线从卡片右缘中点接出（{0} vs {1}）".format(
                     (round(start.x()), round(start.y())),
-                    (left.geometry().right() + 1, left.geometry().center().y())),
-                      abs(start.x() - left.geometry().right()) <= 2
+                    (round(left.geometry().right() - inset), left.geometry().center().y())),
+                      abs(start.x() - (left.geometry().right() - inset)) <= 2
                       and abs(start.y() - left.geometry().center().y()) <= 2)
                 check("连线接进下一张左缘中点（{0} vs {1}）".format(
                     (round(end.x()), round(end.y())),
-                    (right.geometry().left() - 1, right.geometry().center().y())),
-                      abs(end.x() - right.geometry().left()) <= 2
+                    (round(right.geometry().left() + inset), right.geometry().center().y())),
+                      abs(end.x() - (right.geometry().left() + inset)) <= 2
                       and abs(end.y() - right.geometry().center().y()) <= 2)
+                check("连线两端都在两张卡之间（{0}）".format(
+                    (round(start.x()), round(end.x()))),
+                      start.x() < end.x() and end.x() - start.x() >= 8)
 
         # 拖动排序：卡片要「拿起来跟手」，邻居滑动让位，松手落回格子。
         # 历史缺陷（2026-11-23 用户报「没有拖动动画，且异常」）：

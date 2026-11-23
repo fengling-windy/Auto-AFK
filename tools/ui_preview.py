@@ -209,7 +209,9 @@ def build_overview():
     # 和真实主窗口一样用 FlowHost 包一层：它按窗口宽度决定折成几行并钉住高度。
     # 直接把 FlowLayout 塞进 QVBoxLayout 时预览图里第二行卡片会压在页签上，
     # 那种重叠在真实界面里已经被修掉，预览工具不能继续画错的版本。
-    cards_host = FlowHost(h_spacing=12, v_spacing=12)
+    # 间距也要跟主窗口一致（横向 20 是给并行连线留的缝隙），否则预览图里的
+    # 连线会挤成一团，看起来像连错了。
+    cards_host = FlowHost(h_spacing=20, v_spacing=12)
     cards_row = cards_host.flow()
     cards = []
     for key, spec in FAKE_PROJECTS.items():

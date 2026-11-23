@@ -705,17 +705,29 @@ class ParallelLinks(QWidget):
                 self._draw_link(painter, left, right, is_active)
 
     # -- 连线几何：卡片右缘中点 → 下一张左缘中点 ------------------------------
-    @staticmethod
-    def _link_path(left, right):
-        """从 left 卡片右侧中点连到 right 卡片左侧中点。
+    # 端点只往卡片内侧收一点点（几像素），让接口环压住卡片边缘、看起来是
+    # 「插进卡片里」。收多了会横穿卡片内容区——卡片间距只有 12px，而连线层
+    # 是后建的兄弟控件，绘制在卡片之上。
+    LINK_INSET = 6.0
+    LINK_INSET_RATIO = 0.02
+
+    @classmethod
+    def _link_inset(cls, left, right):
+        base = min(float(left.width()), float(right.width())) * cls.LINK_INSET_RATIO
+        return max(3.0, min(cls.LINK_INSET, base))
+
+    @classmethod
+    def _link_path(cls, left, right):
+        """从 left 卡片右侧中点连到 right 卡片左侧中点（端点略向内收）。
 
         历史：原先走「两张卡底部 - 6px 的水平弧线」，看着像在卡片下面兜了个
         袋子；用户要求「从中间连接」，于是两个端点都取卡片竖直中点。同行时
         用水平贝塞尔的 S 形，折行时用一条带竖直切线的 S 形，避免线贴着卡片
         边缘走。
         """
-        start = QPointF(left.right(), left.center().y())
-        end = QPointF(right.left(), right.center().y())
+        inset = cls._link_inset(left, right)
+        start = QPointF(left.right() - inset, left.center().y())
+        end = QPointF(right.left() + inset, right.center().y())
         path = QPainterPath(start)
         dx = end.x() - start.x()
         dy = end.y() - start.y()
@@ -740,59 +752,104 @@ class ParallelLinks(QWidget):
         return path
 
     def _draw_link(self, painter, left, right, dashed):
-        """相邻两张卡片之间的连线：中间对中间，外发光 + 流动虚线 + 端点光环。"""
+        """相邻两张卡片之间的连线：中间对中间，外发光 + 流动能量段 + 端点接口。"""
         color = QColor(self._color)
         path = self._link_path(left, right)
+        total = max(1.0, path.length())
 
         painter.setBrush(Qt.NoBrush)
         # 1) 外发光：粗、极淡，铺一层柔和的底
         glow = QColor(color)
-        glow.setAlpha(38 if dashed else 60)
-        pen = QPen(glow, 9.0)
+        glow.setAlpha(30 if dashed else 52)
+        pen = QPen(glow, 13.0)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.drawPath(path)
         # 2) 中层光晕
         halo = QColor(color)
-        halo.setAlpha(70 if dashed else 110)
-        pen = QPen(halo, 4.2)
+        halo.setAlpha(60 if dashed else 96)
+        pen = QPen(halo, 5.6)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.drawPath(path)
-        # 3) 芯线：流动虚线（未成组的「待配对」用更疏的虚线，视觉上还没接通）
+        # 3) 芯线：亮色细线 + 更亮的白芯，两层叠出「通电」的观感
         core = QColor(color)
+        core.setAlpha(210 if dashed else 235)
         if dashed:
-            core.setAlpha(190)
-            pen = QPen(core, 1.6)
+            pen = QPen(core, 1.4)
             pen.setStyle(Qt.CustomDashLine)
             pen.setDashPattern([3.0, 5.0])
             pen.setDashOffset(-self._flow * 16.0)
         else:
-            pen = QPen(core, 1.9)
+            pen = QPen(core, 1.5)
             pen.setStyle(Qt.SolidLine)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.drawPath(path)
+        inner = QColor(color).lighter(150)
+        inner.setAlpha(150 if dashed else 210)
+        pen = QPen(inner, 0.7)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
-        # 4) 端点：外环 + 实心点，像接口插上了
+        # 4) 流动能量段：一小段亮线沿路径跑（比单颗光点更像「数据在流」）
         painter.setPen(Qt.NoPen)
+        if not dashed:
+            span = min(0.30, 26.0 / total)
+            head = self._flow
+            tail = (head - span) % 1.0
+            seg = QPainterPath(path.pointAtPercent(tail))
+            steps = 10
+            for step in range(1, steps + 1):
+                pct = (tail + span * step / steps) % 1.0
+                seg.lineTo(path.pointAtPercent(pct))
+            trail = QColor(color).lighter(135)
+            trail.setAlpha(70)
+            pen = QPen(trail, 6.0)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.drawPath(seg)
+            pen = QPen(QColor(255, 255, 255, 200), 1.6)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.drawPath(seg)
+            painter.setPen(Qt.NoPen)
+
+        # 5) 端点接口：外环 + 内环 + 亮芯，像一根线插进卡片上的插口
         for point in (path.pointAtPercent(0.0), path.pointAtPercent(1.0)):
             ring = QColor(color)
-            ring.setAlpha(120)
+            ring.setAlpha(70 if dashed else 110)
             painter.setBrush(ring)
-            painter.drawEllipse(point, 4.6, 4.6)
-            painter.setBrush(color)
-            painter.drawEllipse(point, 2.2, 2.2)
+            painter.drawEllipse(point, 5.4, 5.4)
+            ring.setAlpha(160 if dashed else 210)
+            painter.setBrush(ring)
+            painter.drawEllipse(point, 3.4, 3.4)
+            painter.setBrush(QColor(255, 255, 255, 200 if not dashed else 130))
+            painter.drawEllipse(point, 1.4, 1.4)
 
-        # 5) 流动光点：一组已接通时沿着线跑，提示「这两张是一起跑的」
-        if not dashed:
-            head = path.pointAtPercent(self._flow)
-            core_glow = QColor(color)
-            core_glow.setAlpha(90)
-            painter.setBrush(core_glow)
-            painter.drawEllipse(head, 6.0, 6.0)
-            painter.setBrush(QColor(255, 255, 255, 210))
-            painter.drawEllipse(head, 2.6, 2.6)
+        # 6) 中央能量核：卡片缝隙只有二十来像素，一条横线在 1x 下几乎看不出
+        #    是「连着」。在中点叠一个会呼吸的菱形核 + 十字光，一眼能认出这里有
+        #    连接，而且比单纯的圆点更像仪表盘上的联锁指示。
+        #    半径必须小于缝隙的一半，否则光晕会把两侧端点吃掉（第一版 7.2px
+        #    时整条线糊成一个圆斑）。
+        mid = path.pointAtPercent(0.5)
+        pulse = 0.5 + 0.5 * math.sin(self._flow * 2.0 * math.pi)
+        halo_alpha = int((40 if dashed else 80) * (0.55 + 0.45 * pulse))
+        core_halo = QColor(color)
+        core_halo.setAlpha(halo_alpha)
+        painter.setBrush(core_halo)
+        painter.drawEllipse(mid, 3.8 + 0.9 * pulse, 3.8 + 0.9 * pulse)
+        # 菱形核：正方形旋转 45°，边长随呼吸略变
+        side = 2.8 + 0.6 * pulse
+        painter.save()
+        painter.translate(mid)
+        painter.rotate(45.0)
+        painter.setBrush(QColor(color) if not dashed else QColor(color).darker(115))
+        painter.drawRoundedRect(QRectF(-side / 2.0, -side / 2.0, side, side), 0.6, 0.6)
+        painter.restore()
+        painter.setBrush(QColor(255, 255, 255, 190 if not dashed else 120))
+        painter.drawEllipse(mid, 1.0, 1.0)
 
 
 APP_QSS_TEMPLATE = """
