@@ -3,6 +3,7 @@ import shutil
 import time
 
 from . import config
+from .numval import as_float, as_int
 
 log = logging.getLogger("afk.housekeeping")
 
@@ -71,8 +72,18 @@ def cleanup_logs(bus=None, settings=None):
     if not cfg.get("enabled", True):
         return {"enabled": False}
     now = time.time()
-    log_cutoff = now - float(cfg.get("log_days", 14)) * 86400
-    report_cutoff = now - float(cfg.get("report_days", 30)) * 86400
+    log_cutoff = now - as_float(
+        cfg.get("log_days", 14),
+        14.0,
+        low=0,
+        what="housekeeping.log_days",
+    ) * 86400
+    report_cutoff = now - as_float(
+        cfg.get("report_days", 30),
+        30.0,
+        low=0,
+        what="housekeeping.report_days",
+    ) * 86400
     removed = 0
 
     if config.PROJECT_LOGS.exists():
@@ -99,7 +110,13 @@ def cleanup_logs(bus=None, settings=None):
                 # 截断失败会让这份日志无限长下去，至少留下一条线索
                 log.debug("project log truncation failed: %s: %s", path.name, exc)
 
-    max_bytes = int(float(cfg.get("events_max_mb", 50)) * 1024 * 1024)
+    max_bytes = as_int(
+        as_float(cfg.get("events_max_mb", 50), 50.0, low=0, what="housekeeping.events_max_mb")
+        * 1024
+        * 1024,
+        50 * 1024 * 1024,
+        low=0,
+    )
     try:
         events = config.EVENTS_FILE
         if events.exists() and events.stat().st_size > max_bytes:
@@ -108,7 +125,15 @@ def cleanup_logs(bus=None, settings=None):
     except OSError as exc:
         log.warning("events.jsonl truncation failed: %s", exc)
 
-    durations_max = int(float(cfg.get("durations_max_mb", 1)) * 1024 * 1024)
+    durations_max = as_int(
+        as_float(
+            cfg.get("durations_max_mb", 1), 1.0, low=0, what="housekeeping.durations_max_mb"
+        )
+        * 1024
+        * 1024,
+        1 * 1024 * 1024,
+        low=0,
+    )
     try:
         durations = config.DURATIONS_FILE
         if durations.exists() and durations.stat().st_size > durations_max:

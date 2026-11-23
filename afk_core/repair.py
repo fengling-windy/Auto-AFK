@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from . import config
+from .numval import as_int
 from .proc import host_env, popen as proc_popen, run as proc_run
 
 
@@ -52,7 +53,12 @@ class RepairEngine:
         attempts = []
         if not self.settings.get("repair", {}).get("enabled", True):
             return {"fixed": False, "attempts": attempts, "reason": "repair disabled"}
-        max_rounds = int(self.settings.get("repair", {}).get("max_rounds", 2))
+        max_rounds = as_int(
+            (self.settings.get("repair") or {}).get("max_rounds", 2),
+            2,
+            low=0,
+            what="repair.max_rounds",
+        )
         auto_unsafe = bool(self.settings.get("repair", {}).get("auto_unsafe", False))
         text = text or ""
         for rule in self.rules:
@@ -65,7 +71,12 @@ class RepairEngine:
             if not m:
                 continue
             rule_id = rule.get("id", match[:40])
-            max_attempts = int(rule.get("max_attempts", 1))
+            max_attempts = as_int(
+                rule.get("max_attempts", 1),
+                1,
+                low=1,
+                what="repair_rules.{0}.max_attempts".format(rule_id),
+            )
             key = (project, rule_id)
             used = self.attempt_counts.get(key, 0)
             if used >= max_attempts:

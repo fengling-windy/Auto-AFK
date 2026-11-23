@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import autostart, config
+from afk_core import autostart, config, numval
 from gui import themes
 from gui.modern import AnimatedButton, enable_smooth_scroll
 
@@ -50,6 +50,18 @@ def _bad_key_chars(key):
     if key.endswith(".") or key.endswith(" "):
         out.append("首尾的点或空格")
     return out
+
+
+def _as_int(value, default, low=None, high=None, what=""):
+    """把配置里的值转成整数，坏值告警后回退 default。
+
+    历史缺陷（2026-11-23 实测）：settings.yaml 里写成
+    ``post_actions.delay_sec: abc`` 或 ``idle.minutes: abc`` 时，
+    ``int(cfg.get("delay_sec", 60))`` 直接抛 ValueError，而这段代码在
+    SettingsPage.__init__ 里——设置页造不出来，主窗口跟着一起起不来，
+    用户只能手工去改 yaml。数值条目用户随手就能改坏，必须兜住。
+    """
+    return numval.as_int(value, default, low=low, high=high, what=what)
 
 
 class _SectionCard(QFrame):
@@ -269,7 +281,11 @@ class SettingsPage(QWidget):
         self.post_delay = QSpinBox()
         self.post_delay.setRange(0, 86400)
         self.post_delay.setSuffix(" 秒后执行")
-        self.post_delay.setValue(int(post_cfg.get("delay_sec", 60)))
+        self.post_delay.setValue(
+            _as_int(
+                post_cfg.get("delay_sec", 60), 60, 0, 86400, what="post_actions.delay_sec"
+            )
+        )
         self.post_delay.valueChanged.connect(lambda _v: self._queue_save("post_delay", self._save_post_action))
         post_row.addWidget(QLabel("操作:"))
         post_row.addWidget(self.post_combo)
@@ -294,12 +310,16 @@ class SettingsPage(QWidget):
         self.idle_minutes = QSpinBox()
         self.idle_minutes.setRange(1, 1440)
         self.idle_minutes.setSuffix(" 分钟无操作后提示")
-        self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
+        self.idle_minutes.setValue(
+            _as_int(idle_cfg.get("minutes", 30), 30, 1, 1440, what="idle.minutes")
+        )
         self.idle_minutes.valueChanged.connect(lambda _v: self._queue_save("idle", self._save_idle))
         self.idle_prompt = QSpinBox()
         self.idle_prompt.setRange(5, 600)
         self.idle_prompt.setSuffix(" 秒后自动执行")
-        self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
+        self.idle_prompt.setValue(
+            _as_int(idle_cfg.get("prompt_sec", 30), 30, 5, 600, what="idle.prompt_sec")
+        )
         self.idle_prompt.valueChanged.connect(lambda _v: self._queue_save("idle", self._save_idle))
         idle_row.addWidget(self.idle_check)
         idle_row.addWidget(self.idle_minutes)
@@ -863,11 +883,23 @@ class SettingsPage(QWidget):
             post_cfg = settings.get("post_actions") or {}
             idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
             self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
-            self.post_delay.setValue(int(post_cfg.get("delay_sec", 60)))
+            self.post_delay.setValue(
+                _as_int(
+                    post_cfg.get("delay_sec", 60),
+                    60,
+                    0,
+                    86400,
+                    what="post_actions.delay_sec",
+                )
+            )
             idle_cfg = settings.get("idle") or {}
             self.idle_check.setChecked(bool(idle_cfg.get("enabled", False)))
-            self.idle_minutes.setValue(int(idle_cfg.get("minutes", 30) or 30))
-            self.idle_prompt.setValue(int(idle_cfg.get("prompt_sec", 30) or 30))
+            self.idle_minutes.setValue(
+                _as_int(idle_cfg.get("minutes", 30), 30, 1, 1440, what="idle.minutes")
+            )
+            self.idle_prompt.setValue(
+                _as_int(idle_cfg.get("prompt_sec", 30), 30, 5, 600, what="idle.prompt_sec")
+            )
             self.idle_skip_check.setChecked(bool(idle_cfg.get("skip_if_completed_today", True)))
             mode = str(autostart.status().get("mode") or autostart.MODE_TRAY)
             mode_idx = self.autostart_mode.findData(mode)

@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+from .numval import as_float
+
 log = logging.getLogger("afk.notify")
 
 
@@ -23,7 +25,12 @@ class Notifier:
             with self._lock:
                 now = time.time()
                 last = self._last.get(key, 0)
-                if now - last < float(cfg.get("dedupe_sec", 30)):
+                if now - last < as_float(
+                    cfg.get("dedupe_sec", 30),
+                    30.0,
+                    low=0,
+                    what="notifications.dedupe_sec",
+                ):
                     return False
                 self._last[key] = now
         sent = False

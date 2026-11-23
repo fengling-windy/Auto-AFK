@@ -13,6 +13,7 @@ import psutil
 
 from . import config, configsync, monitor, notify, report
 from .ansi import strip_ansi
+from .numval import as_float, as_int
 from .proc import host_env, popen as proc_popen, run as proc_run
 
 
@@ -681,7 +682,16 @@ class Supervisor:
                         "MuMu 模拟器没有在 {0} 秒内就绪（进程没起来或 Android 没启动完成）："
                         "请确认 pre_run.emulator.main_exe / device_exe 路径正确，"
                         "或手动打开一次 MuMu 看是否卡在启动界面"
-                    ).format(int(((self.settings.get("pre_run") or {}).get("emulator") or {}).get("ready_timeout_sec", 240)))
+                    ).format(
+                        as_int(
+                            ((self.settings.get("pre_run") or {}).get("emulator") or {}).get(
+                                "ready_timeout_sec", 240
+                            ),
+                            240,
+                            low=1,
+                            what="pre_run.emulator.ready_timeout_sec",
+                        )
+                    )
                     run.finished_event.set()
                     self._emit(key, "error", run.last_message, level="error")
                     self._abandon_emulator(controller, run, key)
@@ -787,7 +797,12 @@ class Supervisor:
     def _supervise(self, run, watcher):
         key = run.key
         spec = run.spec
-        hang_timeout = float(spec.get("hang_timeout", self.settings.get("hang_timeout_sec", 1800)))
+        hang_timeout = as_float(
+            spec.get("hang_timeout", self.settings.get("hang_timeout_sec", 1800)),
+            1800,
+            low=0,
+            what="{0}.hang_timeout".format(key),
+        )
         stdout_tailer = FileTailer(run.out_log, start_at_end=False)
         stderr_tailer = FileTailer(run.err_log, start_at_end=False)
         project_dir = config.project_dir(spec)
@@ -802,10 +817,12 @@ class Supervisor:
                 }
             )
         window_keywords = [str(k) for k in (spec.get("window_keywords") or []) if str(k).strip()]
-        try:
-            window_absent_sec = max(1.0, float(spec.get("window_absent_sec", 15)))
-        except (TypeError, ValueError):
-            window_absent_sec = 15.0
+        window_absent_sec = as_float(
+            spec.get("window_absent_sec", 15),
+            15.0,
+            low=1.0,
+            what="{0}.window_absent_sec".format(key),
+        )
         window_finish = bool(spec.get("window_finish", False))
         window_absent_since = None
         hang_warned = False
@@ -909,17 +926,32 @@ class Supervisor:
                         "game window gone for {0:.0f}s, treating run as finished".format(window_absent_sec),
                     )
                     grace_then_kill(
-                        float(spec.get("stop_on_finish_delay_sec", 5)),
+                        as_float(
+                            spec.get("stop_on_finish_delay_sec", 5),
+                            5.0,
+                            low=0,
+                            what="{0}.stop_on_finish_delay_sec".format(key),
+                        ),
                         "waiting {0:.0f}s before stopping (window finished)",
                     )
                     break
                 if spec.get("stop_on_error") and watcher.error_messages and run.alive:
-                    delay = float(spec.get("stop_on_error_delay_sec", 10))
+                    delay = as_float(
+                        spec.get("stop_on_error_delay_sec", 10),
+                        10.0,
+                        low=0,
+                        what="{0}.stop_on_error_delay_sec".format(key),
+                    )
                     grace_then_kill(delay, "error pattern detected, waiting {0:.0f}s before stopping".format(delay))
                     break
                 if spec.get("stop_on_finish") and watcher.finish_hit and run.alive:
                     run.finished_by_pattern = True
-                    delay = float(spec.get("stop_on_finish_delay_sec", 5))
+                    delay = as_float(
+                        spec.get("stop_on_finish_delay_sec", 5),
+                        5.0,
+                        low=0,
+                        what="{0}.stop_on_finish_delay_sec".format(key),
+                    )
                     grace_then_kill(delay, "finish marker detected, waiting {0:.0f}s before stopping".format(delay))
                     break
                 hang_seconds = watcher.hang_seconds()
@@ -972,10 +1004,12 @@ class Supervisor:
             and window_seen_now()
         ):
             self._emit(key, "status", "process exited but game window is still up, waiting for it to close", level="warn")
-            try:
-                wait_deadline = time.time() + float(spec.get("window_exit_wait_sec", hang_timeout or 1800))
-            except (TypeError, ValueError):
-                wait_deadline = time.time() + 1800
+            wait_deadline = time.time() + as_float(
+                spec.get("window_exit_wait_sec", hang_timeout or 1800),
+                hang_timeout or 1800,
+                low=0,
+                what="{0}.window_exit_wait_sec".format(key),
+            )
             absent_since = None
             while time.time() < wait_deadline:
                 time.sleep(1.0)
@@ -1002,7 +1036,12 @@ class Supervisor:
             stopped=run.stopped and not run.finished_by_pattern,
             hang=run.hanging,
             require_finish=bool(spec.get("require_finish", False)),
-            min_runtime_sec=float(spec.get("min_runtime_sec", 0) or 0),
+            min_runtime_sec=as_float(
+                spec.get("min_runtime_sec", 0),
+                0.0,
+                low=0,
+                what="{0}.min_runtime_sec".format(key),
+            ),
             runtime=runtime,
         )
         run.last_message = (watcher.error_text(500) or "").replace("\n", " ")[:500]
@@ -1058,7 +1097,9 @@ class Supervisor:
                 outcome = self.repair.handle_failure(key, run, error_text)
             except Exception as exc:
                 outcome = {"fixed": False, "attempts": [], "reason": "repair engine error: {0}".format(exc)}
-            max_retry = int(spec.get("retry", 0))
+            max_retry = as_int(
+                spec.get("retry", 0), 0, low=0, what="{0}.retry".format(key)
+            )
             in_chain = self.chain_status == "running"
             chain_budget = (not in_chain) or self._chain_attempts.get(key, 0) < self._chain_max_attempts
             if outcome.get("fixed") and run.attempt <= max_retry and chain_budget:
@@ -1068,7 +1109,14 @@ class Supervisor:
                     self._chain_attempts[key] = self._chain_attempts.get(key, 0) + 1
                 self._emit(key, "repair", "repair reported success, retrying ({0}/{1})".format(run.attempt, max_retry))
                 self._persist()
-                time.sleep(float(self.settings.get("repair", {}).get("retry_delay_sec", 5)))
+                time.sleep(
+                    as_float(
+                        (self.settings.get("repair") or {}).get("retry_delay_sec", 5),
+                        5.0,
+                        low=0,
+                        what="repair.retry_delay_sec",
+                    )
+                )
                 self.start_project(key, attempt=run.attempt + 1)
                 return
             reason = "unrecoverable failure: {0}".format(outcome.get("reason", "unknown"))
@@ -1115,10 +1163,13 @@ class Supervisor:
     def _make_report(self, key, reason, run, watcher, repair_attempts):
         error_text = watcher.error_text() if watcher else ""
         signature = report.error_signature(error_text or reason)
-        try:
-            hours = float(self.settings.get("report_dedupe_hours", 20) or 0)
-        except Exception:
-            hours = 20.0
+        # 历史写法是 `float(settings.get("report_dedupe_hours", 20) or 0)`：
+        # 写成 "20" 能过，写成 "二十" 就抛，而这里在 _make_report 里——异常会
+        # 让「生成失败报告」这一步整个失败，最需要线索的时候恰好没有报告。
+        raw_hours = self.settings.get("report_dedupe_hours", 20)
+        hours = 0.0 if not raw_hours else as_float(
+            raw_hours, 20.0, low=0, what="report_dedupe_hours"
+        )
         recent = report.find_recent(signature, hours) if hours > 0 else None
         if recent:
             self._emit(key, "report", "same error signature within {0:.0f}h, reusing report: {1}".format(hours, recent), level="warn")
@@ -1514,11 +1565,12 @@ class Supervisor:
         # in-process retry counter, which stays independent).
         continue_on_failure = bool(chain_cfg.get("continue_on_failure", True))
         retry_failed_at_end = bool(chain_cfg.get("retry_failed_at_end", True))
-        try:
-            cap = int(chain_cfg.get("max_attempts_per_project", 3))
-        except (TypeError, ValueError):
-            cap = 3
-        cap = max(1, cap)
+        cap = as_int(
+            chain_cfg.get("max_attempts_per_project", 3),
+            3,
+            low=1,
+            what="chain.max_attempts_per_project",
+        )
         self._chain_attempts = {}
         self._chain_max_attempts = cap
 
@@ -1651,7 +1703,12 @@ class Supervisor:
         action = (self.settings.get("post_actions") or {}).get("after_all", "none")
         if action in (None, "", "none"):
             return
-        delay = float((self.settings.get("post_actions") or {}).get("delay_sec", 60))
+        delay = as_float(
+            (self.settings.get("post_actions") or {}).get("delay_sec", 60),
+            60.0,
+            low=0,
+            what="post_actions.delay_sec",
+        )
         self._emit("core", "post_action", "post action '{0}' scheduled in {1}s".format(action, int(delay)))
         self._post_action_timer = threading.Timer(delay, self._run_post_action, args=(action,))
         self._post_action_timer.daemon = True

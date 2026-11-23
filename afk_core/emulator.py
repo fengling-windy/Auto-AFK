@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from . import config
+from .numval import as_float, as_int
 from .proc import host_env, popen as proc_popen, run as proc_run
 
 log = logging.getLogger("afk.emulator")
@@ -227,8 +228,18 @@ class MuMuController:
         target = self._adb_target(port)
         cfg = self._cfg()
         if attempts is None:
-            attempts = int(cfg.get("adb_connect_retries", 6) or 1)
-        interval = float(cfg.get("adb_connect_interval_sec", 5.0) or 0)
+            attempts = as_int(
+                cfg.get("adb_connect_retries", 6),
+                6,
+                low=1,
+                what="pre_run.emulator.adb_connect_retries",
+            )
+        interval = as_float(
+            cfg.get("adb_connect_interval_sec", 5.0),
+            5.0,
+            low=0,
+            what="pre_run.emulator.adb_connect_interval_sec",
+        )
         attempts = max(1, attempts)
         last = ""
         for attempt in range(1, attempts + 1):
@@ -328,7 +339,12 @@ class MuMuController:
             except Exception as exc:
                 self._emit("failed to start MuMu: {0}".format(exc), level="error")
                 return False
-        timeout = int(cfg.get("ready_timeout_sec", 240))
+        timeout = as_int(
+            cfg.get("ready_timeout_sec", 240),
+            240,
+            low=1,
+            what="pre_run.emulator.ready_timeout_sec",
+        )
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(5)
@@ -498,8 +514,18 @@ class MuMuController:
         cfg = self._cfg()
         if not cfg.get("minimize_window", True):
             return False
-        attempts = max(1, int(cfg.get("minimize_retries", 10)))
-        interval = float(cfg.get("minimize_interval_sec", 1.0))
+        attempts = as_int(
+            cfg.get("minimize_retries", 10),
+            10,
+            low=1,
+            what="pre_run.emulator.minimize_retries",
+        )
+        interval = as_float(
+            cfg.get("minimize_interval_sec", 1.0),
+            1.0,
+            low=0,
+            what="pre_run.emulator.minimize_interval_sec",
+        )
         for _ in range(attempts):
             ok, count = self._minimize_once()
             if ok and count:
@@ -512,7 +538,12 @@ class MuMuController:
 
     def _start_minimize_watchdog(self):
         cfg = self._cfg()
-        duration = float(cfg.get("minimize_watchdog_sec", 90))
+        duration = as_float(
+            cfg.get("minimize_watchdog_sec", 90),
+            90.0,
+            low=0,
+            what="pre_run.emulator.minimize_watchdog_sec",
+        )
         if duration <= 0:
             return
         if getattr(self, "_watchdog", None) is not None and self._watchdog.is_alive():
@@ -570,7 +601,12 @@ class MuMuController:
                 self.show_window()
             except Exception as exc:
                 self._emit("show window failed: {0}".format(exc), level="warn")
-            delay = float(cfg.get("show_before_minimize_sec", 3))
+            delay = as_float(
+                cfg.get("show_before_minimize_sec", 3),
+                3.0,
+                low=0,
+                what="pre_run.emulator.show_before_minimize_sec",
+            )
             if delay > 0:
                 time.sleep(delay)
         self.minimize_window()
@@ -664,7 +700,12 @@ class MuMuController:
             self.suppress_update_prompt()
         if gui_crashed:
             mode = "none"
-        timeout = int(cfg.get("timeout_sec", 600))
+        timeout = as_int(
+            cfg.get("timeout_sec", 600),
+            600,
+            low=1,
+            what="pre_run.emulator.timeout_sec",
+        )
         current = self.current_version()
         available, target = self.update_available()
         if available:

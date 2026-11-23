@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import config, doctor, idle, report
+from afk_core import config, doctor, idle, numval, report
 from afk_core.events import EventBus
 from afk_core.idle import IdleWatcher
 from afk_core.repair import RepairEngine
@@ -1562,11 +1562,15 @@ class MainWindow(QMainWindow):
         if background is not None:
             background.set_fill(themes.resolve(name)["window"])
             background.set_image(str(gui_cfg.get("background_image") or "").strip())
-            try:
-                opacity = int(gui_cfg.get("background_opacity", 100))
-            except (TypeError, ValueError):
-                opacity = 100
-            background.set_opacity(opacity)
+            background.set_opacity(
+                numval.as_int(
+                    gui_cfg.get("background_opacity", 100),
+                    100,
+                    low=0,
+                    high=100,
+                    what="gui.background_opacity",
+                )
+            )
         nav = getattr(self, "nav", None)
         if nav is not None and hasattr(nav, "set_icon_color"):
             token = themes.resolve(name)

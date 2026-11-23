@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import config
+from .numval import as_int
 from .proc import host_env, run as proc_run
 
 
@@ -101,7 +102,16 @@ class Updater:
             return False, "empty command"
         label = hook.get("label", " ".join(cmd[:3]))
         self._emit(key, "update hook: {0}".format(label))
-        code, out = self._run(cmd, cwd=hook.get("cwd", project), timeout=int(hook.get("timeout_sec", 1800)))
+        code, out = self._run(
+            cmd,
+            cwd=hook.get("cwd", project),
+            timeout=as_int(
+                hook.get("timeout_sec", 1800),
+                1800,
+                low=1,
+                what="update_hooks.timeout_sec",
+            ),
+        )
         if code == 0:
             self._emit(key, "update hook ok: {0}".format(label))
         else:
@@ -273,7 +283,12 @@ class Updater:
     def _concurrency(self, total):
         """并发度：0 或非法值 -> 全部并行；否则限制在 1..total。"""
         try:
-            value = int((self.settings.get("pre_run") or {}).get("update_concurrency", 0) or 0)
+            value = as_int(
+                (self.settings.get("pre_run") or {}).get("update_concurrency", 0),
+                0,
+                low=0,
+                what="pre_run.update_concurrency",
+            )
         except (TypeError, ValueError):
             value = 0
         if value <= 0:
