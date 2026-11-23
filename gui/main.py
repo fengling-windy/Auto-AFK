@@ -639,6 +639,8 @@ class MainWindow(QMainWindow):
         # 点了「并行」但还没配成对的那张卡
         self._parallel_pending = None
         self._drag_key = None
+        # 拖动时「光标在卡片内的落点」，第一次移动时确定后保持不动
+        self._drag_grab = None
         self._did_intro = False
         self._last_chain_for_completion = None
         self._last_done_today = None
@@ -1146,8 +1148,13 @@ class MainWindow(QMainWindow):
             self._append_log("core", "info", log_text)
         self._sync_parallel_state()
 
-    def _apply_card_order(self, keys):
-        """按给定 key 顺序重排卡片控件（不重建，保留运行状态与信号）。"""
+    def _apply_card_order(self, keys, animate=True):
+        """按给定 key 顺序重排卡片控件（不重建，保留运行状态与信号）。
+
+        animate=True 时位置变化走补间（160ms 缓出）而不是瞬移；拖动过程中
+        每次 reorder 都 animate，松手那一次用 animate=False 收尾——否则松手
+        的落位会被动画再拖一遍，看起来像「弹了一下」。
+        """
         host = getattr(self, "cards_host", None)
         cards = getattr(self, "cards", {}) or {}
         if host is None:
@@ -1155,6 +1162,8 @@ class MainWindow(QMainWindow):
         ordered = [cards[k] for k in keys if k in cards]
         ordered += [c for k, c in cards.items() if k not in keys]
         host.set_order(ordered)
+        if animate:
+            host.animate_next_layout()
         self._sync_parallel_state()
         self._sync_cards_height()
 
@@ -1436,52 +1445,102 @@ class MainWindow(QMainWindow):
     def _on_card_drag_started(self, key):
         self._drag_key = key
         card = (getattr(self, "cards", {}) or {}).get(key)
-        if card is not None:
-            card.setWindowOpacity(0.75)
-            card.raise_()
+        if card is None:
+            return
+        host = getattr(self, "cards_host", None)
+        # 拖动期间这张卡脱离排版（set_floating），由 _on_card_drag_moved 按
+        # 光标位置 move()；它空出来的格子由其他卡补上，用户才看得出在拖。
+        if host is not None:
+            host.set_floating(card)
+        self._drag_grab = None
+        card.setWindowOpacity(0.85)
+        card.raise_()
+
+    def _grab_offset(self, card, host, pos):
+        """光标落在卡片内的偏移（第一次移动时确定，之后保持，避免卡片跳一下）。
+
+        用「首次移动时的光标位置 - 卡片当前位置」而不是按下点：拖动阈值是 8px，
+        按下点早就丢了；而且实测按按下点算会让卡片先向左上跳 8px 再跟手。
+        """
+        if self._drag_grab is not None:
+            return self._drag_grab
+        local = card.mapFromParent(pos)
+        self._drag_grab = local
+        return local
 
     def _on_card_drag_moved(self, key, global_pos):
-        """拖动中：按光标位置把这张卡插到最近的那张卡前面/后面。"""
+        """拖动中：卡片跟着光标走，同时按位置换顺序（邻居滑开让位）。"""
         host = getattr(self, "cards_host", None)
         cards = getattr(self, "cards", {}) or {}
         if host is None:
             return
         pos = host.mapFromGlobal(global_pos)
-        widgets = [w for w in host.ordered_widgets() if hasattr(w, "key")]
         moving = cards.get(key)
         if moving is None:
             return
-        target_index = 0
+        # 1. 卡片本身跟随光标（被夹在宿主范围内，别拖出可视区）
+        grab = self._grab_offset(moving, host, pos)
+        x = pos.x() - grab.x()
+        y = pos.y() - grab.y()
+        x = max(0, min(x, max(0, host.width() - moving.width())))
+        y = max(0, min(y, max(0, host.height() - moving.height())))
+        if moving.pos() != QPoint(x, y):
+            moving.move(x, y)
+
+        # 2. 按光标落在哪张卡上决定插入位置（浮起的那张不参与比较）
+        widgets = [w for w in host.ordered_widgets() if hasattr(w, "key") and w is not moving]
+        if not widgets:
+            return
+        target_index = len(widgets)
         for index, widget in enumerate(widgets):
-            if widget is moving:
-                continue
             geo = widget.geometry()
-            # 落在卡片左半边就插到它前面，右半边插到它后面
-            if pos.x() < geo.center().x() or pos.y() < geo.top():
-                target_index = index
+            # 判断「光标已经越过这张卡的中线」：横向看 x，纵向看是否换了行
+            if pos.y() < geo.center().y():
+                if pos.x() < geo.center().x():
+                    target_index = index
+                else:
+                    target_index = index + 1
                 break
             target_index = index + 1
         current = host.index_of(moving)
-        if current != target_index:
-            host.flow().removeWidget(moving)
-            # removeWidget 之后序号可能变化，重新算一次插入点
-            widgets = [w for w in host.ordered_widgets() if hasattr(w, "key")]
-            insert_at = target_index
-            if current < target_index:
-                insert_at = max(0, target_index - 1)
-            host.insert_widget(min(insert_at, len(widgets)), moving)
-            host.sync_height(host.width())
-            self._sync_parallel_state()
+        # 顺序列表里 moving 自己的位置也要减去（它前面有几个非 moving 的卡）
+        order = [w for w in host.ordered_widgets() if hasattr(w, "key")]
+        try:
+            current_slot = order.index(moving)
+        except ValueError:
+            current_slot = current
+        if current_slot == target_index:
+            return
+        order.remove(moving)
+        order.insert(max(0, min(target_index, len(order))), moving)
+        # 用 set_order 只动内部顺序，不摘控件——摘了再插的那套写法在
+        # 2026-11-23 之前一次都没成功过（见 FlowHost.insert_widget 的注释）。
+        # 注意顺序：必须先置补间标志再 set_order。set_order 内部会立刻
+        # invalidate/activate 触发一次布局，晚一步置位的话那次布局把卡片直接
+        # 钉到终点，后面的动画找不到位移差（实测 running_animations() 恒 0）。
+        host.animate_next_layout()
+        host.set_order(order)
+        host.sync_height(host.width())
+        self._sync_parallel_state()
 
     def _on_card_drag_finished(self, key):
         card = (getattr(self, "cards", {}) or {}).get(key)
+        host = getattr(self, "cards_host", None)
         if card is not None:
             card.setWindowOpacity(1.0)
+        if host is not None:
+            # 抬起来的那张要落回格子：先清 floating 再让布局带着补间把它
+            # 滑回去，否则它会停在被拖到的任意位置、和邻居重叠。
+            host.clear_floating()
+            host.animate_next_layout()
+            host.sync_height(host.width())
+            self._sync_parallel_state()
+        self._drag_grab = None
         self._drag_key = None
         keys = self.visible_card_keys()
         # 拖动只改显示顺序时也要落盘：supervisor 的排程顺序就是 chain.order，
         # 不写回去用户会觉得「拖了没生效」。
-        self._apply_card_order(keys)
+        self._apply_card_order(keys, animate=False)
         self._save_chain_order(keys, log_text="运行顺序已更新：{0}".format(" → ".join(keys)))
         # 拖动可能把原本相邻的并行组拆开，配置里那一对要跟着作废
         self._prune_parallel_blocks()

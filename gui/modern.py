@@ -16,6 +16,7 @@
 import logging
 import math
 import time
+import weakref
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -148,6 +149,18 @@ class FlowLayout(QLayout):
         self._h_spacing = int(h_spacing)
         self._v_spacing = int(v_spacing)
         self.setContentsMargins(margin, margin, margin, margin)
+        # 拖动排序时的位移补间：每张卡一个 geometry 动画，避免卡片「瞬移」。
+        # 用弱引用字典，控件被销毁（删卡/重建卡片）时条目自动消失，不会留下
+        # 指向已删除 C++ 对象的悬空动画。
+        self._anims = weakref.WeakKeyDictionary()
+        self._anim_ms = 160
+        # 是否对「下一次布局」做补间。只有拖动/重排序才置位：窗口缩放、首轮
+        # 布局、主题切换重建卡片都必须瞬间到位，否则会出现卡片追着窗口跑。
+        self._animate_next = False
+        # 拖动期间被「拿起来」的那张卡：布局不再管它的几何，由调用方按光标
+        # 位置 move()，它原来占的格子空出来让其他卡片滑动。
+        self._floating = None
+        self._anim_step_hook = None
 
     # -- QLayout 要求的接口 ------------------------------------------------
     def addItem(self, item):
@@ -203,18 +216,121 @@ class FlowLayout(QLayout):
             margins.left() + margins.right(), margins.top() + margins.bottom()
         )
 
+    # -- 拖动中的「浮起」控件 ------------------------------------------------
+    def set_floating(self, widget):
+        """拖动期间让某个控件脱离排版、由外部手动定位（跟随光标）。
+
+        为什么需要：拖动排序如果只重排顺序，被拖的那张卡还是钉在格子里，
+        用户手拖半天只看到邻居在动，卡片「粘」在原位——完全没有拖动感。
+        浮起之后布局跳过它的 geometry，由调用方按光标位置 move()，其余卡片
+        照常按新顺序滑动让位。
+        """
+        self._floating = widget
+
+    def clear_floating(self):
+        self._floating = None
+
+    def floating(self):
+        return self._floating
+
     # -- 折行计算 ----------------------------------------------------------
+    def animate_next_layout(self, ms=None):
+        """让下一次布局用补间动画移动卡片（拖动排序时用）。
+
+        为什么需要：拖动排序原来是「移除 + 插入 + 立刻重排」，被拖的卡和
+        邻居瞬间跳到新位置，没有任何过渡——用户看到的是「拖了一下，卡片
+        一闪就换地方了」，判断不出到底落到哪一格。这里给每张卡一个
+        geometry 动画，邻居滑开让位、被拖的卡平滑归位。
+
+        只在拖动/重排序时置位：窗口缩放、首轮布局、切换主题重建卡片都必须
+        瞬间到位，否则卡片会追着窗口边缘跑。
+        """
+        self._animate_next = True
+        if ms is not None:
+            self._anim_ms = int(ms)
+
+    def stop_animations(self):
+        """立刻把所有在跑的位移动画停掉并让卡片落到最终位置。"""
+        for anim in list(self._anims.values()):
+            try:
+                anim.stop()
+            except RuntimeError:
+                pass
+        self._anims.clear()
+
+    def running_animations(self):
+        """在跑位移动画的卡片数（冒烟用它判断动画有没有真的起来）。"""
+        alive = 0
+        for anim in list(self._anims.values()):
+            try:
+                if anim.state() == QPropertyAnimation.Running:
+                    alive += 1
+            except RuntimeError:
+                continue
+        return alive
+
+    def _place(self, item, target):
+        """把 item 的控件放到 target；本次布局带补间时走动画。"""
+        widget = item.widget()
+        if widget is None:
+            item.setGeometry(target)
+            return
+        existing = self._anims.get(widget)
+        animating = False
+        if existing is not None:
+            try:
+                animating = existing.state() == QPropertyAnimation.Running
+            except RuntimeError:
+                animating = False
+        # 没有要求补间、也没有动画在跑：直接落位（窗口缩放/首轮布局/换主题）。
+        # 「有动画在跑」也要继续走动画：拖动中 sync_height / 宿主 resize 都会
+        # 顺手触发一次布局，如果这次直接 setGeometry，正在滑动的卡片会被瞬间
+        # 钉到终点、动画白做——那正是「拖动没有动画」的观感来源之一。
+        if not self._animate_next and not animating:
+            if existing is not None:
+                self._anims.pop(widget, None)
+                try:
+                    existing.stop()
+                except RuntimeError:
+                    pass
+            item.setGeometry(target)
+            return
+        current = widget.geometry()
+        # 首次布局（尺寸还是 0）或位置本来就对：直接落位，别为了动画先画一帧
+        if current.width() <= 0 or current.height() <= 0 or current == target:
+            item.setGeometry(target)
+            return
+        anim = existing
+        if anim is None:
+            anim = QPropertyAnimation(widget, b"geometry", widget)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._anims[widget] = anim
+        else:
+            try:
+                anim.stop()
+            except RuntimeError:
+                pass
+        anim.setDuration(max(0, self._anim_ms))
+        anim.setStartValue(current)
+        anim.setEndValue(target)
+        anim.start()
+
     def _do_layout(self, rect, test_only):
         margins = self.contentsMargins()
         effective = rect.adjusted(
             margins.left(), margins.top(), -margins.right(), -margins.bottom()
         )
 
+        floating = self._floating if not test_only else None
         visible = []
         widest = 0
         for item in self._items:
             widget = item.widget()
             if widget is not None and widget.isHidden():
+                continue
+            # 拖动中被拿起来的那张卡：它现在跟着光标走，排版时整个跳过——
+            # 既不给它落位，也不占格子，于是原来的位置空出来、邻居滑过去。
+            if widget is not None and widget is floating:
                 continue
             hint = item.sizeHint()
             # 卡片 minimumSizeHint 远大于 sizeHint 时用 minimum 兜底，
@@ -247,13 +363,20 @@ class FlowLayout(QLayout):
                 x = effective.x()
                 row_height = 0
             if not test_only:
-                item.setGeometry(
-                    QRectF(x, y, cell, height).toAlignedRect()
-                )
+                self._place(item, QRectF(x, y, cell, height).toAlignedRect())
             x += cell + self._h_spacing
             row_height = max(row_height, height)
             placed += 1
 
+        if not test_only:
+            # 补间只作用于「这一次」布局，后续布局（窗口缩放等）立刻到位
+            self._animate_next = False
+            hook = self._anim_step_hook
+            if hook is not None and self._anims:
+                try:
+                    hook()
+                except Exception as exc:
+                    logging.getLogger("afk.gui").warning("anim hook failed: %s", exc)
         return y + row_height - rect.y() + margins.bottom()
 
 
@@ -383,19 +506,48 @@ class FlowHost(QWidget):
 
     # -- 顺序调整（卡片拖动排序）------------------------------------------
     def insert_widget(self, index, widget):
-        """把控件插到指定序号（拖动改运行顺序时用）。
+        """把控件插到指定序号（拖动改运行顺序用）。
 
         QLayout 只有 addWidget（追加），没有 insertWidget；这里自己把 QWidgetItem
         插进内部列表，位置就直接决定了 FlowLayout 的排布顺序。
+
+        历史缺陷（2026-11-23 实测）：这里原先调 `self.addChildWidget(widget)`，
+        而 addChildWidget 是 QLayout 的方法——FlowHost 是 QWidget，没有它，
+        拖动第一步就抛 `AttributeError: 'FlowHost' object has no attribute
+        'addChildWidget'`。上层 `_on_card_drag_moved` 先 removeWidget 再调这里，
+        于是卡片被摘下来就再也没插回去：一次都没拖动成功过，松手后布局里
+        少一张卡、剩下的挤成一坨（用户截图里第三张被压住一半、右侧溢出）。
+        真正需要的只是「把这个控件的 QWidgetItem 放进内部列表」——控件本身
+        已经是本宿主的子控件（由 addWidget / setParent 保证）。
         """
         item = QWidgetItem(widget)
-        self.addChildWidget(widget)
+        if widget.parentWidget() is not self:
+            widget.setParent(self)
         if index < 0 or index > self._flow.count():
             index = self._flow.count()
         self._flow.insertItem(index, item)
         widget.show()
         self.updateGeometry()
         return index
+
+    # -- 拖动中的浮起与位移动画 ---------------------------------------------
+    def animate_next_layout(self, ms=None):
+        """让下一次布局用补间动画移动卡片（拖动排序时用）。"""
+        self._flow.animate_next_layout(ms)
+
+    def running_animations(self):
+        """在跑位移动画的卡片数。"""
+        return self._flow.running_animations()
+
+    def set_floating(self, widget):
+        """拖动期间让某个卡片脱离排版、跟随光标（见 FlowLayout.set_floating）。"""
+        self._flow.set_floating(widget)
+
+    def clear_floating(self):
+        self._flow.clear_floating()
+
+    def floating(self):
+        return self._flow.floating()
 
     def index_of(self, widget):
         """控件在流式顺序里的序号（-1 表示不在里面）。"""
@@ -436,6 +588,12 @@ class FlowHost(QWidget):
         self._flow.clear_items()
         for item in rebuilt:
             self._flow.addItem(item)
+        # 只改内部列表顺序不会自己重排：_do_layout 要等下一次 setGeometry/
+        # heightForWidth 才跑，实测（logs/_p_anim.py）光 updateGeometry() 之后
+        # 四张卡的几何一动不动，得等到窗口 resize 才突然对上——用户看到的就是
+        # 「拖动松手没反应，过了一会儿才跳」。这里立刻让布局重算一次。
+        self._flow.invalidate()
+        self._flow.activate()
         self.updateGeometry()
 
 

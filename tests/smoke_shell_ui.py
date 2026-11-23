@@ -1599,6 +1599,69 @@ def test_main_window(app):
             window.links.height(), window.cards_host.height()),
               window.links.height() == window.cards_host.height())
 
+        # 拖动排序：卡片要「拿起来跟手」，邻居滑动让位，松手落回格子。
+        # 历史缺陷（2026-11-23 用户报「没有拖动动画，且异常」）：
+        #  1) _on_card_drag_moved 走 host.flow().removeWidget + host.insert_widget，
+        #     而 insert_widget 里调了 self.addChildWidget(widget)——那是 QLayout 的
+        #     方法，FlowHost 是 QWidget，第一步拖动就 AttributeError，卡片被摘下来
+        #     再也插不回去，一次都没拖成功过（布局里少一张卡、剩下的挤成一坨）；
+        #  2) 全程没有任何位移动画，卡片只是瞬移。
+        drag_keys = window.visible_card_keys()
+        if len(drag_keys) >= 3:
+            moving_key = drag_keys[0]
+            moving = window.cards[moving_key]
+            host = window.cards_host
+            before_order = window.visible_card_keys()
+            window._on_card_drag_started(moving_key)
+            pump(app, 40)
+            check("拖动开始时卡片被拿起来（脱离排版）", host.floating() is moving)
+
+            # 把光标拖到第三张卡的右半边：顺序应该变成 [2nd, 3rd, 1st, ...]
+            third = window.cards[drag_keys[2]]
+            target = host.mapToGlobal(third.geometry().center())
+            drag_error = []
+            try:
+                window._on_card_drag_moved(moving_key, target)
+            except Exception as exc:
+                drag_error.append(exc)
+            pump(app, 40)
+            check("拖动一步不抛异常（{0}）".format(
+                type(drag_error[0]).__name__ if drag_error else "无"), not drag_error)
+            check("拖动后被拖的卡跟着光标走（y={0} ≈ {1}）".format(
+                moving.y(), third.geometry().center().y()),
+                  abs(moving.y() - third.geometry().center().y()) <= moving.height())
+            after_order = window.visible_card_keys()
+            check("拖动后顺序真的变了（{0}）".format(after_order),
+                  after_order != before_order and moving_key in after_order)
+            check("拖动只有 N 个卡，没丢控件", len(after_order) == len(before_order))
+            check("邻居靠动画让位（running={0}）".format(host.running_animations()),
+                  host.running_animations() > 0)
+
+            window._on_card_drag_finished(moving_key)
+            pump(app, 400)
+            check("松手后卡片落回格子（不再浮起）", host.floating() is None)
+            check("松手后动画停完（running={0}）".format(host.running_animations()),
+                  host.running_animations() == 0)
+            landed = [window.cards[k].geometry() for k in window.visible_card_keys()]
+            overlaps = []
+            for i, a in enumerate(landed):
+                for b in landed[i + 1:]:
+                    if a.intersects(b) and a.intersected(b).width() > 4 \
+                            and a.intersected(b).height() > 4:
+                        overlaps.append((a.getRect(), b.getRect()))
+            check("松手后卡片之间不重叠（{0}）".format(overlaps), not overlaps)
+            check("松手后卡片都在卡片区可用宽度里",
+                  all(g.left() >= 0 and g.left() + g.width() <= host.width() + 2
+                      for g in landed))
+            saved = (config.settings().get("chain") or {}).get("order") or []
+            check("拖动后的顺序已落盘（{0}）".format(saved),
+                  list(saved) == window.visible_card_keys())
+            # 还原：后面的并行组断言都基于 order_keys，顺序没还原会让它们连锁失败
+            window._apply_card_order(before_order, animate=False)
+            window._save_chain_order(before_order)
+            pump(app, 250)
+            check("还原顺序后卡片顺序回到拖动前", window.visible_card_keys() == before_order)
+
         # 多项目并行：A-B 已经一组，再点 C 然后点组边的 B，要并成 A-B-C。
         # 历史缺陷：toggle_parallel 把「已在组里 → 退出」分支放在最前面，点 B
         # 时先把 B 从 A-B 摘掉、组里只剩 A 于是整组作废——用户想让三张一起跑，
