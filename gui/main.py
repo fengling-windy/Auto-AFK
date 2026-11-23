@@ -733,10 +733,14 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self.start_chain)
 
         # 静默启动勾选的项目界面（原生独立打开，只拉进程、不嵌入）
+        # 注册表只读一次：这段原本在列表推导里连调 config.registry()，每个候选
+        # key 迭代两次、整体再读两次。registry() 每次都要重读并重新解析
+        # afk_projects.yaml（走 C 加速后仍要 1.2ms），勾了 5 个项目就是
+        # 十几次无谓读盘，开窗时多花十几毫秒。
+        registry_projects = config.registry().get("projects") or {}
         silent_keys = [
             str(k) for k in ((self.settings.get("gui") or {}).get("silent_open_projects") or [])
-            if k in (config.registry().get("projects") or {})
-            and (config.registry().get("projects") or {}).get(k, {}).get("gui")
+            if k in registry_projects and registry_projects.get(k, {}).get("gui")
         ]
         if silent_keys:
             self._append_log("core", "info", "启动时打开项目界面: {0}".format(", ".join(silent_keys)))
@@ -795,9 +799,10 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         # 副标题列出全部项目名，注册表里名字一长就把窗口最小宽度顶出去
         # （实测 1409px）；用 ElidedLabel 让它按可用宽度裁，完整文本进 tooltip。
-        subtitle = ElidedLabel(self._subtitle_text(), min_width=120)
+        _subtitle_text = self._subtitle_text()
+        subtitle = ElidedLabel(_subtitle_text, min_width=120)
         subtitle.setObjectName("subtitle")
-        subtitle.setToolTip(self._subtitle_text())
+        subtitle.setToolTip(_subtitle_text)
         # 存引用：注册表改过之后副标题要跟着重新生成（项目数量变了）
         self._subtitle_label = subtitle
         title_box.addWidget(title)
@@ -1942,7 +1947,7 @@ class MainWindow(QMainWindow):
             projects_page.reload()
         label = getattr(self, "_subtitle_label", None)
         if label is not None:
-            text = self._subtitle_text()
+            text = self._subtitle_text(registry)
             label.setText(text)
             label.setToolTip(text)
         self._sync_cards_height()
@@ -2295,14 +2300,19 @@ class MainWindow(QMainWindow):
         if self.autoscroll_check.isChecked():
             self._scroll_log_to_bottom()
 
-    def _subtitle_text(self):
+    def _subtitle_text(self, registry=None):
         """副标题里的项目名单从注册表算出来。
 
         历史缺陷：写死成「三月七小助手 + BAAH + MaaEnd」，而注册表有 5 个项目，
         绝区零一龙 和 BetterGI 一直被漏掉，副标题与实际能挂的项目不符。
+
+        registry 可由调用方传入：建界面时同一次构造要读它两遍（一次做文本、
+        一次做 tooltip），传进来就不用重复读盘解析。
         """
+        if registry is None:
+            registry = config.registry()
         names = []
-        for key, spec in (config.registry().get("projects", {}) or {}).items():
+        for key, spec in (registry.get("projects", {}) or {}).items():
             label = str(spec.get("display_name", key))
             names.append(label.split("（")[0].strip())
         if not names:

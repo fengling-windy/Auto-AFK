@@ -86,6 +86,10 @@ class SettingsPage(QWidget):
         self._log = log_fn or (lambda *a, **k: None)
         self._registry_injected = registry is not None
         self._registry = registry if registry is not None else config.registry()
+        # 构造期间各段都要读 settings（运行结束后操作、空闲、小组件、外观、
+        # 隐藏列表、静默启动、运行顺序）。每段各调一次 config.settings() 就是
+        # 每次重读并重新解析 settings.yaml，7 段 = 7 次读盘。这里读一次往下传。
+        self._settings_snapshot = config.settings()
         self._loading = True
         # 数值框是「按住箭头连续变值」的控件：每变一个数就整份重写 settings.yaml
         # 并往实时日志写一行。实测把「结束后延迟」从 60 拖到 89 就落盘 29 次、
@@ -216,7 +220,7 @@ class SettingsPage(QWidget):
         )
         self.silent_checks = {}
         self._silent_empty_hint = QLabel("（当前没有配置 gui 入口的项目）")
-        self._build_silent_checks()
+        self._build_silent_checks(self._settings_snapshot, self._registry)
         layout.addWidget(self.silent_card)
 
         # -- 2. 运行顺序 ---------------------------------------------------------
@@ -230,12 +234,9 @@ class SettingsPage(QWidget):
         self.order_list.setObjectName("orderList")
         self.order_list.setDragDropMode(QListWidget.InternalMove)
         enable_smooth_scroll(self.order_list)
-        for key in self._ordered_project_keys():
-            spec = self._registry["projects"][key]
-            item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
-            item.setData(Qt.UserRole, key)
-            self.order_list.addItem(item)
-        self._fit_order_list_height()
+        # 列表内容由 _reload_order_list 统一填（它读一次 settings + 用已读好的
+        # 注册表）。这里原本另外写了一遍同样的循环，等于把 settings.yaml 再读一次。
+        self._reload_order_list(self._settings_snapshot, self._registry)
         self.order_list.model().rowsMoved.connect(self._save_order)
         order_row.addWidget(self.order_list, 1)
         btn_col = QVBoxLayout()
@@ -261,7 +262,7 @@ class SettingsPage(QWidget):
         self.post_combo = QComboBox()
         for value, label in POST_ACTION_LABELS:
             self.post_combo.addItem(label, value)
-        post_cfg = config.settings().get("post_actions") or {}
+        post_cfg = self._settings_snapshot.get("post_actions") or {}
         idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
         self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.post_combo.currentIndexChanged.connect(self._save_post_action)
@@ -284,7 +285,7 @@ class SettingsPage(QWidget):
             "电脑连续无鼠标/键盘输入达到设定分钟数后，弹出提示框（停止 / 立刻开始 / 仅运行不占用鼠标任务）；"
             "倒计时结束仍未选择则自动运行全部任务。触发一次后解除监听，用户回来再离开会重新监听。",
         )
-        idle_cfg = config.settings().get("idle") or {}
+        idle_cfg = self._settings_snapshot.get("idle") or {}
         idle_row = QHBoxLayout()
         idle_row.setSpacing(8)
         self.idle_check = QCheckBox("启用")
@@ -363,7 +364,7 @@ class SettingsPage(QWidget):
         )
         self.widget_check = QCheckBox("显示桌面小组件")
         self.widget_check.setChecked(
-            bool((config.settings().get("gui") or {}).get("widget_enabled", False))
+            bool((self._settings_snapshot.get("gui") or {}).get("widget_enabled", False))
         )
         self.widget_check.toggled.connect(self._save_widget)
         self.widget_card.body.addWidget(self.widget_check)
@@ -376,9 +377,11 @@ class SettingsPage(QWidget):
         self._refresh_idle_hint()
         self._refresh_autostart_hint()
         self._refresh_completion_label()
-        self._build_hidden_checks()
+        self._build_hidden_checks(self._settings_snapshot, self._registry)
         self._build_base_combo()
-        self._load_appearance()
+        self._load_appearance(self._settings_snapshot)
+        self._build_silent_checks(self._settings_snapshot, self._registry)
+        self._reload_order_list(self._settings_snapshot, self._registry)
         self._loading = False
 
     # -- 外观 ------------------------------------------------------------------

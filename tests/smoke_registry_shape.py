@@ -307,6 +307,9 @@ def _run(tmp):
     try:
         config._WARNED_SHAPE.clear()
         for _ in range(5):
+            # 读盘缓存会让第 2 次起根本不解析，测不出「告警去重」。每次都
+            # 主动失效，逼它真的重新解析五遍。
+            config.invalidate_cache()
             config.registry()
     finally:
         logger.removeHandler(handler)
@@ -333,6 +336,7 @@ def _run(tmp):
     try:
         config._WARNED_SHAPE.clear()
         for _ in range(5):
+            config.invalidate_cache()
             config.registry()
     finally:
         logger.removeHandler(handler)

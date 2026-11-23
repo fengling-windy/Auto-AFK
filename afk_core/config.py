@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import threading
@@ -128,6 +129,12 @@ def _write_atomic(path, text):
                 # 删不掉只会在 logs/ 旁边留一份 .tmp，不影响本次写入；
                 # 但反复留垃圾说明有别的进程一直占着它，值得一行 debug。
                 logging.getLogger("afk.config").debug("remove temp file %s failed: %s", tmp, exc)
+        # 写完立刻让读盘缓存失效。缓存的失效条件是 mtime_ns + 大小，正常情况
+        # 下 os.replace 一定改 mtime；但同一进程里连写两次可能落在同一个时间
+        # 刻度上（NTFS 的 100ns 精度并非每个文件系统都保证），那就读回旧值。
+        # 主动清一次最省心——重新解析只要 1.2ms，而读到过期配置会让用户
+        # 「改完设置没生效」。
+        invalidate_cache()
 
 
 def save_yaml(path, data):
@@ -161,9 +168,65 @@ def read_text(path, attempts=12):
     raise last
 
 
-def settings():
+# -- 读盘缓存 ---------------------------------------------------------------
+# settings()/registry() 是所有模块的配置入口，一次开窗就要调几十次（空转还会
+# 每 300ms 调），每次都重读文件 + 重新解析 YAML。走 CSafeLoader 后单次解析
+# settings 0.46ms、afk_projects 1.21ms，开窗累计仍是几十毫秒的纯重复劳动。
+#
+# 缓存键是「路径 + mtime_ns + size」：配置都是经 _write_atomic 用 os.replace
+# 落盘的，替换后 mtime 一定变，所以不需要额外失效通知；测试把 *_YAML 指到临时
+# 文件也只是换个键。
+#
+# 命中时返回 deepcopy（settings 0.045ms、registry 0.13ms，比重新解析快一个
+# 数量级）。**不能直接返回缓存对象**：调用方普遍拿到就改
+# （`settings.setdefault("pre_run", {})`、`gui_cfg["window_size"] = [...]`），
+# 共享一份字典会让这些改动串到别的调用方甚至写回磁盘。
+#
+# 只保留「最近一次」的条目：缓存的意义是同一份文件被连续读取，多版本留在
+# 内存里反而要各自 deepcopy 管理。
+_CACHE_LOCK = threading.Lock()
+_SETTINGS_CACHE = {}
+_REGISTRY_CACHE = {}
+
+
+def invalidate_cache():
+    """丢掉读盘缓存（保存配置后、测试里换文件后调用）。"""
+    with _CACHE_LOCK:
+        _SETTINGS_CACHE.clear()
+        _REGISTRY_CACHE.clear()
+
+
+def _file_stamp(path):
+    """文件的缓存标识；文件不存在（或读不到属性）时返回 None 走不缓存分支。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+def _cached(path, cache, build):
+    stamp = _file_stamp(path)
+    if stamp is None:
+        return build()
+    with _CACHE_LOCK:
+        hit = cache.get(stamp)
+    if hit is not None:
+        return copy.deepcopy(hit)
+    value = build()
+    with _CACHE_LOCK:
+        cache.clear()
+        cache[stamp] = copy.deepcopy(value)
+    return value
+
+
+def _load_settings():
     data = load_yaml(SETTINGS_YAML, {})
     return _normalize_settings(data, _WARNED_SETTINGS)
+
+
+def settings():
+    return _cached(SETTINGS_YAML, _SETTINGS_CACHE, _load_settings)
 
 
 # 已经就「某个设置节不是映射」告警过的节名。settings() 每次调用都会重读文件，
@@ -464,7 +527,7 @@ def _expand_bases(projects, warned=None):
         projects[key] = resolve(key, (key,))
 
 
-def registry():
+def _load_registry():
     data = load_yaml(PROJECTS_YAML, {})
     warned = _WARNED_SHAPE
     data.setdefault("projects", {})
@@ -480,6 +543,10 @@ def registry():
             if isinstance(spec, dict):
                 spec["gui"] = _normalize_gui(spec, key)
     return data
+
+
+def registry():
+    return _cached(PROJECTS_YAML, _REGISTRY_CACHE, _load_registry)
 
 
 def repair_rules():

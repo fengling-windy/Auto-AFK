@@ -183,6 +183,8 @@ def _run(tmp):
     try:
         config._WARNED_SETTINGS.clear()
         for _ in range(5):
+            # 读盘缓存会让第 2 次起不解析，测不出「告警去重」，每次主动失效。
+            config.invalidate_cache()
             config.settings()
     finally:
         logger.removeHandler(handler)
