@@ -162,6 +162,49 @@ def _run(tmp):
         deep = "{0}: {1}".format(type(exc).__name__, exc)
     check("父目录不存在时自动创建", ok, deep)
 
+    # 6. 用 libyaml 的 C 实现解析/转储，但语义必须与纯 Python 版完全一致
+    check(
+        "装了 libyaml 时用 CSafeLoader 解析",
+        not hasattr(yaml, "CSafeLoader") or config._YAML_LOADER is yaml.CSafeLoader,
+        config._YAML_LOADER,
+    )
+    sample = tmp / "semantics.yaml"
+    sample.write_text(
+        "chain:\n"
+        "  order: [BAAH, MaaEnd]\n"
+        "idle:\n"
+        "  enabled: true\n"
+        "  minutes: 30\n"
+        "  hint: '空闲提示'\n"
+        "  ratio: 1.5\n"
+        "  nothing: null\n"
+        "  empty_list: []\n"
+        "projects:\n"
+        "  A:\n"
+        "    args: ['--x', '-y']\n"
+        "    nested: {k: v}\n",
+        encoding="utf-8",
+    )
+    text = sample.read_text(encoding="utf-8")
+    check(
+        "两个 loader 解析同一份 yaml 得到相同结果",
+        yaml.load(text, Loader=config._YAML_LOADER) == yaml.safe_load(text),
+        yaml.load(text, Loader=config._YAML_LOADER),
+    )
+    payload2 = yaml.safe_load(text)
+    config.save_yaml(sample, payload2)
+    check(
+        "save_yaml 的输出与 safe_dump 逐字节相同",
+        sample.read_text(encoding="utf-8")
+        == yaml.safe_dump(payload2, allow_unicode=True, sort_keys=False),
+        sample.read_text(encoding="utf-8")[:120],
+    )
+    check(
+        "换 loader 后读到的东西结构不变（dict）",
+        isinstance(config.load_yaml(sample, None), dict),
+        config.load_yaml(sample, None),
+    )
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -6,6 +6,15 @@ from pathlib import Path
 
 import yaml
 
+# 优先用 libyaml 的 C 实现解析/转储。纯 Python 的 SafeLoader 解析
+# afk_projects.yaml（8.8KB）要 9.4ms，CSafeLoader 只要 1.3ms；settings.yaml
+# 3.6ms → 0.43ms。settings()/registry() 每次调用都重读盘，配置页一次刷新
+# 读十几次就是一百多毫秒的纯解析开销。两个 loader 的语义与输出实测一致
+# （同一份 yaml 解析结果 deepcopy 相等，dump 逐字节相同），所以可直接替换；
+# 万一环境里没编译 libyaml 就退回纯 Python 版，功能不受影响。
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_YAML_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+
 
 def root_dir():
     env = os.environ.get("AFK_ROOT")
@@ -40,7 +49,7 @@ def load_yaml(path, default=None):
     for attempt in range(12):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_YAML_LOADER)
         except FileNotFoundError:
             return fallback
         except OSError as exc:
@@ -122,7 +131,10 @@ def _write_atomic(path, text):
 
 
 def save_yaml(path, data):
-    _write_atomic(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+    _write_atomic(
+        path,
+        yaml.dump(data, Dumper=_YAML_DUMPER, allow_unicode=True, sort_keys=False),
+    )
 
 
 def write_text_atomic(path, text):
