@@ -13,11 +13,14 @@
 """
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
 
 from . import config
+
+log = logging.getLogger("afk.completion")
 
 _LOCK = threading.Lock()
 
@@ -51,7 +54,11 @@ def mark_chain_success(projects=None, when=None):
         # 立即失效缓存，避免同一进程内先前的「未完成」被继续返回
         _CACHE["key"] = None
         _CACHE["value"] = False
-    except Exception:
+    except Exception as exc:
+        # 写不进去意味着「今日已完成」这个状态只在内存里——一旦 GUI 重开或
+        # 空闲判定换了个进程，用户就会被再挂一遍。以前这里是静默 return None，
+        # 唯一的现象是「明明跑完了又自动开了一轮」，查不到任何线索。
+        log.warning("write chain success marker failed: %s: %s", type(exc).__name__, exc)
         return None
     return payload
 
@@ -64,7 +71,10 @@ def load_marker():
             return None
         data = json.loads(config.read_text(path))
         return data if isinstance(data, dict) else None
-    except Exception:
+    except Exception as exc:
+        # 文件损坏/被别的进程正写着：当成「今天还没完成」继续跑，但留一条痕，
+        # 否则用户只看到「今天已完成」标签莫名消失。
+        log.warning("read chain success marker failed: %s: %s", type(exc).__name__, exc)
         return None
 
 
@@ -75,7 +85,8 @@ def clear():
         _CACHE["key"] = None
         _CACHE["value"] = False
         return True
-    except Exception:
+    except Exception as exc:
+        log.warning("clear chain success marker failed: %s: %s", type(exc).__name__, exc)
         return False
 
 

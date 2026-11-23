@@ -350,6 +350,81 @@ def test_status_implies_marker_written():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_marker_failures_are_visible():
+    """标记文件读写失败时必须留痕。
+
+    历史缺陷：`mark_chain_success` / `load_marker` / `clear` 三处都是
+    `except Exception: return None/False`。写失败的唯一现象是「明明跑完了又
+    自动开了一轮」（标记只在内存里、换进程就丢），读失败则是「今天已完成」
+    标签莫名消失，两者都查不到任何线索。
+    """
+    import logging
+
+    tmp = isolated_logs()
+    try:
+        records = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("afk.completion")
+        handler = _Collect()
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+        real = completion.marker_path
+        try:
+            # 1. 写失败：把标记路径指到一个不存在、也建不出来的位置
+            completion.marker_path = lambda: Path("Z:/afk_no_such_drive/last_chain_success.json")
+            default_deny = completion.mark_chain_success(["A"])
+            msgs = [r.getMessage() for r in records]
+            check("写完成标记失败时返回 None", default_deny is None)
+            check(
+                "写完成标记失败会写 warning",
+                any("write chain success marker failed" in m for m in msgs),
+            )
+
+            # 2. 读失败：内容不是合法 JSON
+            records.clear()
+            completion.marker_path = real
+            path = real()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{ not json", encoding="utf-8")
+            check("标记文件损坏时当成未完成", completion.load_marker() is None)
+            check(
+                "标记文件损坏会写 warning",
+                any("read chain success marker failed" in r.getMessage() for r in records),
+            )
+
+            # 3. 清除失败：文件被别的进程占着时 unlink 会抛 PermissionError。
+            #    真实环境下很难稳定复现（Windows 上「父路径是个文件」也会被
+            #    missing_ok 吞掉，实测 clear() 直接返回 True），这里用一个会抛
+            #    异常的对象替身。
+            records.clear()
+
+            class _LockedMarker:
+                def unlink(self, missing_ok=False):
+                    raise PermissionError(13, "Access is denied")
+
+            completion.marker_path = lambda: _LockedMarker()
+            check("清除标记失败时返回 False", completion.clear() is False)
+            check(
+                "清除标记失败会写 warning",
+                any("clear chain success marker failed" in r.getMessage() for r in records),
+            )
+        finally:
+            completion.marker_path = real
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+            try:
+                real().unlink(missing_ok=True)
+            except OSError:
+                pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_marker_matches_day()
     test_cached_query()
@@ -358,6 +433,7 @@ def main():
     test_is_done_predicate_respects_setting()
     test_supervisor_marks_only_on_success()
     test_status_implies_marker_written()
+    test_marker_failures_are_visible()
     print()
     if FAILURES:
         print("COMPLETION {0} FAIL ({1})".format(len(FAILURES), ", ".join(FAILURES)))
