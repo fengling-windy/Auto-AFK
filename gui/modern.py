@@ -54,8 +54,6 @@ from PySide6.QtWidgets import (
 
 from gui import themes
 
-ACCENT = "#4c8dff"
-
 
 class ElidedLabel(QLabel):
     """文本过长时用省略号裁掉显示，但不把窗口最小宽度一起顶出去。
@@ -436,7 +434,11 @@ class ParallelLinks(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._groups = []          # [[QWidget, QWidget, ...], ...]
-        self._color = QColor("#3d7dfa")
+        # 默认色只作兜底：main.py 建完就 set_color(links_color()) 覆盖。
+        # 之前写死深色主题的 #3d7dfa，浅色主题下若哪条路径漏了 set_color，
+        # 连线会在白底上留一条几乎看不见的深蓝。_current_theme 在模块后面
+        # 才定义，但这里只在构造时求值，届时模块早已初始化完毕。
+        self._color = QColor(themes.resolve(_current_theme)["accent"])
         self._active = None        # 正在编辑（还没成为正式一组）的那一组，画虚线
 
     def set_color(self, color):
@@ -1474,10 +1476,13 @@ class StatusDot(QWidget):
 
     TICK_MS = 33
 
-    def __init__(self, color="#7d879c", pulse=False, period=1.6, parent=None):
+    def __init__(self, color=None, pulse=False, period=1.6, parent=None):
         super().__init__(parent)
         self.setFixedSize(16, 16)
-        self._color = QColor(str(color))
+        # 默认色按当前主题的「等待」取。写死 #7d879c（深色主题的 pending）在
+        # 浅色卡片上对比度只有 3.61，淡到看不清；调用方通常都会显式传色，
+        # 这层兜底不该把深色值带进浅色主题。
+        self._color = QColor(str(color or themes.status_color(_current_theme, "pending")))
         self._pulse = bool(pulse)
         self._period = float(period)
         self._t0 = time.monotonic()
@@ -1555,9 +1560,11 @@ class StatusDot(QWidget):
 class AnimatedPill(QWidget):
     """背景/边框/文字颜色平滑过渡的状态胶囊（替代 QLabel#pill）。"""
 
-    def __init__(self, text="", color="#7d879c", parent=None):
+    def __init__(self, text="", color=None, parent=None):
         super().__init__(parent)
         self._text = str(text)
+        # 同 StatusDot：默认「等待」色跟当前主题走，别把深色主题的值带进浅色。
+        color = color or themes.status_color(_current_theme, "pending")
         self._cur = QColor(str(color))
         self._target = QColor(str(color))
         font = QFont("Microsoft YaHei UI")

@@ -88,6 +88,7 @@ SUITE = [
     ("smoke_shell_ui", "ui", "新外壳（导航栏/设置页/项目状态页/卡片拖动·并行·删除）"),
     ("smoke_projects_page", "ui", "项目状态页（版本行/扫描队列/参数格式化）"),
     ("smoke_modern_ui", "ui", "主题与动效组件"),
+    ("smoke_modern_defaults", "ui", "无名片配色兜底跟主题走"),
     ("smoke_user_flow", "ui", "端到端用户流程"),
     # 需要真实环境，默认不跑
     ("smoke_emulator", "real", "会真的启动并关闭本机 MuMu 模拟器"),
