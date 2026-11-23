@@ -1258,6 +1258,102 @@ def test_main_window(app):
         check("切回深色主题后身份色跟着回来",
               window.cards[color_key].color == _th.project_color("dark", color_key))
 
+        # 卡片上的拖动把手与关闭按钮是 QPixmap 位图，QSS 换不到它们身上。
+        # 历史缺陷：颜色写死 #6b7688 / #7f8aa3，浅色白卡上淡到几乎看不见。
+        # 卡片换肤时靠 _rebuild_cards() 重建，图标跟着主题重画。
+        # 注意图标是抗锯齿位图，没有哪个像素会精确等于令牌色，只能看均值。
+        def _icon_color_of(card, attr):
+            obj = getattr(card, attr)
+            if hasattr(obj, "pixmap"):
+                pixmap = obj.pixmap()
+                image = pixmap.toImage() if not pixmap.isNull() else None
+            else:
+                icon = obj.icon()
+                if icon.isNull():
+                    return None
+                image = icon.pixmap(12, 12).toImage()
+            if image is None or image.isNull():
+                return None
+            r = g = b = 0
+            count = 0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.alpha() > 200:
+                        r += pixel.red()
+                        g += pixel.green()
+                        b += pixel.blue()
+                        count += 1
+            if not count:
+                return None
+            return (r / count, g / count, b / count)
+
+        def _rgb(hex_color):
+            text = hex_color.lstrip("#")
+            return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+
+        def _near(actual, expected, tolerance=12):
+            if actual is None:
+                return False
+            return all(abs(a - e) <= tolerance for a, e in zip(actual, _rgb(expected)))
+
+        dark_icon = _icon_color_of(window.cards[color_key], "drag_handle")
+        check("深色主题下卡片图标取自主题令牌（实测 {0}）".format(
+            None if dark_icon is None else tuple(round(v) for v in dark_icon)),
+            _near(dark_icon, _th.icon_color("dark", subtle=False)))
+        check("关闭按钮也用主题图标色（次要档）",
+              _near(_icon_color_of(window.cards[color_key], "close_btn"),
+                    _th.icon_color("dark", subtle=True)))
+        window._apply_theme("light")
+        pump(app, 250)
+        light_icon = _icon_color_of(window.cards[color_key], "drag_handle")
+        check("切到浅色主题后拖动把手图标跟着变深（实测 {0}）".format(
+            None if light_icon is None else tuple(round(v) for v in light_icon)),
+            _near(light_icon, _th.icon_color("light", subtle=False)))
+        check("浅色图标比深色图标暗",
+              dark_icon is not None and light_icon is not None
+              and sum(light_icon) < sum(dark_icon))
+        window._apply_theme("dark")
+        pump(app, 250)
+        check("切回深色主题后拖动把手图标回来",
+              _near(_icon_color_of(window.cards[color_key], "drag_handle"),
+                    _th.icon_color("dark", subtle=False)))
+
+        # 左侧导航的图标同样是位图，换肤要靠 NavRail.set_icon_color 重画。
+        # 历史缺陷：NavItem / NavRail 的图标色默认写死 #8b97ad，浅色侧栏
+        # （#eef2f9）上对比度只有 2.6，图标几乎看不见。
+        def _nav_icon_color(key):
+            item = window.nav.item_for_key(key)
+            icon = item.icon()
+            if icon.isNull():
+                return None
+            image = icon.pixmap(17, 17).toImage()
+            r = g = b = count = 0
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.alpha() > 200:
+                        r += pixel.red()
+                        g += pixel.green()
+                        b += pixel.blue()
+                        count += 1
+            if not count:
+                return None
+            return (r / count, g / count, b / count)
+
+        check("深色主题下导航图标用主题图标色",
+              _near(_nav_icon_color("overview"), _th.icon_color("dark")))
+        window._apply_theme("light")
+        pump(app, 250)
+        check("切到浅色主题后导航图标跟着变深",
+              _near(_nav_icon_color("overview"), _th.icon_color("light")))
+        check("导航图标色被记成浅色那档",
+              window.nav.item_for_key("overview")._icon_color == _th.icon_color("light"))
+        window._apply_theme("dark")
+        pump(app, 250)
+        check("切回深色后导航图标也回来",
+              _near(_nav_icon_color("overview"), _th.icon_color("dark")))
+
         # 注册表里去掉某个项目的 gui 段后，卡片上的「界面」按钮要收起来。
         # 历史缺陷：gui_btn 只在 ProjectCard 构造时决定一次可见性，之后改注册表
         # 存盘，按钮还在，点下去会去拉起一个已经没有界面入口的进程。

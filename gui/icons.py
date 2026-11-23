@@ -9,6 +9,8 @@
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
+from gui import themes
+
 
 def _canvas(size=24, scale=3):
     pix = QPixmap(size * scale, size * scale)
@@ -32,8 +34,21 @@ def _icon(pix):
     return QIcon(pix)
 
 
-def icon_home(color="#c8d3e8"):
+def default_color(subtle=False):
+    """没指定颜色时用的颜色：取当前主题的图标色。
+
+    历史缺陷：各 icon_* 的默认参数写死成 #c8d3e8 / #8b97ad（深色主题的值）。
+    调用方一旦漏传颜色，浅色主题的白卡上就是一枚 1.5:1 的淡图标。改成按主题
+    解析后，漏传也安全。
+    """
+    from gui.modern import current_theme
+
+    return themes.icon_color(current_theme(), subtle=subtle)
+
+
+def icon_home(color=None):
     """总览：房子。"""
+    color = color or default_color()
     pix, p = _canvas()
     _pen(p, color)
     path = QPainterPath()
@@ -50,8 +65,9 @@ def icon_home(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_status(color="#c8d3e8"):
+def icon_status(color=None):
     """项目状态：仪表盘 + 刻度。"""
+    color = color or default_color()
     pix, p = _canvas()
     _pen(p, color)
     arc = QRectF(4.0, 5.5, 16.0, 16.0)
@@ -65,8 +81,9 @@ def icon_status(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_settings(color="#c8d3e8"):
+def icon_settings(color=None):
     """设置：齿轮（8 齿）。"""
+    color = color or default_color()
     import math
 
     pix, p = _canvas()
@@ -84,8 +101,9 @@ def icon_settings(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_plus(color="#c8d3e8"):
+def icon_plus(color=None):
     """添加。"""
+    color = color or default_color()
     pix, p = _canvas()
     _pen(p, color)
     p.drawLine(QPointF(12.0, 5.0), QPointF(12.0, 19.0))
@@ -94,8 +112,9 @@ def icon_plus(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_close(color="#c8d3e8"):
+def icon_close(color=None):
     """删除。"""
+    color = color or default_color()
     pix, p = _canvas()
     _pen(p, color)
     p.drawLine(QPointF(7.0, 7.0), QPointF(17.0, 17.0))
@@ -104,8 +123,9 @@ def icon_close(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_link(color="#c8d3e8"):
+def icon_link(color=None):
     """并行连接：两个圆 + 中间链条。"""
+    color = color or default_color()
     pix, p = _canvas()
     _pen(p, color)
     p.drawEllipse(QRectF(2.5, 8.5, 7.0, 7.0))
@@ -115,8 +135,9 @@ def icon_link(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_file(color="#c8d3e8"):
+def icon_file(color=None):
     """配置文件：文档。"""
+    color = color or default_color(subtle=True)
     pix, p = _canvas()
     _pen(p, color)
     path = QPainterPath()
@@ -134,8 +155,9 @@ def icon_file(color="#c8d3e8"):
     return _icon(pix)
 
 
-def icon_grip(color="#8b97ad"):
+def icon_grip(color=None):
     """拖动把手：两列点。"""
+    color = color or default_color(subtle=True)
     pix, p = _canvas()
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(color))
@@ -158,8 +180,12 @@ ICONS = {
 }
 
 
-def make(name, color="#c8d3e8", size=18):
-    """取一个图标；未知名字返回空 QIcon（界面照常显示文字）。"""
+def make(name, color=None, size=18):
+    """取一个图标；未知名字返回空 QIcon（界面照常显示文字）。
+
+    color 留空时交给各图标自己按当前主题取默认色（见 default_color）：
+    把手/文档这类次要图标用更淡的一档，其余用正常图标色。
+    """
     factory = ICONS.get(name)
     if factory is None:
         return QIcon()

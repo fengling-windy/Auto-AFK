@@ -58,6 +58,11 @@ DARK = {
     "overlay_subtle": "rgba(255, 255, 255, 0.04)",
     "overlay_nav": "rgba(255, 255, 255, 0.045)",
     "overlay_hover": "rgba(255, 255, 255, 0.06)",
+    # 单色小图标（拖动把手、关闭、打开仓库…）。这些是自绘位图，QSS 的 $nav_text
+    # 换不到它们身上，必须按主题给：写死 #8b97ad / #7f8aa3 时，浅色白卡上的
+    # 对比度只有 2.95 / 3.46，图标淡到几乎看不见。
+    "icon": "#8b97ad",
+    "icon_subtle": "#7f8aa3",
 }
 
 # 浅色：同一套令牌换色，行高/圆角/字号完全共享，切换主题不做布局改动
@@ -109,6 +114,9 @@ LIGHT = {
     "overlay_subtle": "rgba(15, 23, 42, 0.04)",
     "overlay_nav": "rgba(15, 23, 42, 0.05)",
     "overlay_hover": "rgba(15, 23, 42, 0.06)",
+    # 浅色主题的白卡上要更深的灰才看得见（#8b97ad / #7f8aa3 只有 2.95 / 3.46）
+    "icon": "#5b6779",
+    "icon_subtle": "#64748b",
 }
 
 THEMES = {"dark": DARK, "light": LIGHT}
@@ -335,6 +343,17 @@ def normalize_theme(theme):
 
 def button_variants(theme):
     return BUTTONS.get(normalize_theme(theme), BUTTONS[DEFAULT_THEME])
+
+
+def icon_color(theme=None, subtle=False):
+    """单色小图标（拖动把手、关闭、打开仓库…）该用的颜色。
+
+    这些图标是 QPixmap 位图，QSS 里的 `$nav_text` / `$text_muted` 换不到它们
+    身上，只能按主题取。subtle=True 取更淡的那一档（次要按钮上的图标）。
+    """
+    tokens = resolve(normalize_theme(theme))
+    key = "icon_subtle" if subtle else "icon"
+    return tokens.get(key) or tokens.get("nav_text") or tokens.get("text")
 
 
 def check_theme(theme):

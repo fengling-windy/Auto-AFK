@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import icons, themes
+from gui.modern import current_theme
 
 
 class NavItem(QPushButton):
@@ -32,7 +33,8 @@ class NavItem(QPushButton):
         self.setMinimumHeight(38)
         self._dot = None
         self._icon_name = ""
-        self._icon_color = "#8b97ad"
+        # 默认图标色按当前主题取（写死 #8b97ad 时浅色主题的白侧栏上只有 2.95:1）
+        self._icon_color = themes.icon_color(current_theme())
         # 文本自己裁：QPushButton 的 minimumSizeHint 等于整段文字宽度，注册表里
         # 写一个长 display_name，侧栏最小宽度就被顶到 1176px（实测），整个窗口
         # 的最小宽度跟着爆到 1927px。这里把 minimumSizeHint 压到下限，显示时
@@ -52,10 +54,10 @@ class NavItem(QPushButton):
         """屏幕上真正画出来的那段（可能带省略号）。测试用它判断有没有裁。"""
         return self._text_drawn
 
-    def set_icon(self, name, color="#8b97ad"):
+    def set_icon(self, name, color=None):
         """设置导航图标（gui/icons.py 里的名字）；名字为空就只显示文字。"""
         self._icon_name = str(name or "")
-        self._icon_color = str(color or "#8b97ad")
+        self._icon_color = str(color or themes.icon_color(current_theme()))
         if self._icon_name:
             self.setIcon(icons.make(self._icon_name, self._icon_color, self.ICON_SIZE))
             self.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
@@ -147,7 +149,7 @@ class NavRail(QWidget):
         self._indicator_y = 0.0
         self._finished = False
         # 图标颜色（主题切换时由 set_icon_color 更新并重画所有导航项图标）
-        self._icon_color = "#8b97ad"
+        self._icon_color = themes.icon_color(current_theme())
         # finish() 之后新增的导航项要插到尾部弹性空隙之前，这里记下它的位置
         self._stretch_index = 0
 
@@ -289,7 +291,7 @@ class NavRail(QWidget):
         accent 一并传进来改左边那条滑动指示条：它也是自绘控件，QSS 里的
         $accent 换不到它身上，不跟着改就会在浅色主题下留一条深蓝。
         """
-        self._icon_color = str(color or "#8b97ad")
+        self._icon_color = str(color or themes.icon_color(current_theme()))
         for item in self._items.values():
             item.set_icon_color(self._icon_color)
         indicator = getattr(self, "_indicator", None)

@@ -303,7 +303,9 @@ class ProjectCard(HoverGlowCard):
         # 拖动把手（只能靠把手拖动卡片，避免点按钮时误拖）
         self.drag_handle = QLabel()
         self.drag_handle.setObjectName("cardGrip")
-        self.drag_handle.setPixmap(icons.make("grip", "#6b7688", 14).pixmap(14, 14))
+        self.drag_handle.setPixmap(
+            icons.make("grip", themes.icon_color(current_theme()), 14).pixmap(14, 14)
+        )
         self.drag_handle.setCursor(Qt.OpenHandCursor)
         self.drag_handle.setToolTip("按住拖动可调整运行顺序")
         self.drag_handle.installEventFilter(self)
@@ -311,7 +313,7 @@ class ProjectCard(HoverGlowCard):
         # 删除卡片（只是从总览里藏起来，设置页里能恢复）
         self.close_btn = AnimatedButton("", variant="mini")
         self.close_btn.setObjectName("cardClose")
-        self.close_btn.setIcon(icons.make("close", "#7f8aa3", 12))
+        self.close_btn.setIcon(icons.make("close", themes.icon_color(current_theme(), subtle=True), 12))
         self.close_btn.setFixedSize(22, 22)
         self.close_btn.setToolTip("从总览里移除这个项目（可在设置页恢复）")
         self.close_btn.clicked.connect(lambda: self.on_remove(self.key) if self.on_remove else None)

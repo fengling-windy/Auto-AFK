@@ -297,6 +297,31 @@ def main():
     check("表里没有的项目键不算默认色",
           not th.is_default_project_color("no-such-project", "#4fc3f7"))
 
+    # -- 12. 单色小图标也要按主题给 -------------------------------------------
+    # 拖动把手/关闭/打开仓库这些是 QPixmap 位图，QSS 的 $nav_text 换不到它们身上。
+    # 写死 #8b97ad / #7f8aa3 时，浅色白卡上的对比度只有 2.95 / 3.46，图标淡到
+    # 几乎看不见（深色主题上反而正常），所以取色必须跟着当前主题走。
+    for name in ("dark", "light"):
+        card_bg = th.resolve(name)["card"]
+        for subtle in (False, True):
+            color = th.icon_color(name, subtle=subtle)
+            level = 4.5 if not subtle else 3.0
+            check("{0} 主题{1}图标色在白/深卡上过得去（{2} / {3}）".format(
+                name, "次要" if subtle else "", color, round(_contrast(color, card_bg), 2)),
+                _contrast(color, card_bg) >= level)
+    check("深色与浅色的图标色不同",
+          th.icon_color("dark") != th.icon_color("light"))
+    check("深色图标色仍是原来的 #8b97ad",
+          th.icon_color("dark") == "#8b97ad")
+    check("未知主题的图标色回退深色",
+          th.icon_color("no-such-theme") == th.icon_color("dark"))
+    check("icon / icon_subtle 两档都在令牌表里",
+          all("icon" in th.resolve(n) and "icon_subtle" in th.resolve(n)
+              for n in ("dark", "light")))
+    missing_icon, extra_icon = th.check_theme("light")
+    check("两套主题的令牌表仍然完全对齐（缺 {0} / 多 {1}）".format(
+        missing_icon, extra_icon), not missing_icon and not extra_icon)
+
     print()
     if FAILURES:
         print("MODERN-UI {0} FAIL ({1})".format(len(FAILURES), ", ".join(FAILURES)))

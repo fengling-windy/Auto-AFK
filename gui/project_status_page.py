@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from afk_core import config
-from gui import icons
-from gui.modern import AnimatedButton, ElidedLabel, enable_smooth_scroll
+from gui import icons, themes
+from gui.modern import AnimatedButton, ElidedLabel, enable_smooth_scroll, current_theme
 
 # 这些键不重复展示：display_name 已经在标题上、args 太长单独一行、
 # 其余的 patterns/env/gui 之类属于实现细节，注册表页里能看到全文。
@@ -144,7 +144,7 @@ class _ProjectBlock(QFrame):
         self.state_label.setMinimumWidth(48)
         head.addWidget(self.state_label)
         self.repo_btn = AnimatedButton("打开仓库", variant="mini")
-        self.repo_btn.setIcon(icons.make("file", "#8b97ad", 12))
+        self.repo_btn.setIcon(icons.make("file", themes.icon_color(current_theme(), subtle=True), 12))
         self.repo_btn.setVisible(bool(self.spec.get("repo")))
         self.repo_btn.clicked.connect(self._open_repo)
         head.addWidget(self.repo_btn)
@@ -263,7 +263,12 @@ class ProjectStatusPage(QWidget):
     def __init__(self, registry_getter=None, color_getter=None, log_fn=None, parent=None):
         super().__init__(parent)
         self._registry_getter = registry_getter or config.registry
-        self._color_getter = color_getter or (lambda key: "#4fc3f7")
+        # 兜底色也要按主题给：原先写死 #4fc3f7（浅色那套里的天蓝），只在不传
+        # color_getter 时用到（预览工具、单独构造这一页），但硬编码一个深色
+        # 色板里的值，浅色主题下白卡上对比度只有 2.0。
+        self._color_getter = color_getter or (
+            lambda key: themes.project_fallback_color(current_theme(), key)
+        )
         self._log = log_fn or (lambda *a, **k: None)
         self._blocks = {}
         self._version_thread = None
