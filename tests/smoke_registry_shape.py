@@ -65,6 +65,9 @@ def _write(text):
     from afk_core import config
 
     config.PROJECTS_YAML.write_text(text, encoding="utf-8")
+    # 读盘缓存的键是 mtime_ns + size；同一时钟刻度内连写两次、且长度恰好相同
+    # 时会读到旧内容。测试里手写文件不做原子替换，主动失效最省事。
+    config.invalidate_cache()
 
 
 def _probe(label):

@@ -82,6 +82,9 @@ def _write_yaml(text):
     from afk_core import config
 
     config.SETTINGS_YAML.write_text(text, encoding="utf-8")
+    # 读盘缓存按 mtime_ns + size 失效；手写文件不走原子替换，同长度连写两次
+    # 可能读到旧内容，主动失效最省事。
+    config.invalidate_cache()
 
 
 def _mutate(section, value):

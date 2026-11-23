@@ -68,12 +68,25 @@ def main():
     return 0
 
 
+_STAMP = [1_600_000_000_000_000_000]  # 每次写入往前推 10ms，保证缓存键一定变
+
+
 def _write(path, data):
-    """写配置并确保 mtime 一定变化（Windows 上同一时钟刻度内连写两次时间戳相同）。"""
+    """写配置，并把 mtime 设成一个严格递增的固定值。
+
+    NTFS 上时间戳按 1ms 取整，同一毫秒内连写两次 mtime_ns 完全相同；用
+    ``os.utime`` 传「当前 mtime + N」也不行——两次写入的基准本身就在同一刻度，
+    加完之后还是相等（实测 +1ms 被直接抹平，+1s 也照样得到同一个值，于是这条
+    断言在机器忙的时候会莫名其妙挂掉）。
+
+    读盘缓存按 mtime+size 失效，所以这里干脆不靠真实时钟：每次写入把 mtime
+    推到一个比上次大 10ms 的固定值，缓存键必然变化，与负载无关。真实代码路径
+    走 ``_write_atomic``，它在结尾主动 ``invalidate_cache()``，不依赖 mtime 精度。
+    """
+    _STAMP[0] += 10_000_000
     text = config.yaml.dump(data, Dumper=config._YAML_DUMPER, allow_unicode=True, sort_keys=False)
     path.write_text(text, encoding="utf-8")
-    st = path.stat()
-    os.utime(path, ns=(st.st_atime_ns + 1_000_000, st.st_mtime_ns + 1_000_000))
+    os.utime(path, ns=(_STAMP[0], _STAMP[0]))
 
 
 def _run(tmp):
