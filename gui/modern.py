@@ -145,7 +145,10 @@ class FlowLayout(QLayout):
 
 
     # 卡片宽度上限 = sizeHint 宽 × 这个系数（见 _do_layout 里的说明）。
-    MAX_CELL_SCALE = 1.15
+    # 1.05 而不是 1.15：用户反馈「卡片始终保持小型，而不是变成长条」，
+    # 实测 1.15 时 838px 宽下每张 359px（sizeHint 312），1.05 时 337px，
+    # 两者都不裁字，取更接近 sizeHint 的那档。
+    MAX_CELL_SCALE = 1.05
 
     def __init__(self, parent=None, margin=0, h_spacing=12, v_spacing=12):
         super().__init__(parent)
