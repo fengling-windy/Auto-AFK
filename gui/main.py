@@ -656,6 +656,11 @@ class MainWindow(QMainWindow):
 
         # 空闲自动挂机：全局无鼠标键盘输入达到 idle.minutes 时弹提示框
         self._idle_dialog = None
+        # 空闲状态快照缓存（见 _idle_status_cached）：读 settings.yaml 要 4ms，
+        # 不能按 300ms 轮询的节奏读。
+        self._idle_status_cache = {}
+        self._idle_status_at = 0.0
+        self._idle_cooldown_deadline = 0.0
         self.idle_triggered.connect(self._prompt_idle)
         self.idle_watcher = IdleWatcher(
             config.settings,
@@ -2322,18 +2327,21 @@ class MainWindow(QMainWindow):
         color = chain_colors.get(chain, chain_colors["idle"])
         self.chain_pill.set_state(text, color)
         self._sync_chain_controls(snapshot)
+        # 今日完成状态只算一次：小组件与设置页提示都要它，而 _is_done_today 虽然
+        # 有 mtime 缓存，仍要做一次 stat。
+        done_today = self._is_done_today()
         if self.widget is not None and self.widget.isVisible():
+            idle_status = self._idle_status_cached()
             self.widget.tick(
                 snapshot,
-                self.idle_watcher.status(),
-                self.idle_watcher.threshold_seconds(),
-                completed_today=self._is_done_today(),
+                idle_status,
+                idle_status.get("threshold_sec") or 0,
+                completed_today=done_today,
             )
         # 链刚成功结束时刷新设置页的「今日状态」（避免用户看到过期信息）。
         # 但不能只看链状态：标记文件也可能由 CLI 或另一个 Auto-AFK 进程写入，
         # 本进程的 chain_status 一直是 idle，标签就永远停在「未完成」。所以再
         # 比一次「今日是否已完成」的布尔值（读的是 mtime 缓存，几乎零开销）。
-        done_today = self._is_done_today()
         if chain != self._last_chain_for_completion or done_today != self._last_done_today:
             self._last_chain_for_completion = chain
             self._last_done_today = done_today
@@ -2499,6 +2507,40 @@ class MainWindow(QMainWindow):
             return bool(self.supervisor.chain_running())
         except Exception:
             return False
+
+    def _idle_status_cached(self):
+        """空闲状态快照（限速重算）。
+
+        `idle_watcher.status()` 每次都要读一遍 settings.yaml（get_settings 就是
+        config.settings()，实测 4.3ms）。桌面小组件开着时 _poll 每 300ms 拿一次，
+        光这一项就吃掉 1.4% 的主线程。
+
+        这些字段的变化速度完全不同：空闲秒数按秒变，阈值/开关要用户去设置页改。
+        所以空闲秒数每轮刷新，配置相关字段按 2 秒重算一次——用户在设置页改完
+        最多两秒就能看到，而读盘次数降到原来的 1/6。
+        """
+        now = time.monotonic()
+        snapshot = self._idle_status_cache
+        if snapshot and now - self._idle_status_at < 2.0:
+            try:
+                idle_now = idle.idle_seconds()
+            except Exception:
+                idle_now = float(snapshot.get("idle_sec") or 0)
+            fresh = dict(snapshot)
+            fresh["idle_sec"] = round(idle_now, 1)
+            fresh["idle_text"] = idle.format_idle(idle_now)
+            fresh["cooldown_left_sec"] = max(0, int(self._idle_cooldown_deadline - time.time()))
+            fresh["watching"] = self.idle_watcher.running()
+            return fresh
+        try:
+            snapshot = self.idle_watcher.status()
+        except Exception as exc:
+            logging.getLogger("afk.gui").debug("idle status failed: %s", exc)
+            snapshot = {}
+        self._idle_status_cache = dict(snapshot)
+        self._idle_status_at = now
+        self._idle_cooldown_deadline = time.time() + float(snapshot.get("cooldown_left_sec") or 0)
+        return snapshot
 
     def _is_done_today(self):
         """今天已成功完成过一轮链 -> 空闲时不再自动执行（可在设置里关掉此行为）。

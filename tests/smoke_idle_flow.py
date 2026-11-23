@@ -261,6 +261,60 @@ def test_tray_mode_idle_prompt(app):
     window._quit()
 
 
+def test_idle_status_cache(app):
+    """_idle_status_cached：读盘限速，但空闲秒数与冷却仍要跟手。
+
+    历史开销：idle_watcher.status() 每次都要走 config.settings() 重新读一遍
+    settings.yaml（实测 4.3ms）。桌面小组件开着时 _poll 每 300ms 取一次，
+    光这一项就占掉主线程 1.4%。缓存后配置相关字段每 2 秒重算一次，空闲秒数
+    每轮现算 —— 两者不能一起被缓存住，否则「空闲 5 分钟」的数字会卡住不动。
+    """
+    window = build_window(app)
+    reads = {"n": 0}
+    real_status = window.idle_watcher.status
+
+    def counting_status():
+        reads["n"] += 1
+        return real_status()
+
+    window.idle_watcher.status = counting_status
+    try:
+        window._idle_status_at = 0.0
+        window._idle_status_cache = {}
+        first = window._idle_status_cached()
+        check("首次取空闲状态会读盘一次", reads["n"] == 1)
+        check("首次就带上了阈值", first.get("threshold_sec") == 1800.0)
+
+        for _ in range(5):
+            window._idle_status_cached()
+        check("2 秒内的连续轮询不再读盘（次数仍 {0}）".format(reads["n"]), reads["n"] == 1)
+
+        # 空闲秒数必须每轮现算：把底层读数打桩成两个不同值
+        import afk_core.idle as idle_mod
+
+        real_idle = idle_mod.idle_seconds
+        try:
+            idle_mod.idle_seconds = lambda: 42.0
+            window._idle_status_cached()
+            got_a = window._idle_status_cached()
+            idle_mod.idle_seconds = lambda: 99.0
+            got_b = window._idle_status_cached()
+        finally:
+            idle_mod.idle_seconds = real_idle
+        check("空闲秒数按轮刷新（缓存命中也要更新）",
+              got_a.get("idle_sec") == 42.0 and got_b.get("idle_sec") == 99.0)
+        check("空闲文案跟着秒数走", got_b.get("idle_text") == idle_mod.format_idle(99.0))
+
+        # 过了 2 秒窗口要重读（否则改了设置永远不生效）
+        window._idle_status_at = 0.0
+        window._idle_status_cached()
+        check("超出窗口后重新读盘", reads["n"] == 2)
+    finally:
+        window.idle_watcher.status = real_status
+    window.hide()
+    window._quit()
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -269,6 +323,7 @@ def main():
         test_real_watcher_triggers_end_to_end(app)
         test_tray_mode_idle_prompt(app)
         test_trigger_failure_is_visible()
+        test_idle_status_cache(app)
     finally:
         config.SETTINGS_YAML = _REAL_SETTINGS
         shutil.rmtree(_TMP, ignore_errors=True)

@@ -106,8 +106,12 @@ class IdleWatcher:
         return (self.get_settings() or {}).get("idle") or {}
 
     def status(self):
+        # 只读一次配置。get_settings 是 config.settings()，每次调用都要把
+        # settings.yaml 重新读盘 + 解析（实测 4.2ms）；原实现 status() 里
+        # _cfg() 与 threshold_seconds() 各读一次，GUI 每 300ms 调一次
+        # status() 就等于每 300ms 白读两遍 YAML。
         cfg = self._cfg()
-        threshold = self.threshold_seconds()
+        threshold = self._threshold_from(cfg)
         idle = idle_seconds()
         return {
             "supported": bool(_IS_WINDOWS),
@@ -122,12 +126,16 @@ class IdleWatcher:
             "last_skip_reason": self.last_skip_reason,
         }
 
-    def threshold_seconds(self):
+    def _threshold_from(self, cfg):
+        """按已有配置算出阈值秒数（避免为了一个换算再读一次盘）。"""
         try:
-            minutes = float(self._cfg().get("minutes", DEFAULT_MINUTES))
+            minutes = float((cfg or {}).get("minutes", DEFAULT_MINUTES))
         except (TypeError, ValueError):
             minutes = float(DEFAULT_MINUTES)
         return max(1.0, minutes * 60.0)
+
+    def threshold_seconds(self):
+        return self._threshold_from(self._cfg())
 
     def prompt_seconds(self):
         try:
