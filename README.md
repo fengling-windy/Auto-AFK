@@ -334,6 +334,12 @@ pre_run:
 > 命中时返回深拷贝，调用方照常就地修改不会互相串味；手工用编辑器改文件也能
 > 立刻读到（mtime 变了）。所以「改完设置没生效」不会由这层缓存引起。
 
+> 数值项（`delay_sec`、`idle.minutes`、`ready_timeout_sec`、`log_days` …）写坏时
+> 不会再把程序打死：统一走 `afk_core/numval.py`，转不动的写一条 warning 后按默认值
+> 处理，`None`（键没写）静默回退。以前 `post_actions.delay_sec: abc` 会让设置页
+> 直接构造失败、整个界面起不来，`supervisor._supervise` 里的坏值则会让后台监控线程
+> 静默退出、那次运行永远停在「运行中」。
+
 ## 日志维护
 
 启动 GUI **或**执行会真正产生新日志的 CLI 命令（`run` / `start` / `update`）时会自动执行一次清理
