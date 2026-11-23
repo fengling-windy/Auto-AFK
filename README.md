@@ -290,7 +290,7 @@ pre_run:
   - 入口文件的标记补丁（`# >>> AFK-MONITOR:...`）上报任务阶段；
   - **stdout/stderr 实时追踪**：M7A/BAAH 使用自带日志器（不经过标准 logging），监管器直接跟踪其输出并按项目规则匹配；
   - **外部日志追踪**：MaaEnd 通过 `log_files` 跟踪 `install\debug\maafw.log`，识别 `Tasker.Task.Failed` 等信号；
-  - 事件写入 `logs\events.jsonl`、`logs\projects\<项目>.log`，GUI 实时展示（支持按项目过滤，切换即重绘；过滤重绘只画最近 2000 行，更早的在 events.jsonl 里，界面顶部会写明被截掉多少条）。
+  - 事件写入 `logs\events.jsonl`、`logs\projects\<项目>.log`，GUI 实时展示（支持按项目过滤，切换即重绘；过滤重绘只画最近 2000 行，更早的在 events.jsonl 里，界面顶部会写明被截掉多少条）。项目刷屏时（实测 MaaEnd 能到 1.4 万条/秒）界面每轮最多画 400 行并提示跳过了多少条，完整内容仍在 events.jsonl 与项目日志里。
 - **完成判定**（防止"秒完成"误判）：
   - `require_finish: true`：必须出现 `finish_patterns` 才判定成功；
   - `min_runtime_sec`：运行时间过短且无完成标记 → 失败；
