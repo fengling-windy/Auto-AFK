@@ -7,6 +7,7 @@
         .venv/Scripts/python.exe tests/smoke_shell_ui.py
 """
 
+import logging
 import shutil
 import sys
 import tempfile
@@ -42,7 +43,7 @@ _TMP_REPAIR = _TMP_DIR / "repair_rules.yaml"
 shutil.copy(_REAL_REPAIR, _TMP_REPAIR)
 config.REPAIR_YAML = _TMP_REPAIR
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem
 
 from afk_core.events import EventBus
@@ -811,6 +812,73 @@ def test_main_window(app):
             window.schedule_time.time().toString("HH:mm") == "07:30",
         )
 
+        # 定时时间写坏时必须留痕，不能静默退回 04:00 装作正常。
+        # 历史缺陷：settings.yaml 里 schedule.time 写成 abc / 25:99 / 空值时，
+        # 界面显示的是一个完全正常的 04:00，用户以为自己那条定时生效了，等到
+        # 「八点没起来」时早已忘了改过什么。
+        _log_records = []
+
+        class _Grab(logging.Handler):
+            def emit(self, record):
+                if record.name == "afk.gui":
+                    _log_records.append(record.getMessage())
+
+        _grab = _Grab()
+        _gui_logger = logging.getLogger("afk.gui")
+        _gui_logger.addHandler(_grab)
+        try:
+            for bad in ("abc", "25:99", ""):
+                broken = dict(config.settings())
+                broken["schedule"] = dict(broken.get("schedule") or {}, time=bad)
+                window.settings_edit.setPlainText(
+                    yaml.safe_dump(broken, allow_unicode=True, sort_keys=False)
+                )
+                _log_records.clear()
+                window._save_text(window.settings_edit, config.SETTINGS_YAML)
+                pump(app, 60)
+                check(
+                    "定时时间写成 {0!r} 时退回 04:00".format(bad),
+                    window.schedule_time.time().toString("HH:mm") == "04:00",
+                )
+                check(
+                    "定时时间写成 {0!r} 时时间框挂提示".format(bad),
+                    "schedule.time" in window.schedule_time.toolTip(),
+                )
+                check(
+                    "定时时间写成 {0!r} 时写 warning".format(bad),
+                    any("invalid schedule.time" in m for m in _log_records),
+                )
+            fixed = dict(config.settings())
+            fixed["schedule"] = dict(fixed.get("schedule") or {}, time="06:45")
+            window.settings_edit.setPlainText(
+                yaml.safe_dump(fixed, allow_unicode=True, sort_keys=False)
+            )
+            window._save_text(window.settings_edit, config.SETTINGS_YAML)
+            pump(app, 60)
+            check(
+                "改回合法时间后时间框跟上",
+                window.schedule_time.time().toString("HH:mm") == "06:45",
+            )
+            check("改回合法时间后提示被摘掉", window.schedule_time.toolTip() == "")
+            check("改回合法时间后坏值标记清空", window._bad_schedule_time is None)
+        finally:
+            _gui_logger.removeHandler(_grab)
+
+        # 用户直接在时间框里拨时间（而不是改 yaml）也算把值修好了：落盘时写的
+        # 是合法的 HH:MM，坏值标记与提示必须一起清掉，否则文件已经修好、控件
+        # 还挂着「settings.yaml 里写的是 abc」。
+        window._bad_schedule_time = "abc"
+        window._sync_schedule_tooltip()
+        check("坏值标记能让时间框挂上提示", "abc" in window.schedule_time.toolTip())
+        window.schedule_time.setTime(QTime(9, 15))
+        _fixed_deadline = time.monotonic() + 2.0
+        while time.monotonic() < _fixed_deadline:
+            pump(app, 40)
+            if window._bad_schedule_time is None:
+                break
+        check("在时间框里拨时间落盘后坏值标记清掉", window._bad_schedule_time is None)
+        check("在时间框里拨时间落盘后提示摘掉", window.schedule_time.toolTip() == "")
+
         # 拖动「定时启动」时间框不能逐格写盘 + 刷屏日志。
         # 历史缺陷：timeChanged 直连 _toggle_schedule，按住箭头连点 30 格就是
         # 30 次整份写 settings.yaml、30 行「定时启动: ...」日志，把运行日志冲掉。
@@ -831,7 +899,6 @@ def test_main_window(app):
         try:
             config.save_yaml = counting_save
             window._append_log = counting_log
-            from PySide6.QtCore import QTime
 
             moment = QTime(base_time.hour(), base_time.minute())
             for _step in range(30):
@@ -1909,8 +1976,6 @@ def test_main_window(app):
         # 两个「判不出来就放行」的判断必须留痕：
         # 历史缺陷是静默 return False，现象分别是「挂机跑着突然弹出空闲提示」
         # 和「开关明明开着却还是重复挂了一遍」，日志里查不到任何线索。
-        import logging
-
         _records = []
 
         class _Collect(logging.Handler):

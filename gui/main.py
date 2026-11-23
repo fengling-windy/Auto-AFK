@@ -643,6 +643,9 @@ class MainWindow(QMainWindow):
         # 洪峰期间是否有日志被跳过不画（累积条数 + 上次提示时间，用于节流）
         self._skipped_since_notice = 0
         self._skip_notice_at = 0.0
+        # settings.yaml 里 schedule.time 写坏时的原文（None 表示正常；空串也
+        # 算坏值，所以不能用空串当「正常」哨兵），见 _parse_schedule_time。
+        self._bad_schedule_time = None
         self._build_ui()
         self._build_tray()
 
@@ -840,11 +843,8 @@ class MainWindow(QMainWindow):
         self.schedule_time.setDisplayFormat("HH:mm")
         schedule_cfg = self.settings.get("schedule", {}) or {}
         self.schedule_check.setChecked(bool(schedule_cfg.get("enabled")))
-        try:
-            hour, minute = [int(x) for x in str(schedule_cfg.get("time", "04:00")).split(":")[:2]]
-            self.schedule_time.setTime(QTime(hour, minute))
-        except Exception:
-            self.schedule_time.setTime(QTime(4, 0))
+        self.schedule_time.setTime(self._parse_schedule_time(schedule_cfg.get("time", "04:00")))
+        self._sync_schedule_tooltip()
         self.schedule_check.toggled.connect(self._toggle_schedule)
         self.schedule_time.timeChanged.connect(self._toggle_schedule)
         controls.addWidget(self.pre_run_check)
@@ -1972,15 +1972,46 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         time_edit = getattr(self, "schedule_time", None)
         if time_edit is not None:
-            try:
-                hour, minute = [int(x) for x in str(schedule_cfg.get("time", "04:00")).split(":")[:2]]
-            except (TypeError, ValueError):
-                hour, minute = 4, 0
-            target = QTime(hour, minute)
+            target = self._parse_schedule_time(schedule_cfg.get("time", "04:00"))
             if time_edit.time() != target:
                 time_edit.blockSignals(True)
                 time_edit.setTime(target)
                 time_edit.blockSignals(False)
+            self._sync_schedule_tooltip()
+
+    def _parse_schedule_time(self, raw):
+        """把 `schedule.time` 解析成 QTime；写坏了退回 04:00，但留下线索。
+
+        历史缺陷：写成 "abc" / "25:99" / 空值时只能退回 04:00，界面上就是一个
+        正常的 04:00 —— 用户以为自己那条定时生效了，等到「八点没起来」时早忘了
+        改过什么。所以坏值要同时留给日志（warning）与控件 tooltip，并且把原始
+        文本记在 `self._bad_schedule_time` 里，恢复成合法值后再清掉。
+        """
+        try:
+            hour, minute = [int(x) for x in str(raw).split(":")[:2]]
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("out of range: {0!r}".format(raw))
+            parsed = QTime(hour, minute)
+        except Exception as exc:
+            logging.getLogger("afk.gui").warning("invalid schedule.time %r: %s", raw, exc)
+            self._bad_schedule_time = str(raw)
+            return QTime(4, 0)
+        self._bad_schedule_time = None
+        return parsed
+
+    def _sync_schedule_tooltip(self):
+        """按 `_bad_schedule_time` 给时间控件挂/摘提示（两处调用点共用）。"""
+        time_edit = getattr(self, "schedule_time", None)
+        if time_edit is None:
+            return
+        bad = getattr(self, "_bad_schedule_time", None)
+        if bad is not None:
+            time_edit.setToolTip(
+                "settings.yaml 里 schedule.time 写的是 {0!r}，不是 HH:MM，"
+                "已按 04:00 处理".format(bad)
+            )
+        else:
+            time_edit.setToolTip("")
 
     def _toggle_schedule(self, *_):
         self._schedule_timer.start()
@@ -2001,6 +2032,10 @@ class MainWindow(QMainWindow):
             schedule["time"] = when
 
         self._mutate_settings(mutate)
+        # 落盘的是界面上的值，写坏了也被写成了合法的 HH:MM，坏值标记与提示
+        # 必须跟着清掉，否则文件已经修好了、控件还在提示「写的是 abc」。
+        self._bad_schedule_time = None
+        self._sync_schedule_tooltip()
         self._append_log("core", "info", "定时启动: {0} {1}".format("开" if enabled else "关", when))
 
     def _toggle_pre_run(self, checked):
