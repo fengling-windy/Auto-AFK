@@ -276,6 +276,12 @@ class ProjectStatusPage(QWidget):
         # 所以新增/改路径的项目也能拿到版本号（见 _start_version_scan）。
         self._scan_pending = []
         self._scan_lock = threading.Lock()
+        # 正在扫的路径：reload 时若某个项目还没扫完、缓存也还没写，不加这一步
+        # 判断就会把它再排一次队，同一个路径白跑两遍 git。
+        self._scan_inflight = set()
+        # 路径 -> 版本号。切页会反复 reload，而 git 版本在两次切页之间不会变；
+        # 不缓存的话每切一次页就要重跑一遍 `git describe`（每个项目几十毫秒）。
+        self._version_cache = {}
         self.version_ready.connect(self._apply_version)
 
         outer = QVBoxLayout(self)
@@ -289,7 +295,8 @@ class ProjectStatusPage(QWidget):
         head.addWidget(title)
         head.addStretch(1)
         self.refresh_btn = AnimatedButton("刷新", variant="mini")
-        self.refresh_btn.clicked.connect(self.reload)
+        # 「刷新」是用户主动要最新版本，必须绕过缓存重扫；切页面走 reload() 默认。
+        self.refresh_btn.clicked.connect(lambda *_: self.reload(force_versions=True))
         head.addWidget(self.refresh_btn)
         outer.addLayout(head)
 
@@ -318,8 +325,14 @@ class ProjectStatusPage(QWidget):
         self.reload()
 
     # -- 构建 ---------------------------------------------------------------
-    def reload(self):
-        """按当前注册表重建列表（切换页面、保存注册表后都会调）。"""
+    def reload(self, force_versions=False):
+        """按当前注册表重建列表（切换页面、保存注册表后都会调）。
+
+        force_versions=True 时无视版本缓存、把所有项目重扫一遍（「刷新」按钮
+        用这个）；日常切页只扫新增或换了路径的项目——每个项目要跑一次
+        `git describe`（几十毫秒），5 个项目来回切三次就是 15 次子进程，
+        切页会明显发涩（实测 reload 30ms + 后台 15 次 git 调用）。
+        """
         registry = self._registry_getter() or {}
         projects = registry.get("projects", {}) or {}
         # 清掉旧块（保留尾部 stretch）
@@ -333,10 +346,21 @@ class ProjectStatusPage(QWidget):
         for key, spec in projects.items():
             block = _ProjectBlock(key, spec, self._color_getter(key))
             block.set_state(bool((spec or {}).get("enabled", True)))
+            # 命中缓存的版本先填上，避免重建后闪一下「未知」再变回来。
+            cached = self._version_cache.get(self._project_path(key, spec))
+            if cached:
+                block.set_version(cached)
             self._blocks[key] = block
             self._list_layout.insertWidget(self._list_layout.count() - 1, block)
         self._align_caps()
-        self._start_version_scan(projects)
+        self._start_version_scan(projects, force=force_versions)
+
+    def _project_path(self, key, spec):
+        """项目 git 目录的绝对路径字符串（缓存键）；没有 path 时返回空串。"""
+        path = (spec or {}).get("path")
+        if not path:
+            return ""
+        return str(config.ROOT / str(path))
 
     def _align_caps(self):
         """按最长标签统一各块左列的宽度（含 QSS 字号与 DPI 的影响）。
@@ -355,7 +379,7 @@ class ProjectStatusPage(QWidget):
         for block in self._blocks.values():
             block.align_caps(width)
 
-    def _start_version_scan(self, projects):
+    def _start_version_scan(self, projects, force=False):
         """后台读各子项目 git 版本（每次 git 调用几十毫秒，串起来会让切页卡顿）。
 
         历史缺陷：只要上一轮扫描线程还活着就直接 return。用户在「项目注册表」
@@ -363,20 +387,27 @@ class ProjectStatusPage(QWidget):
         卡就永远停在「未知」——线程早就拿着旧的项目清单跑完了，没人再扫它。
         现在改成往同一个队列里追加目标：线程还活着就往队列里补，它自己会继续
         消费；线程已经结束就新起一个。
+
+        同时按路径缓存结果：切页会反复 reload，而 git 版本在两次切页之间不会
+        变——同一个路径没必要重复跑 git（实测来回切三次多打了 15 次子进程）。
         """
         targets = []
-        for key, spec in projects.items():
-            spec = spec or {}
-            path = spec.get("path")
-            if not path:
-                continue
-            targets.append((key, str(config.ROOT / str(path))))
+        with self._scan_lock:
+            for key, spec in projects.items():
+                spec = spec or {}
+                path = self._project_path(key, spec)
+                if not path:
+                    continue
+                if not force and (path in self._version_cache or path in self._scan_inflight):
+                    continue
+                targets.append((key, path))
+            if targets:
+                self._scan_pending.extend(
+                    t for t in targets if t not in self._scan_pending
+                )
+                self._scan_inflight.update(path for _key, path in targets)
         if not targets:
             return
-        with self._scan_lock:
-            self._scan_pending.extend(
-                t for t in targets if t not in self._scan_pending
-            )
         if self._version_thread is not None and self._version_thread.is_alive():
             return
         self._version_thread = threading.Thread(
@@ -395,6 +426,11 @@ class ProjectStatusPage(QWidget):
                 version = read_version(path)
             except Exception:
                 version = ""
+            # 顺手写缓存：即便这一轮 GUI 线程刚好正在重建卡片（_apply_version
+            # 找不到块），下次 reload 也能把版本号直接填回去。
+            with self._scan_lock:
+                self._version_cache[path] = version
+                self._scan_inflight.discard(path)
             self.version_ready.emit(key, version)
 
     def _apply_version(self, key, version):

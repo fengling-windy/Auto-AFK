@@ -312,7 +312,59 @@ def _run(tmp):
     mixed = _ProjectBlock._format(["a", {"label": "b"}])
     check("混着非字典时退回逗号连接（{0}）".format(mixed), mixed.startswith("a, "))
 
-    for widget in (page, page2, page3, page4, page5):
+    # -- 11. 切页不重扫 git（版本缓存） ------------------------------------
+    # 历史缺陷：每次 reload 都把所有项目重扫一遍，来回切三页就是十几次
+    # `git describe` 子进程（每个几十毫秒），切页明显发涩。
+    import gui.project_status_page as psp2
+
+    scanned = []
+    real_read2 = psp2.read_version
+
+    def counting_read(path):
+        scanned.append(str(path))
+        return "vc-" + Path(path).name
+
+    try:
+        psp2.read_version = counting_read
+        dir_d = _project_dir(tmp, "ProjD")
+        dir_e = _project_dir(tmp, "ProjE")
+        projects5 = {
+            "D": {"display_name": "项目丁", "path": str(dir_d)},
+            "E": {"display_name": "项目戊", "path": str(dir_e)},
+        }
+        page6 = ProjectStatusPage(
+            registry_getter=_registry_for(projects5),
+            color_getter=lambda k: "#4fc3f7",
+            log_fn=lambda *a, **k: None,
+        )
+        page6.show()
+        pump(app, 40)
+        check("首轮把两个项目都扫了", _wait_scan(page6, app))
+        first = len(scanned)
+        check("首轮扫描次数 = 项目数（{0}）".format(first), first == 2)
+        # 来回切三次页（每次都 reload）
+        for _ in range(3):
+            page6.reload()
+            pump(app, 40)
+        check("切页不再重复扫 git（首轮 {0}，三次切页后 {1}）".format(first, len(scanned)),
+              len(scanned) == first)
+        check("缓存命中时新块直接带版本（不是「未知」）",
+              page6._blocks["D"]._version_label.text() == "vc-ProjD")
+        # 用户点「刷新」要拿到最新版本
+        page6.reload(force_versions=True)
+        check("强制刷新会重扫", _wait_scan(page6, app) and len(scanned) > first)
+        # 换路径的项目必须重扫（缓存键是路径）
+        dir_f = _project_dir(tmp, "ProjF")
+        projects5["D"] = {"display_name": "项目丁", "path": str(dir_f)}
+        before_switch = len(scanned)
+        page6.reload()
+        check("换了路径的项目重新扫", _wait_scan(page6, app) and len(scanned) > before_switch)
+        check("换路径后版本换成新目录的",
+              _wait_until(app, lambda: page6._blocks["D"]._version_label.text() == "vc-ProjF"))
+    finally:
+        psp2.read_version = real_read2
+
+    for widget in (page, page2, page3, page4, page5, page6):
         try:
             widget.close()
         except Exception:
