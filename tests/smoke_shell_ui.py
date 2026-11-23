@@ -319,6 +319,36 @@ def test_settings_page(app):
     check("reload 后运行顺序列表跟随文件", reloaded_order == ["Gamma", "Beta", "Alpha"])
     # 历史缺陷：列表高度写死 168px，而 QSS 每行 44px，5 个项目只显示 3 行半，
     # 第 4 行被切在中间（看起来像画坏了）。高度必须按行数算。
+    # 一次 reload 只该读一次盘：settings() 与 registry() 每次都要读 yaml 并做
+    # 归一/继承展开（实测 3.2ms / 18.6ms），原实现七个子方法各读一遍，切一次
+    # 「设置」页要读 5 次 settings、5 次 registry，光读配置就占掉 ~96ms 的大头。
+    _reads = {"settings": 0, "registry": 0}
+    _orig_settings = config.settings
+    _orig_registry = config.registry
+
+    def _count_settings():
+        _reads["settings"] += 1
+        return _orig_settings()
+
+    def _count_registry():
+        _reads["registry"] += 1
+        return _orig_registry()
+
+    config.settings = _count_settings
+    config.registry = _count_registry
+    try:
+        page.reload_from_disk()
+    finally:
+        config.settings = _orig_settings
+        config.registry = _orig_registry
+    check(
+        "一次 reload_from_disk 最多读一次 settings.yaml（实测 {0} 次）".format(_reads["settings"]),
+        _reads["settings"] <= 1,
+    )
+    check(
+        "一次 reload_from_disk 最多读一次项目注册表（实测 {0} 次）".format(_reads["registry"]),
+        _reads["registry"] <= 1,
+    )
     row_h = max(1, page.order_list.sizeHintForRow(0))
     check("运行顺序列表放得下所有行（不切半行）",
           page.order_list.viewport().height() >= page.order_list.count() * row_h - 4)

@@ -382,9 +382,11 @@ class SettingsPage(QWidget):
         self._loading = False
 
     # -- 外观 ------------------------------------------------------------------
-    def _load_appearance(self):
+    def _load_appearance(self, settings=None):
         """把 gui.theme / gui.background_image / gui.background_opacity 读进控件。"""
-        gui_cfg = config.settings().get("gui") or {}
+        if settings is None:
+            settings = config.settings()
+        gui_cfg = settings.get("gui") or {}
         theme = themes.normalize_theme(gui_cfg.get("theme"))
         idx = self.theme_combo.findData(theme)
         if idx < 0:
@@ -441,24 +443,32 @@ class SettingsPage(QWidget):
         self._save_appearance()
 
     # -- 已隐藏的项目 ----------------------------------------------------------
-    def _hidden_project_keys(self):
-        projects = config.registry().get("projects", {}) or {}
+    def _hidden_project_keys(self, settings=None, registry=None):
+        # 这两个参数是为了让 reload_from_disk 一次读盘、多次复用：settings() 与
+        # registry() 每次调用都要重新读 yaml 并解析（实测 3.2ms / 18.6ms），
+        # 而一次 reload 里原本要读 5+5 次，光读配置就占掉 ~96ms 里的大头。
+        if registry is None:
+            registry = self._effective_registry()
+        projects = registry.get("projects", {}) or {}
+        if settings is None:
+            settings = config.settings()
         keys = []
-        for key in ((config.settings().get("gui") or {}).get("hidden_projects") or []):
+        for key in ((settings.get("gui") or {}).get("hidden_projects") or []):
             if str(key) in projects:
                 keys.append(str(key))
         return keys
 
-    def _build_hidden_checks(self):
+    def _build_hidden_checks(self, settings=None, registry=None):
         """按当前隐藏列表重建「恢复」行（注册表里已删掉的项目不再列）。"""
-        projects = config.registry().get("projects", {}) or {}
+        registry = self._effective_registry(registry)
+        projects = registry.get("projects", {}) or {}
         body = self.hidden_card.body
         for row in getattr(self, "_hidden_rows", []):
             row.setParent(None)
             row.deleteLater()
         self._hidden_rows = []
         body.removeWidget(self._hidden_empty_hint)
-        keys = self._hidden_project_keys()
+        keys = self._hidden_project_keys(settings, registry)
         for key in keys:
             row_widget = QWidget()
             row = QHBoxLayout(row_widget)
@@ -479,10 +489,10 @@ class SettingsPage(QWidget):
         body.addWidget(self._hidden_empty_hint)
 
     # -- 新增项目 --------------------------------------------------------------
-    def _build_base_combo(self):
+    def _build_base_combo(self, registry=None):
         """「继承自」下拉：列出当前注册表里已有的项目键。"""
         current = self.add_base_combo.currentData() or ""
-        projects = config.registry().get("projects", {}) or {}
+        projects = self._effective_registry(registry).get("projects", {}) or {}
         self.add_base_combo.blockSignals(True)
         self.add_base_combo.clear()
         self.add_base_combo.addItem("不继承（手填下面这些）", "")
@@ -557,11 +567,26 @@ class SettingsPage(QWidget):
         self.project_added.emit(key)
 
     # -- 数据 ------------------------------------------------------------------
-    def _projects_with_gui(self):
-        projects = self._registry.get("projects", {}) or {}
+    def _effective_registry(self, registry=None):
+        """取当前该用的注册表。
+
+        构造时被注入注册表（测试/预览）就以注入的那份为准，连 reload_from_disk
+        也不该用磁盘上的真注册表把它顶掉——否则假项目会凭空消失（冒烟里表现为
+        `KeyError: 'Beta'`）。
+        """
+        if self._registry_injected:
+            return self._registry
+        if registry is not None:
+            self._registry = registry
+            return registry
+        self._registry = config.registry()
+        return self._registry
+
+    def _projects_with_gui(self, registry=None):
+        projects = self._effective_registry(registry).get("projects", {}) or {}
         return {k: s for k, s in projects.items() if s.get("gui")}
 
-    def _build_silent_checks(self):
+    def _build_silent_checks(self, settings=None, registry=None):
         """按当前注册表重建「启动时自动打开项目界面」的勾选项。
 
         历史缺陷：这几个复选框只在 __init__ 里按当时的注册表建一次。用户在
@@ -570,13 +595,16 @@ class SettingsPage(QWidget):
         也看不出少了一项。删掉的项目反之会留下一个勾选框，勾上后保存进
         silent_open_projects，之后每次启动都去拉起一个不存在的项目。
         """
+        if settings is None:
+            settings = config.settings()
         silent_set = {
             str(k)
-            for k in ((config.settings().get("gui") or {}).get("silent_open_projects") or [])
+            for k in ((settings.get("gui") or {}).get("silent_open_projects") or [])
         }
         # 注册表同样要重读（除非构造时被注入假注册表，那是测试/预览的用法）。
-        if not self._registry_injected:
-            self._registry = config.registry()
+        # 取一次存下来传给 _projects_with_gui，否则它内部再取一次，一次重建要
+        # 读两遍 yaml。
+        registry = self._effective_registry(registry)
         body = self.silent_card.body
         for check in self.silent_checks.values():
             body.removeWidget(check)
@@ -584,7 +612,7 @@ class SettingsPage(QWidget):
             check.deleteLater()
         self.silent_checks = {}
         body.removeWidget(self._silent_empty_hint)
-        for key, spec in self._projects_with_gui().items():
+        for key, spec in self._projects_with_gui(registry).items():
             check = QCheckBox(str(spec.get("display_name", key)).split("（")[0])
             check.setChecked(key in silent_set)
             check.toggled.connect(lambda checked, k=key: self._toggle_silent(k, checked))
@@ -593,8 +621,9 @@ class SettingsPage(QWidget):
         self._silent_empty_hint.setVisible(not self.silent_checks)
         body.addWidget(self._silent_empty_hint)
 
-    def _ordered_project_keys(self):
-        settings = config.settings()
+    def _ordered_project_keys(self, settings=None):
+        if settings is None:
+            settings = config.settings()
         order = [str(k) for k in ((settings.get("chain") or {}).get("order") or [])]
         keys = [k for k in order if k in (self._registry.get("projects", {}) or {})]
         for key in (self._registry.get("projects", {}) or {}):
@@ -807,19 +836,27 @@ class SettingsPage(QWidget):
             self.autostart_hint.setText("当前未注册开机启动（{0}）。".format(info.get("run_key", "")))
 
     def reload_from_disk(self):
-        """重新读取 settings.yaml 刷新界面（外部改配置后调用）。"""
+        """重新读取 settings.yaml 刷新界面（外部改配置后调用）。
+
+        settings() 与 registry() 每次调用都要重新读 yaml 并走一遍归一/继承展开
+        （实测 3.2ms / 18.6ms）。原来这次刷新里七个子方法各读一遍，一次切到
+        「设置」页就要读 5 次 settings、5 次 registry，光读配置就占掉 ~96ms 的
+        大头（探针 logs/_p_cnt.py 实测）。这里读一次、往下传。
+        """
         # 先把还没落盘的防抖改动写掉，否则 reload 会把界面上刚改的值覆盖回旧值。
         self.flush_pending()
         self._loading = True
         try:
             settings = config.settings()
+            # 注入注册表（测试/预览）时用注入的那份，不去读磁盘。
+            registry = self._effective_registry()
             # 「启动时自动打开」勾选项要跟着注册表重建（外部新增/删除带界面的
             # 项目后必须反映到这几行，见 _build_silent_checks 的历史缺陷说明）。
-            self._build_silent_checks()
+            self._build_silent_checks(settings, registry)
             # 运行顺序也要跟着刷新：之前漏了这一项，外部改了 chain.order
             # （或直接在「设置」tab 里改了 yaml 保存）再回来，列表还是旧顺序，
             # 用户以为没生效。重建而不是原地重排，避免丢掉新增的项目。
-            self._reload_order_list()
+            self._reload_order_list(settings, registry)
             post_cfg = settings.get("post_actions") or {}
             idx = self.post_combo.findData(str(post_cfg.get("after_all", "none")))
             self.post_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -837,9 +874,9 @@ class SettingsPage(QWidget):
             self._refresh_idle_hint()
             self._refresh_autostart_hint()
             self._refresh_completion_label()
-            self._load_appearance()
-            self._build_hidden_checks()
-            self._build_base_combo()
+            self._load_appearance(settings)
+            self._build_hidden_checks(settings, registry)
+            self._build_base_combo(registry)
         finally:
             self._loading = False
 
@@ -863,13 +900,12 @@ class SettingsPage(QWidget):
         padding = 8
         self.order_list.setFixedHeight(count * row + frame + padding)
 
-    def _reload_order_list(self):
+    def _reload_order_list(self, settings=None, registry=None):
         # 只在注册表由外面注入时不动它（测试/预览构造用假注册表），
         # 正常运行时重读一次，让运行中新增的项目也能出现在列表里。
-        if not self._registry_injected:
-            self._registry = config.registry()
+        self._effective_registry(registry)
         self.order_list.clear()
-        for key in self._ordered_project_keys():
+        for key in self._ordered_project_keys(settings):
             spec = (self._registry.get("projects", {}) or {}).get(key) or {}
             item = QListWidgetItem(str(spec.get("display_name", key)).split("（")[0])
             item.setData(Qt.UserRole, key)
