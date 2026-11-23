@@ -110,27 +110,10 @@ STATUS_DETAIL_FALLBACK = {
     "hang": "无响应",
 }
 
-PROJECT_COLORS = {
-    "March7thAssistant": "#4fc3f7",
-    "BAAH": "#81c784",
-    "MaaEnd": "#ffb74d",
-    "ZenlessZoneZero-OneDragon": "#b388ff",
-    "BetterGI": "#ffd54f",
-    "core": "#ce93d8",
-    "emulator": "#4db6ac",
-    "update": "#90a4ae",
-}
-
-DEFAULT_PALETTE = [
-    "#4fc3f7",
-    "#81c784",
-    "#ffb74d",
-    "#ce93d8",
-    "#4db6ac",
-    "#f06292",
-    "#aed581",
-    "#7986cb",
-]
+# 项目身份色（兼容旧引用；真正取色请用 _theme_project_colors() / _project_color()，
+# 它们会跟着当前主题走）。
+PROJECT_COLORS = themes.PROJECT_PALETTE[themes.DEFAULT_THEME]
+DEFAULT_PALETTE = themes.PROJECT_FALLBACK_PALETTE[themes.DEFAULT_THEME]
 
 LEVEL_COLORS = {
     "error": themes.status_color(themes.DEFAULT_THEME, "log_error"),
@@ -168,6 +151,39 @@ def _theme_chain_colors(theme=None):
 def _theme_level_colors(theme=None):
     name = themes.normalize_theme(theme or current_theme())
     return {level: themes.log_color(name, level) for level in ("error", "warn")}
+
+
+def _theme_project_colors(custom=None, theme=None):
+    """当前主题下的项目身份色表（卡片顶部色条 + 日志前缀）。
+
+    历史缺陷：PROJECT_COLORS 是一份写死的亮色板，浅色主题的白卡/白底日志区上
+    对比度只有 1.4–3.5（BetterGI #ffd54f 1.41、MaaEnd #ffb74d 1.73），色条还在
+    但前缀文字基本糊进背景。改成按主题取表。
+
+    注意 gui.project_colors 里出厂就写着那 8 个深色默认色，不能当成「用户自定义」
+    直接盖掉主题色板（否则浅色主题永远是亮色）。只有和出厂默认值不同的项才算
+    用户真改过，才覆盖。
+    """
+    name = themes.normalize_theme(theme or current_theme())
+    colors = dict(themes.PROJECT_PALETTE.get(name, themes.PROJECT_PALETTE[themes.DEFAULT_THEME]))
+    for key, value in (custom or {}).items():
+        key, value = str(key), str(value)
+        if themes.is_default_project_color(key, value):
+            continue
+        colors[key] = value
+    return colors
+
+
+def _project_color_for(key, theme=None, custom=None):
+    """取单个项目的身份色；没登记过也没自定义时按名字哈希落到本主题备用板。"""
+    name = themes.normalize_theme(theme or current_theme())
+    override = (custom or {}).get(str(key))
+    if override and not themes.is_default_project_color(key, override):
+        return str(override)
+    color = themes.project_color(name, key)
+    if color is not None:
+        return color
+    return themes.project_fallback_color(name, key)
 
 
 # 首选窗口尺寸。1360x900 在 1920x1080 / 125% 缩放（可用 1536x824）、
@@ -550,8 +566,8 @@ class MainWindow(QMainWindow):
         self.start_in_tray = "--tray" in sys.argv
         self.no_widget = "--no-widget" in sys.argv
         custom_colors = (self.settings.get("gui") or {}).get("project_colors") or {}
-        self.project_colors = dict(PROJECT_COLORS)
-        self.project_colors.update({str(k): str(v) for k, v in custom_colors.items()})
+        # 按开窗时读到的主题取色板（main() 已经在建窗口前 apply_theme 过）
+        self.project_colors = _theme_project_colors(custom_colors, self._active_theme())
         self.setWindowTitle("Auto-AFK 一键挂机")
         # 默认尺寸按屏幕可用区域收敛：写死 1360x900 在 1366x768 的笔记本上
         # 会矮出屏幕 132px（窗口底边压到任务栏以下，底部按钮点不到），
@@ -1406,9 +1422,8 @@ class MainWindow(QMainWindow):
         全是开窗时那份旧配色，看起来像没保存。
         """
         custom = (self.settings.get("gui") or {}).get("project_colors") or {}
-        colors = dict(PROJECT_COLORS)
-        colors.update({str(k): str(v) for k, v in custom.items()})
-        self.project_colors = colors
+        # 按当前主题重取整张表：换肤后也要能拿到新主题那套身份色
+        self.project_colors = _theme_project_colors(custom, self._active_theme())
         for key, card in (getattr(self, "cards", {}) or {}).items():
             color = self._project_color(key)
             if card.color != color:
@@ -1456,6 +1471,16 @@ class MainWindow(QMainWindow):
         gui_cfg = self.settings.get("gui") or {}
         return themes.normalize_theme(gui_cfg.get("theme"))
 
+    def _active_theme(self):
+        """界面上正在生效的主题。
+
+        不能只看 settings.yaml：`_apply_theme(name)` 是「切到 name」的动作，
+        而 settings 里的 gui.theme 由调用方先写盘（设置页会）。两者短暂不一致
+        时（程序内直接 _apply_theme、或外部配置文件还没落盘）必须相信真正画到
+        屏幕上的那一套，否则卡片色条与日志前缀会拿到上一套主题的颜色。
+        """
+        return getattr(self, "_current_theme", None) or self._theme_name()
+
     def _apply_theme(self, name, persist=True):
         """换肤：重刷 QSS、重取按钮配色、重设背景底板与连线颜色。
 
@@ -1465,6 +1490,9 @@ class MainWindow(QMainWindow):
         避免每次改设置都把卡片连同运行状态一起重来。
         """
         name = themes.normalize_theme(name)
+        # 记下「屏幕上真正生效的那套主题」：取色一律走 _active_theme()，
+        # 避免设置还没落盘时卡片色条/日志前缀拿到上一套颜色。
+        self._current_theme = name
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, name)
@@ -1487,11 +1515,19 @@ class MainWindow(QMainWindow):
             links.set_color(links_color())
         # 标题栏/任务栏图标是位图，换肤后要重画一张，否则浅色主题下还是一块深底
         self.setWindowIcon(make_icon(name))
+        # 项目身份色也是两套：换肤后必须重算，否则卡片色条与日志前缀还是旧主题
+        # 那套（浅色底上 #ffb74d 这类亮色对比度只有 1.7，前缀几乎看不见）。
+        custom_colors = (self.settings.get("gui") or {}).get("project_colors") or {}
+        self.project_colors = _theme_project_colors(custom_colors, name)
         changed = getattr(self, "_applied_theme", None) != name
         self._applied_theme = name
         if changed:
             # 卡片里的按钮是 AnimatedButton（自绘），换肤后重建才能拿到新配色。
             self._rebuild_cards()
+            # 「项目状态」页有自己的色条与文字色，同样按主题取色，需要就地重建。
+            projects_page = getattr(self, "projects_page", None)
+            if projects_page is not None:
+                projects_page.reload()
         else:
             self._sync_parallel_state()
 
@@ -2025,13 +2061,14 @@ class MainWindow(QMainWindow):
         self.event_buffer.clear()
 
     def _project_color(self, project):
-        colors = getattr(self, "project_colors", PROJECT_COLORS)
-        if project in colors:
-            return colors[project]
-        if project in PROJECT_COLORS:
-            return PROJECT_COLORS[project]
-        index = sum(ord(ch) for ch in str(project)) % len(DEFAULT_PALETTE)
-        return DEFAULT_PALETTE[index]
+        colors = getattr(self, "project_colors", None) or {}
+        key = str(project)
+        if key in colors:
+            return colors[key]
+        custom = (self.settings.get("gui") or {}).get("project_colors") or {}
+        # 注册表里没有这个项目（临时项、或刚在设置页加完还没刷新）：
+        # 按名字哈希落到当前主题的备用色板，别回退到深色那份亮色板。
+        return _project_color_for(key, self._active_theme(), custom)
 
     def _log_at_bottom(self, slack=4):
         """日志区当前是不是停在最底部（用户在追最新几行）。"""

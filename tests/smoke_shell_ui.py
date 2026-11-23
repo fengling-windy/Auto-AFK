@@ -1221,6 +1221,43 @@ def test_main_window(app):
         pump(app, 300)
         check("还原配色后卡片颜色回到原来", window.cards[color_key].color == color_before)
 
+        # 项目身份色必须跟着主题走。
+        # 历史缺陷：PROJECT_COLORS 是写死的亮色板，换到浅色主题后卡片色条与日志
+        # 前缀还是 #4fc3f7 / #ffd54f 这类亮色，白底上对比度只有 1.4–3.4。
+        # 另外 settings.yaml 出厂就写着这 8 个默认色，不能当「用户自定义」盖掉主题板。
+        from gui import themes as _th
+
+        dark_color = window.cards[color_key].color
+        window._apply_theme("light")
+        pump(app, 200)
+        light_color = window.cards[color_key].color
+        check("浅色主题下卡片身份色换了（{0} → {1}）".format(dark_color, light_color),
+              light_color != dark_color)
+        check("浅色主题下卡片身份色与本主题色板一致",
+              light_color == _th.project_color("light", color_key))
+        check("浅色主题下日志前缀也换了",
+              window._project_color(color_key) == _th.project_color("light", color_key))
+        # 出厂默认色不该被当成「用户自定义」盖掉主题板（上面还原成 {} 后又测一遍
+        # 显式写回默认值的情形）
+        defaults = {k: _th.PROJECT_PALETTE[_th.DEFAULT_THEME][k]
+                    for k in ("March7thAssistant", "BAAH")}
+        window.settings.setdefault("gui", {})["project_colors"] = dict(defaults)
+        window._reload_project_colors()
+        pump(app, 200)
+        check("写回出厂默认色不会盖掉浅色主题的色板",
+              window.cards["March7thAssistant"].color == _th.project_color("light", "March7thAssistant"))
+        # 真改过的颜色仍然优先
+        window.settings["gui"]["project_colors"] = {color_key: "#ff00aa"}
+        window._reload_project_colors()
+        pump(app, 150)
+        check("用户改过的颜色优先于主题色板",
+              window.cards[color_key].color == "#ff00aa")
+        window.settings["gui"]["project_colors"] = {}
+        window._apply_theme("dark")
+        pump(app, 200)
+        check("切回深色主题后身份色跟着回来",
+              window.cards[color_key].color == _th.project_color("dark", color_key))
+
         # 注册表里去掉某个项目的 gui 段后，卡片上的「界面」按钮要收起来。
         # 历史缺陷：gui_btn 只在 ProjectCard 构造时决定一次可见性，之后改注册表
         # 存盘，按钮还在，点下去会去拉起一个已经没有界面入口的进程。

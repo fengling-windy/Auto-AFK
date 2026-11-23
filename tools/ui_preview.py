@@ -216,7 +216,7 @@ def build_overview():
     cards = []
     for key, spec in FAKE_PROJECTS.items():
         card = gui_main.ProjectCard(
-            key, spec, gui_main.PROJECT_COLORS.get(key, "#4fc3f7"),
+            key, spec, gui_main._project_color_for(key),
             _noop, _noop, _noop, on_gui=_noop, on_parallel=_noop, on_remove=_noop,
         )
         card.update_state(FAKE_RUNS.get(key))
@@ -278,7 +278,7 @@ def build_overview():
 def populate_log(log_view):
     for project, level, message in FAKE_LOG[:60]:
         ts = time.strftime("%H:%M:%S")
-        project_color = gui_main.PROJECT_COLORS.get(project, "#4fc3f7")
+        project_color = gui_main._project_color_for(project)
         level_colors = gui_main._theme_level_colors()
         if level == "error":
             message_color = level_colors["error"]
@@ -367,7 +367,7 @@ def build_shell():
 
     projects_page = ProjectStatusPage(
         registry_getter=lambda: FAKE_REGISTRY,
-        color_getter=lambda k: gui_main.PROJECT_COLORS.get(k, "#4fc3f7"),
+        color_getter=lambda k: gui_main._project_color_for(k),
         log_fn=_noop,
     )
     stack.addWidget(projects_page)

@@ -256,6 +256,47 @@ def main():
     check("未知状态回退 pending",
           th.status_color("light", "no-such-state") == th.status_color("light", "pending"))
 
+    # -- 11. 项目身份色也必须按主题给 -----------------------------------------
+    # 历史缺陷：PROJECT_COLORS 是一份写死的亮色板（#4fc3f7 / #ffd54f …）。浅色主题
+    # 的白卡和白色日志区上，这 5 个项目色的对比度只有 1.41–3.45，卡片色条还在但
+    # 日志前缀基本糊进背景。另外 settings.yaml 出厂就写着这 8 个默认色，若把它
+    # 当「用户自定义」直接覆盖主题色板，浅色主题永远拿不到深色版。
+    for name in ("dark", "light"):
+        card_bg = th.resolve(name)["card"]
+        log_bg = th.resolve(name)["input_bg_deep"]
+        for key in ("March7thAssistant", "BAAH", "MaaEnd",
+                    "ZenlessZoneZero-OneDragon", "BetterGI"):
+            color = th.project_color(name, key)
+            check("{0} 主题 {1} 的项目色存在".format(name, key), bool(color))
+            check("{0} 主题 {1} 的项目色在卡片上过 4.5:1（{2}）".format(
+                name, key, round(_contrast(color, card_bg), 2)),
+                _contrast(color, card_bg) >= 4.5)
+            check("{0} 主题 {1} 的项目色在日志区上过 4.5:1（{2}）".format(
+                name, key, round(_contrast(color, log_bg), 2)),
+                _contrast(color, log_bg) >= 4.5)
+        weak_fallback = [
+            i for i in range(8)
+            if _contrast(th.project_fallback_color(name, "proj{0}".format(i)), card_bg) < 4.5
+        ]
+        check("{0} 主题备用项目色板都过 4.5:1（弱项 {1}）".format(name, weak_fallback),
+              not weak_fallback)
+    check("深色项目色没被改动（March7thAssistant 仍是 #4fc3f7）",
+          th.project_color("dark", "March7thAssistant") == "#4fc3f7")
+    check("浅色项目色与深色不同（March7thAssistant）",
+          th.project_color("light", "March7thAssistant") != th.project_color("dark", "March7thAssistant"))
+    check("项目色表里没有的键返回 None",
+          th.project_color("light", "no-such-project") is None)
+    check("按名字哈希的备用色稳定（同一键两次相同）",
+          th.project_fallback_color("light", "Xyz") == th.project_fallback_color("light", "Xyz"))
+    check("出厂默认项目色被认成「未自定义」",
+          th.is_default_project_color("March7thAssistant", "#4fc3f7"))
+    check("大小写不同也算默认色",
+          th.is_default_project_color("March7thAssistant", "#4FC3F7"))
+    check("改过的颜色不算默认色",
+          not th.is_default_project_color("March7thAssistant", "#123456"))
+    check("表里没有的项目键不算默认色",
+          not th.is_default_project_color("no-such-project", "#4fc3f7"))
+
     print()
     if FAILURES:
         print("MODERN-UI {0} FAIL ({1})".format(len(FAILURES), ", ".join(FAILURES)))

@@ -157,6 +157,58 @@ CHAIN_STATES = {
     "stopped": "stopped",
 }
 
+# 项目身份色（卡片顶部色条 + 实时日志里该项目的前缀）。同样必须按主题给：
+# 深色那列是为 #0a0c11 的黑底挑的亮色，搬到浅色主题的白底日志区上对比度只剩
+# 1.4–3.5（BetterGI #ffd54f 1.41、MaaEnd #ffb74d 1.73），前缀基本糊成一片。
+# 浅色这一列是同色系里更深的一档，白底上全部 ≥4.5:1。
+PROJECT_PALETTE = {
+    "dark": {
+        "March7thAssistant": "#4fc3f7",
+        "BAAH": "#81c784",
+        "MaaEnd": "#ffb74d",
+        "ZenlessZoneZero-OneDragon": "#b388ff",
+        "BetterGI": "#ffd54f",
+        "core": "#ce93d8",
+        "emulator": "#4db6ac",
+        "update": "#90a4ae",
+    },
+    "light": {
+        "March7thAssistant": "#0369a1",
+        "BAAH": "#15803d",
+        "MaaEnd": "#b45309",
+        "ZenlessZoneZero-OneDragon": "#6d28d9",
+        "BetterGI": "#854d0e",
+        "core": "#86198f",
+        "emulator": "#0f766e",
+        "update": "#475569",
+    },
+}
+
+# 注册表里没登记过、也没在 gui.project_colors 里配色的项目，按名字哈希落到
+# 下面这一串里。同样两套：深色是亮色板，浅色是白底上看得见的深色板。
+PROJECT_FALLBACK_PALETTE = {
+    "dark": [
+        "#4fc3f7",
+        "#81c784",
+        "#ffb74d",
+        "#ce93d8",
+        "#4db6ac",
+        "#f06292",
+        "#aed581",
+        "#7986cb",
+    ],
+    "light": [
+        "#0369a1",
+        "#15803d",
+        "#b45309",
+        "#86198f",
+        "#0f766e",
+        "#be123c",
+        "#3f6212",
+        "#4338ca",
+    ],
+}
+
 
 def status_color(theme, state):
     """取某个主题下某状态的颜色；未知状态回退该主题的 pending。"""
@@ -178,6 +230,36 @@ def log_color(theme, level):
     """日志行的级别色（error / warn）。其它级别由调用方按项目色处理。"""
     return status_color(theme, "log_" + str(level))
 
+
+def project_color(theme, key):
+    """某个项目在指定主题下的身份色。
+
+    表里没有这个项目就返回 None，由调用方决定要不要按名字哈希落到
+    fallback 色板（见 project_fallback_color）。
+    """
+    table = PROJECT_PALETTE.get(normalize_theme(theme), PROJECT_PALETTE[DEFAULT_THEME])
+    return table.get(str(key))
+
+
+def project_fallback_color(theme, key):
+    """注册表里没登记的项目：按名字哈希从当前主题的备用色板里取一个。"""
+    table = PROJECT_FALLBACK_PALETTE.get(
+        normalize_theme(theme), PROJECT_FALLBACK_PALETTE[DEFAULT_THEME]
+    )
+    return table[sum(ord(ch) for ch in str(key)) % len(table)]
+
+
+def is_default_project_color(key, value):
+    """这个「用户自定义色」是不是其实就是深色主题的出厂默认值。
+
+    settings.yaml 的 gui.project_colors 里一直写着 8 个深色默认色（出厂就有），
+    如果把它当作用户自定义直接覆盖主题色板，浅色主题下就永远是那批亮色——
+    而用户在设置里根本没动过。等于默认值的项按「未自定义」处理，走主题色板。
+    """
+    default = PROJECT_PALETTE[DEFAULT_THEME].get(str(key))
+    if default is None:
+        return False
+    return str(default).strip().lower() == str(value).strip().lower()
 
 
 # 按钮配色。以前是 gui/modern.py 里的模块常量 _BUTTON_VARIANTS，只够深色用；
