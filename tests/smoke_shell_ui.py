@@ -1431,6 +1431,36 @@ def test_main_window(app):
         check("切回深色主题后身份色跟着回来",
               window.cards[color_key].color == _th.project_color("dark", color_key))
 
+        # 按钮底色必须跟着主题走。
+        # 历史缺陷（用户 2026-11-23 第 1 条「浅色时部分按键仍然为深色」）：
+        # AnimatedButton 的配色是构造时从 themes.button_variants() 抓的快照，
+        # 自绘时直接用。切主题只重建了项目卡，设置页 / 项目状态页 / 头部 /
+        # 日志工具栏里的按钮还拿着深色令牌——实测浅色下 63 个按钮里仍有 7 个
+        # #1a2130、1 个 #3d7dfa、1 个 #251821。
+        from gui.modern import AnimatedButton as _AnimBtn
+
+        def _button_bgs():
+            counts = {}
+            for button in window.findChildren(_AnimBtn):
+                bg = str((button._variant or {}).get("bg", ""))
+                counts[bg] = counts.get(bg, 0) + 1
+            return counts
+
+        dark_bg = _th.button_variants("dark")["default"]["bg"]
+        dark_primary = _th.button_variants("dark")["primary"]["bg"]
+        window._apply_theme("light")
+        pump(app, 300)
+        light_bgs = _button_bgs()
+        stale = {bg: n for bg, n in light_bgs.items() if bg in (dark_bg, dark_primary)}
+        check("浅色主题下没有按钮还拿着深色令牌（{0}）".format(stale), not stale)
+        check("浅色主题下默认按钮用浅色底色",
+              light_bgs.get(_th.button_variants("light")["default"]["bg"], 0) > 0)
+        window._apply_theme("dark")
+        pump(app, 300)
+        dark_bgs = _button_bgs()
+        check("切回深色后按钮底色回来",
+              dark_bgs.get(dark_bg, 0) > 0 and dark_bgs.get(dark_primary, 0) > 0)
+
         # 卡片上的拖动把手与关闭按钮是 QPixmap 位图，QSS 换不到它们身上。
         # 历史缺陷：颜色写死 #6b7688 / #7f8aa3，浅色白卡上淡到几乎看不见。
         # 卡片换肤时靠 _rebuild_cards() 重建，图标跟着主题重画。
@@ -1599,6 +1629,39 @@ def test_main_window(app):
         check("连线层高度也跟着卡片区（{0} vs {1}）".format(
             window.links.height(), window.cards_host.height()),
               window.links.height() == window.cards_host.height())
+
+        # 卡片不能因为「一行放得下两张」就被拉成横条。
+        # 历史缺陷：_do_layout 里 cell = (可用宽 - 间距) / per_row，per_row 由
+        # 最小宽度算出来，于是可用宽一富余卡片就吃满整行——838px 宽时一张卡
+        # 撑到 413px（sizeHint 只有 323），1600px 时四张各 391px，看着像长条
+        # 而不是卡片（用户 2026-11-23 第 4 条：卡片始终保持小型）。
+        sizes = [
+            (window.cards[k].width(), window.cards[k].sizeHint().width())
+            for k in window.visible_card_keys()
+        ]
+        too_wide = [(w, hint) for w, hint in sizes if w > hint * 1.15 + 24]
+        check("卡片宽度被限在 sizeHint 附近（{0}）".format(sizes), not too_wide)
+
+        # 并行连线必须从两张卡的中间接出来，而不是从卡片底部绕。
+        order_for_links = window.visible_card_keys()
+        if len(order_for_links) >= 2:
+            left = window.cards[order_for_links[0]]
+            right = window.cards[order_for_links[1]]
+            # 只有同一行才谈得上「右缘中点 → 左缘中点」，否则折行时是竖直接法。
+            if abs(left.geometry().center().y() - right.geometry().center().y()) <= 2:
+                path = window.links._link_path(left.geometry(), right.geometry())
+                start = path.pointAtPercent(0.0)
+                end = path.pointAtPercent(1.0)
+                check("连线从卡片右缘中点接出（{0} vs {1}）".format(
+                    (round(start.x()), round(start.y())),
+                    (left.geometry().right() + 1, left.geometry().center().y())),
+                      abs(start.x() - left.geometry().right()) <= 2
+                      and abs(start.y() - left.geometry().center().y()) <= 2)
+                check("连线接进下一张左缘中点（{0} vs {1}）".format(
+                    (round(end.x()), round(end.y())),
+                    (right.geometry().left() - 1, right.geometry().center().y())),
+                      abs(end.x() - right.geometry().left()) <= 2
+                      and abs(end.y() - right.geometry().center().y()) <= 2)
 
         # 拖动排序：卡片要「拿起来跟手」，邻居滑动让位，松手落回格子。
         # 历史缺陷（2026-11-23 用户报「没有拖动动画，且异常」）：
