@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import autostart, config, numval
+from afk_core import autostart, config, listval, numval
 from gui import themes
 from gui.modern import AnimatedButton, enable_smooth_scroll
 
@@ -476,9 +476,14 @@ class SettingsPage(QWidget):
         if settings is None:
             settings = config.settings()
         keys = []
-        for key in ((settings.get("gui") or {}).get("hidden_projects") or []):
-            if str(key) in projects:
-                keys.append(str(key))
+        # gui.hidden_projects 写成 "BAAH" 时旧代码迭代出 ['B','A','A','H']，
+        # 「已隐藏的项目」永远空着，用户看不到自己收起过什么。
+        for key in listval.as_str_list(
+            (settings.get("gui") or {}).get("hidden_projects"),
+            what="gui.hidden_projects",
+        ):
+            if key in projects:
+                keys.append(key)
         return keys
 
     def _build_hidden_checks(self, settings=None, registry=None):
@@ -620,10 +625,10 @@ class SettingsPage(QWidget):
         """
         if settings is None:
             settings = config.settings()
-        silent_set = {
-            str(k)
-            for k in ((settings.get("gui") or {}).get("silent_open_projects") or [])
-        }
+        silent_set = set(listval.as_str_list(
+            (settings.get("gui") or {}).get("silent_open_projects"),
+            what="gui.silent_open_projects",
+        ))
         # 注册表同样要重读（除非构造时被注入假注册表，那是测试/预览的用法）。
         # 取一次存下来传给 _projects_with_gui，否则它内部再取一次，一次重建要
         # 读两遍 yaml。
@@ -647,7 +652,9 @@ class SettingsPage(QWidget):
     def _ordered_project_keys(self, settings=None):
         if settings is None:
             settings = config.settings()
-        order = [str(k) for k in ((settings.get("chain") or {}).get("order") or [])]
+        order = listval.as_str_list(
+            (settings.get("chain") or {}).get("order"), what="chain.order"
+        )
         keys = [k for k in order if k in (self._registry.get("projects", {}) or {})]
         for key in (self._registry.get("projects", {}) or {}):
             if key not in keys:
@@ -701,7 +708,12 @@ class SettingsPage(QWidget):
 
         def mutate(settings):
             gui_cfg = settings.setdefault("gui", {})
-            current = [str(k) for k in (gui_cfg.get("silent_open_projects") or [])]
+            if not isinstance(gui_cfg, dict):
+                gui_cfg = {}
+                settings["gui"] = gui_cfg
+            current = listval.as_str_list(
+                gui_cfg.get("silent_open_projects"), what="gui.silent_open_projects"
+            )
             if checked and key not in current:
                 current.append(key)
             elif not checked and key in current:

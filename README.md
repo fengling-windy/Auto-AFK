@@ -340,6 +340,14 @@ pre_run:
 > 直接构造失败、整个界面起不来，`supervisor._supervise` 里的坏值则会让后台监控线程
 > 静默退出、那次运行永远停在「运行中」。
 
+> 列表项（`chain.order`、`gui.hidden_projects`、`gui.silent_open_projects`、
+> `chain.parallel_blocks`、`schedule.days` …）同理，统一走 `afk_core/listval.py`。
+> 这类坏值大多**不抛异常**，只是行为悄悄不对：`chain.order: 3` 会让设置页与主窗口
+> 直接起不来，`chain.order: "BAAH,M7A"` 会被逐字符拆成 `['B','A','A','H',...]`
+> 导致顺序全乱，`schedule.days: "mon"` 变成 `['m','o','n']` 于是定时启动永不触发，
+> `gui.hidden_projects: "BAAH"` 等于什么都没隐藏。现在这些情况都会告警一次并按默认
+> 值处理；写单个项目键时按「只有一个元素」理解（不会替你按逗号切分）。
+
 ## 日志维护
 
 启动 GUI **或**执行会真正产生新日志的 CLI 命令（`run` / `start` / `update`）时会自动执行一次清理

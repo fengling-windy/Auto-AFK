@@ -57,6 +57,7 @@ SUITE = [
     ("smoke_config_save", "core", "保存配置（并发/被占用时不丢设置）"),
     ("smoke_config_cache", "core", "配置读盘缓存（命中深拷贝、改文件失效）"),
     ("smoke_numval", "core", "配置里的数值写成坏字符串时告警回退而不是抛"),
+    ("smoke_listval", "core", "配置里的列表写成标量时告警回退而不是字符拆开"),
     ("smoke_chain", "core", "并行组 + 独占组编排"),
     ("smoke_parallel_merge", "core", "总览点出的并行块如何变成一步（含三张以上）"),
     ("smoke_sequential", "core", "组内串行顺序"),

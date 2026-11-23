@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+from .listval import as_str_list
+
 log = logging.getLogger("afk.scheduler")
 
 
@@ -73,7 +75,13 @@ class Scheduler:
             return
         hour, minute = parsed
         now = time.localtime()
-        days = [str(d).lower() for d in (cfg.get("days") or ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])]
+        # schedule.days 写成 "mon" 时旧代码迭代出 ['m','o','n']，与 weekday
+        # 永远不相等，定时启动静默永不触发（一条日志都没有）。
+        days = as_str_list(
+            cfg.get("days"), what="schedule.days",
+            default=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        )
+        days = [day.lower() for day in days]
         weekday = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.tm_wday]
         if weekday not in days:
             return

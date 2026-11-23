@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import config, doctor, idle, numval, report
+from afk_core import config, doctor, idle, listval, numval, report
 from afk_core.events import EventBus
 from afk_core.idle import IdleWatcher
 from afk_core.repair import RepairEngine
@@ -628,9 +628,12 @@ class MainWindow(QMainWindow):
         # 总览页里被「移除」掉的项目（只是不显示，注册表里仍在）。
         # 单独存一份到 settings 的 gui.hidden_projects，设置页能把它们放回来——
         # 直接删注册表里的项目太重了，用户常常只是想暂时收起两个。
-        self._hidden_projects = [
-            str(k) for k in ((self.settings.get("gui") or {}).get("hidden_projects") or [])
-        ]
+        # 写成 "BAAH"（标量）时旧代码会迭代出 ['B','A','A','H']，等于什么都没隐藏，
+        # 且一个字都不报——见 afk_core/listval.py。
+        self._hidden_projects = listval.as_str_list(
+            (self.settings.get("gui") or {}).get("hidden_projects"),
+            what="gui.hidden_projects",
+        )
         # 并行组：与 chain.parallel_blocks 同步，卡片之间的连线按它画
         self._parallel_blocks = self._read_parallel_blocks()
         # 点了「并行」但还没配成对的那张卡
@@ -738,8 +741,12 @@ class MainWindow(QMainWindow):
         # afk_projects.yaml（走 C 加速后仍要 1.2ms），勾了 5 个项目就是
         # 十几次无谓读盘，开窗时多花十几毫秒。
         registry_projects = config.registry().get("projects") or {}
+        # 同上：写成 "BAAH" 会被逐字符迭代，勾选框一个都匹配不上，用户以为设置丢了。
         silent_keys = [
-            str(k) for k in ((self.settings.get("gui") or {}).get("silent_open_projects") or [])
+            k for k in listval.as_str_list(
+                (self.settings.get("gui") or {}).get("silent_open_projects"),
+                what="gui.silent_open_projects",
+            )
             if k in registry_projects and registry_projects.get(k, {}).get("gui")
         ]
         if silent_keys:
@@ -1116,7 +1123,9 @@ class MainWindow(QMainWindow):
         一致，否则用户拖完卡片看到的顺序和真正跑的顺序是两套。
         """
         projects = self._registry_projects()
-        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        order = listval.as_str_list(
+            (self.settings.get("chain") or {}).get("order"), what="chain.order"
+        )
         rank = {k: i for i, k in enumerate(order)}
         keys = sorted(projects.keys(), key=lambda k: rank.get(k, len(rank)))
         return [(k, projects[k]) for k in keys]
@@ -1214,13 +1223,15 @@ class MainWindow(QMainWindow):
 
     # -- 并行分组 -------------------------------------------------------------
     def _read_parallel_blocks(self):
-        blocks = (self.settings.get("chain") or {}).get("parallel_blocks") or []
-        out = []
-        for block in blocks if isinstance(blocks, list) else []:
-            keys = [str(k) for k in (block or []) if isinstance(k, (str, int))]
-            if len(keys) >= 2:
-                out.append(keys)
-        return out
+        """从 chain.parallel_blocks 读出并行组。
+
+        写成 ``["A","B"]``（少一层列表）或 ``"A"`` 时旧代码整块丢掉、一个字不报，
+        用户点了「并行」保存后重开程序发现连线没了——见 afk_core/listval.py。
+        """
+        return listval.as_str_groups(
+            (self.settings.get("chain") or {}).get("parallel_blocks"),
+            what="chain.parallel_blocks",
+        )
 
     def _write_parallel_blocks(self, log_text=None):
         blocks = [list(b) for b in self._parallel_blocks if len(b) >= 2]
@@ -1263,7 +1274,9 @@ class MainWindow(QMainWindow):
         if first in visible and second in visible:
             i, j = visible.index(first), visible.index(second)
             return abs(i - j) == 1
-        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        order = listval.as_str_list(
+            (self.settings.get("chain") or {}).get("order"), what="chain.order"
+        )
         if first in order and second in order:
             return abs(order.index(first) - order.index(second)) == 1
         return True
@@ -1834,13 +1847,15 @@ class MainWindow(QMainWindow):
         返回被清掉的键（给调用方写日志）。
         """
         alive = set(projects)
-        order = [str(k) for k in (((self.settings.get("chain") or {}).get("order")) or [])]
+        order = listval.as_str_list(
+            (self.settings.get("chain") or {}).get("order"), what="chain.order"
+        )
         hidden = [str(k) for k in (self._hidden_projects or [])]
         blocks = [list(b) for b in (self._parallel_blocks or [])]
-        silent = [
-            str(k)
-            for k in (((self.settings.get("gui") or {}).get("silent_open_projects")) or [])
-        ]
+        silent = listval.as_str_list(
+            (self.settings.get("gui") or {}).get("silent_open_projects"),
+            what="gui.silent_open_projects",
+        )
         stale = sorted(
             (set(order) | set(hidden) | set(silent) | {k for b in blocks for k in b}) - alive
         )

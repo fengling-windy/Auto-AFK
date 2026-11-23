@@ -14,6 +14,7 @@ import psutil
 from . import config, configsync, monitor, notify, report
 from .ansi import strip_ansi
 from .numval import as_float, as_int
+from .listval import as_str_groups, as_str_list
 from .proc import host_env, popen as proc_popen, run as proc_run
 
 
@@ -1543,20 +1544,32 @@ class Supervisor:
                         logging.getLogger("afk.supervisor").warning("on_finish callback failed: %s", exc)
                 return
         chain_cfg = self.settings.get("chain") or {}
-        chain_order = [str(k) for k in (chain_cfg.get("order") or [])]
+        # chain.order 写成 3 时旧代码直接 TypeError（'int' object is not iterable），
+        # 整条链起不来；写成 "A,B" 则迭代出字符列表，一个项目都匹配不上。
+        raw_order = chain_cfg.get("order")
+        chain_order = as_str_list(raw_order, what="chain.order")
+        if raw_order is not None and not isinstance(raw_order, (list, tuple)):
+            self._emit(
+                "core",
+                "chain",
+                "chain.order 不是列表（读到 {0}：{1!r}），已按 {2} 处理".format(
+                    type(raw_order).__name__, raw_order, chain_order or "默认顺序"
+                ),
+                level="warn",
+            )
         # 总览里点「并行」把相邻卡片连起来后写在这里，形如 [["A","B"],["C","D"]]；
         # 每一块里的项目会合并成「同时启动、一起等完」的一步。
-        parallel_blocks = chain_cfg.get("parallel_blocks") or []
-        if not isinstance(parallel_blocks, list):
+        raw_blocks = chain_cfg.get("parallel_blocks")
+        parallel_blocks = as_str_groups(raw_blocks, what="chain.parallel_blocks")
+        if raw_blocks is not None and not isinstance(raw_blocks, list):
             self._emit(
                 "core",
                 "chain",
                 "chain.parallel_blocks 不是列表（读到 {0}），已忽略".format(
-                    type(parallel_blocks).__name__
+                    type(raw_blocks).__name__
                 ),
                 level="warn",
             )
-            parallel_blocks = []
 
         # A failing project no longer aborts the whole chain: it is skipped so the
         # remaining projects still run, and retried once every project has had its
