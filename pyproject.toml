@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-afk"
+version = "2.0.0"
+description = "多游戏自动化一键挂机编排器：统一调度、监控、自动修复、多配置任务流与 PySide6 桌面界面"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+authors = [
+    {name = "fengling-windy"},
+]
+keywords = ["automation", "pyside6", "windows", "scheduler", "game-assistant"]
+dependencies = [
+    "PySide6==6.11.1",
+    "psutil>=5.9",
+    "pyyaml>=6.0",
+    "mss>=9.0",
+    "onepush>=1.2",
+    "winotify>=1.1",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/fengling-windy/Auto-AFK"
+Repository = "https://github.com/fengling-windy/Auto-AFK"
+Issues = "https://github.com/fengling-windy/Auto-AFK/issues"
+
+[tool.setuptools.packages.find]
+include = ["afk_core*", "gui*"]

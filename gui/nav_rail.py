@@ -22,6 +22,7 @@ class NavItem(QPushButton):
     # 图标与文字的间距、图标尺寸；_apply_elide 里算可用文字宽度时要一并扣掉
     ICON_SIZE = 17
     ICON_GAP = 9
+    HOVER_MS = 150
 
     def __init__(self, key, label, parent=None):
         super().__init__("", parent)
@@ -30,9 +31,15 @@ class NavItem(QPushButton):
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(36)
         self._dot = None
         self._icon_name = ""
+        self._compact = False
+        self._hover = 0.0
+        self._anim_hover = QVariantAnimation(self)
+        self._anim_hover.setDuration(self.HOVER_MS)
+        self._anim_hover.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim_hover.valueChanged.connect(self._on_hover_value)
         # 默认图标色按当前主题取（写死 #8b97ad 时浅色主题的白侧栏上只有 2.95:1）
         self._icon_color = themes.icon_color(current_theme())
         # 文本自己裁：QPushButton 的 minimumSizeHint 等于整段文字宽度，注册表里
@@ -40,7 +47,40 @@ class NavItem(QPushButton):
         # 的最小宽度跟着爆到 1927px。这里把 minimumSizeHint 压到下限，显示时
         # 按当前宽度加省略号，完整文本留在 text()/tooltip 里。
         self._full_label = ""
+        self._text_drawn = ""
         self.setText(label)
+
+    def _on_hover_value(self, value):
+        self._hover = float(value)
+        self.update()
+
+    def enterEvent(self, ev):
+        if self.isEnabled():
+            self._anim_hover.stop()
+            self._anim_hover.setStartValue(self._hover)
+            self._anim_hover.setEndValue(1.0)
+            self._anim_hover.start()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._anim_hover.stop()
+        self._anim_hover.setStartValue(self._hover)
+        self._anim_hover.setEndValue(0.0)
+        self._anim_hover.start()
+        super().leaveEvent(ev)
+
+    def set_compact(self, compact):
+        """切换紧凑纯图标模式（窄屏/移动端宽度下收起文字，完整名称保留在 tooltip）。"""
+        compact = bool(compact)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        if compact:
+            self.setStyleSheet("padding: 8px 0px; text-align: center;")
+        else:
+            self.setStyleSheet("")
+        self._apply_elide()
+        self.update()
 
     def setText(self, text):
         self._full_label = str(text)
@@ -57,11 +97,13 @@ class NavItem(QPushButton):
     def set_icon(self, name, color=None):
         """设置导航图标（gui/icons.py 里的名字）；名字为空就只显示文字。"""
         self._icon_name = str(name or "")
-        self._icon_color = str(color or themes.icon_color(current_theme()))
+        new_color = str(color or themes.icon_color(current_theme()))
         if self._icon_name:
+            self._icon_color = new_color
             self.setIcon(icons.make(self._icon_name, self._icon_color, self.ICON_SIZE))
             self.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
         else:
+            self._icon_color = new_color
             self.setIcon(QIcon())
         self._apply_elide()
 
@@ -72,8 +114,12 @@ class NavItem(QPushButton):
         self.set_icon(self._icon_name, color)
 
     def _apply_elide(self):
-        # QSS 里 QPushButton#navItem 的左右内边距是 18px / 14px
-        width = self.width() - 18 - 14 - 8
+        if self._compact and self._icon_name:
+            self._text_drawn = ""
+            super().setText("")
+            return
+        # QSS 里 QPushButton#navItem 的左右内边距是 16px / 12px
+        width = self.width() - 16 - 12 - 8
         if self._icon_name:
             width -= self.ICON_SIZE + self.ICON_GAP
         if width <= 0 or not self._full_label:
@@ -90,14 +136,25 @@ class NavItem(QPushButton):
 
     def minimumSizeHint(self):
         hint = super().minimumSizeHint()
-        return QSize(64, hint.height())
+        return QSize(40 if self._compact else 64, hint.height())
 
     def set_dot(self, color):
         """右侧状态点（None 隐藏）。"""
-        self._dot = QColor(color) if color else None
-        self.update()
+        target = QColor(color) if color else None
+        if target != self._dot:
+            self._dot = target
+            self.update()
 
     def paintEvent(self, ev):
+        if not self.isChecked() and self._hover > 0.01:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            bg = QColor(themes.resolve(current_theme())["nav_checked_bg"])
+            bg.setAlpha(int(145 * self._hover))
+            painter.setBrush(bg)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0), 8.0, 8.0)
+            painter.end()
         super().paintEvent(ev)
         if self._dot is None or not self._dot.alpha():
             return
@@ -105,7 +162,9 @@ class NavItem(QPushButton):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._dot)
-        painter.drawEllipse(QPointF(self.width() - 20.0, self.height() / 2.0), 4.0, 4.0)
+        dot_x = self.width() - 10.0 if self._compact else self.width() - 20.0
+        dot_y = 10.0 if self._compact else self.height() / 2.0
+        painter.drawEllipse(QPointF(dot_x, dot_y), 3.6, 3.6)
 
 
 class _NavIndicator(QWidget):
@@ -137,15 +196,24 @@ class _NavIndicator(QWidget):
 
 
 class NavRail(QWidget):
-    """应用左侧导航。点击项发出 navigate(key)；set_active(key) 切换高亮。"""
+    """应用左侧导航。点击项发出 navigate(key)；set_active(key) 切换高亮。
+
+    支持响应式紧凑模式（set_compact）：桌面端保持 196px 完整导航栏，窄窗口/移动端
+    尺寸下自动收缩为 56px 纯图标侧栏，给右侧卡片与日志留出充足空间。
+    """
+
+    EXPANDED_WIDTH = 196
+    COMPACT_WIDTH = 56
 
     navigate = Signal(str)
 
     def __init__(self, title="Auto-AFK", parent=None):
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setFixedWidth(196)
+        self.setFixedWidth(self.EXPANDED_WIDTH)
         self._items = {}
+        self._sections = []
+        self._compact = False
         self._indicator_y = 0.0
         self._finished = False
         # 图标颜色（主题切换时由 set_icon_color 更新并重画所有导航项图标）
@@ -156,6 +224,7 @@ class NavRail(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 16, 12, 14)
         root.setSpacing(4)
+        self._root_layout = root
 
         brand = QHBoxLayout()
         brand.setSpacing(9)
@@ -167,6 +236,7 @@ class NavRail(QWidget):
         self._logo = logo
         brand_label = QLabel(title)
         brand_label.setObjectName("navBrand")
+        self._brand_label = brand_label
         brand.addWidget(logo)
         brand.addWidget(brand_label)
         brand.addStretch(1)
@@ -214,12 +284,16 @@ class NavRail(QWidget):
         if section:
             cap = QLabel(label)
             cap.setObjectName("navSection")
+            cap.setVisible(not self._compact)
+            self._sections.append(cap)
             layout.addSpacing(8)
             layout.addWidget(cap)
             return
         item = NavItem(key, label)
         if icon:
             item.set_icon(icon, self._icon_color)
+        if self._compact:
+            item.set_compact(True)
         self._items[key] = item
         self._group.addButton(item)
         if self._finished:
@@ -401,6 +475,30 @@ class NavRail(QWidget):
         if active is None:
             return
         self._move_indicator(float(active.y()))
+
+    def is_compact(self):
+        return self._compact
+
+    def set_compact(self, compact):
+        """响应式切换紧凑图标栏（窄窗口自动收缩，宽窗口自动展开）。"""
+        compact = bool(compact)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.setFixedWidth(self.COMPACT_WIDTH if compact else self.EXPANDED_WIDTH)
+        if compact:
+            self._root_layout.setContentsMargins(8, 14, 8, 12)
+        else:
+            self._root_layout.setContentsMargins(12, 16, 12, 14)
+        self._brand_label.setVisible(not compact)
+        for cap in self._sections:
+            cap.setVisible(not compact)
+        for item in self._items.values():
+            item.set_compact(compact)
+        active = self._group.checkedButton()
+        if active is not None:
+            self._indicator_y = float(active.y())
+            self._move_indicator(self._indicator_y)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

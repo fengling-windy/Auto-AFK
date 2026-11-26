@@ -1,29 +1,37 @@
-"""项目状态页：列出每个挂机项目的版本、来源仓库与关键运行参数。
+"""项目配置页：顶部项目标签导航 + 安装支持项目 + 单项目环境检测/重装/删除/界面入口/参数编辑。"""
 
-为什么要单独一页：总览的项目卡只放「状态 + 四个按钮」，空间不够再塞路径、
-版本、仓库地址这些只读信息；「项目注册表」那一页是原始 YAML 文本，看懂它
-需要先懂这套配置。这一页是给人看的汇总：这个项目从哪来、什么版本、按什么
-参数跑、配置文件在哪。
-"""
-
+import copy
 import subprocess
 import threading
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QPlainTextEdit,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from afk_core import config
+from afk_core import config, doctor, project_ops
 from gui import icons, themes
-from gui.modern import AnimatedButton, ElidedLabel, enable_smooth_scroll, current_theme
+from gui.modern import (
+    AnimatedButton,
+    ElidedLabel,
+    HoverGlowCard,
+    SubNavBar,
+    current_theme,
+    enable_smooth_scroll,
+)
 
 # 这些键不重复展示：display_name 已经在标题上、args 太长单独一行、
 # 其余的 patterns/env/gui 之类属于实现细节，注册表页里能看到全文。
@@ -58,8 +66,6 @@ KEY_LABELS = {
     "repo": "仓库",
     "version": "版本",
     "description": "说明",
-    # 下面这些原来没有标签，界面上直接露 English 键名，和周围的中文混在一起
-    # 很扎眼（例如 stop_on_error_delay_sec、window_keywords 一竖排）。
     "extra_pythonpath": "额外 PYTHONPATH",
     "finish_patterns": "完成标记",
     "warn_patterns": "告警标记",
@@ -78,13 +84,7 @@ KEY_LABELS = {
 
 
 def read_version(project_dir):
-    """读子项目的 git 版本号（describe 优先，退化到短 hash）。
-
-    子项目目录在 .gitignore 里，可能是 git clone 也可能只是一个解压出来的
-    发行包——没有 .git 时返回空串，界面上显示「未知」，不报错。
-    """
-    from pathlib import Path
-
+    """读子项目的 git 版本号（describe 优先，退化到短 hash）。"""
     path = Path(project_dir)
     if not path.is_dir():
         return ""
@@ -111,15 +111,35 @@ def read_version(project_dir):
     return ""
 
 
+def _dot_icon(color, size=10):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawEllipse(1, 1, size - 2, size - 2)
+    painter.end()
+    return QIcon(pix)
+
+
+def _repo_url(repo):
+    text = str(repo or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http"):
+        return text
+    return "https://github.com/" + text.strip("/")
+
+
 class _ProjectBlock(QFrame):
-    """一个项目的汇总块。"""
+    """一个项目的汇总块（兼容保留）。"""
 
     def __init__(self, key, spec, color, parent=None):
         super().__init__(parent)
         self.key = key
         self.spec = spec or {}
         self.setObjectName("card")
-        # 每行左侧的「参数名」标签，整块建完后由 align_caps 统一宽度
         self._caps = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
@@ -138,9 +158,6 @@ class _ProjectBlock(QFrame):
         head.addWidget(title, 1)
         self.state_label = QLabel("")
         self.state_label.setObjectName("hintLabel")
-        # 「已启用」实测 36px，而 hintLabel 的 QSS 把左右内边距也算进去，
-        # 布局给它的宽度只有 33px，末尾那个字会被裁掉一像素——看起来像
-        # 「已启川」。给个下限，让它按文本宽度排。
         self.state_label.setMinimumWidth(48)
         head.addWidget(self.state_label)
         self.repo_btn = AnimatedButton("打开仓库", variant="mini")
@@ -166,10 +183,6 @@ class _ProjectBlock(QFrame):
                 continue
             label = KEY_LABELS.get(key_name, key_name)
             self._add_row(label, self._format(value, key_name))
-        # 注册表里没写 version 键时也要留一行：真实版本是后台去子项目目录里跑
-        # git describe 读出来的，读完要有地方显示。历史缺陷：只在 spec 里有
-        # version 键时才建这一行，于是「新增挂机项目」建出来（不填 version）
-        # 的项目，后台扫到了版本也没有标签可写，界面上永远看不到版本号。
         if not hasattr(self, "_version_label"):
             self._add_row(KEY_LABELS["version"], "未知")
 
@@ -178,9 +191,6 @@ class _ProjectBlock(QFrame):
         if isinstance(value, bool):
             return "是" if value else "否"
         if isinstance(value, (list, tuple)):
-            # 列表里装的是更新步骤（update_hooks）这类字典时，直接 str() 出来
-            # 是 2768px 的一坨 Python 字面量，界面上被省略成半行省略号，等于
-            # 什么也没显示；只取每个步骤的 label 就能一眼看清这项目要做什么。
             labels = [
                 str(item.get("label") or item.get("type") or "")
                 for item in value
@@ -196,11 +206,6 @@ class _ProjectBlock(QFrame):
     def _add_row(self, label, value):
         cap = QLabel(label)
         cap.setObjectName("hintLabel")
-        # 列宽不写死：历史实现是 setFixedWidth(88)，而「卡死超时(秒)」「要求
-        # 完成标记」「最短运行(秒)」实测 68–72px、再算上 QSS 字号就贴边，
-        # 换台机器（字体/缩放的 DPI 不同）直接截成「卡死超时(秒」。改为记下
-        # 每个标签，整页建完后按最长的一个统一 setFixedWidth（见 align_caps），
-        # 既不会截字，各张卡的列也仍然对齐。
         cap.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         text = ElidedLabel(str(value), min_width=60, max_hint_width=760)
         text.setObjectName("cardDetail")
@@ -216,8 +221,6 @@ class _ProjectBlock(QFrame):
         if not hasattr(self, "_version_label"):
             return
         if not text:
-            # 子项目目录不是 git clone（发行包、手工解压）时扫不出东西，这时
-            # 别把注册表里手写的 version 抹成「未知」——那是用户填的唯一线索。
             if self._version_label.text() not in ("", "未知"):
                 return
             text = "未知"
@@ -225,7 +228,6 @@ class _ProjectBlock(QFrame):
         self._version_label.setToolTip(text)
 
     def align_caps(self, width):
-        """把本块所有「参数名」标签设成同一宽度，让各张卡的列对齐。"""
         width = int(width)
         if width <= 0:
             return
@@ -233,7 +235,6 @@ class _ProjectBlock(QFrame):
             cap.setFixedWidth(width)
 
     def cap_width_hint(self):
-        """本块标签需要的最小宽度（按当前字体实测最长的一个）。"""
         if not self._caps:
             return 0
         font = self._caps[0].font()
@@ -244,153 +245,729 @@ class _ProjectBlock(QFrame):
         self.state_label.setText("已启用" if enabled else "已禁用")
 
     def _open_repo(self):
-        repo = str(self.spec.get("repo") or "").strip()
-        if not repo:
-            return
-        url = repo if repo.startswith("http") else "https://github.com/" + repo.strip("/")
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
-
-        QDesktopServices.openUrl(QUrl(url))
+        url = _repo_url(self.spec.get("repo"))
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
 
-class ProjectStatusPage(QWidget):
-    """项目状态页（版本 / 来源 / 关键参数）。"""
+class ProjectConfigPage(QWidget):
+    """项目配置页：顶部项目标签栏 + 安装支持项目 + 详情操作与参数编辑。"""
 
-    # 后台线程读完版本后把 (key, version) 丢回 GUI 线程
     version_ready = Signal(str, str)
+    projects_changed = Signal()
+    open_gui_requested = Signal(str)
+    open_path_requested = Signal(object)
+    _op_line = Signal(str)
+    _op_done = Signal(str, bool, str)
+    _doctor_ready = Signal(str, list)
 
-    def __init__(self, registry_getter=None, color_getter=None, log_fn=None, parent=None):
+    def __init__(self, registry_getter=None, color_getter=None, log_fn=None, bus=None, parent=None):
         super().__init__(parent)
         self._registry_getter = registry_getter or config.registry
-        # 兜底色也要按主题给：原先写死 #4fc3f7（浅色那套里的天蓝），只在不传
-        # color_getter 时用到（预览工具、单独构造这一页），但硬编码一个深色
-        # 色板里的值，浅色主题下白卡上对比度只有 2.0。
         self._color_getter = color_getter or (
             lambda key: themes.project_fallback_color(current_theme(), key)
         )
         self._log = log_fn or (lambda *a, **k: None)
-        self._blocks = {}
-        self._version_thread = None
-        # 待扫队列：reload 时把目标追加进来，已经在跑的线程自己会继续消费，
-        # 所以新增/改路径的项目也能拿到版本号（见 _start_version_scan）。
+        self._bus = bus
+
+        self._version_cache = {}
         self._scan_pending = []
         self._scan_lock = threading.Lock()
-        # 正在扫的路径：reload 时若某个项目还没扫完、缓存也还没写，不加这一步
-        # 判断就会把它再排一次队，同一个路径白跑两遍 git。
         self._scan_inflight = set()
-        # 路径 -> 版本号。切页会反复 reload，而 git 版本在两次切页之间不会变；
-        # 不缓存的话每切一次页就要重跑一遍 `git describe`（每个项目几十毫秒）。
-        self._version_cache = {}
+        self._version_thread = None
+
+        self._current_key = ""
+        self._op_busy = False
+        self._loading_form = False
+        self._rendered_snapshot = None
+
         self.version_ready.connect(self._apply_version)
+        self._op_line.connect(self._append_op_line)
+        self._op_done.connect(self._on_op_done)
+        self._doctor_ready.connect(self._render_project_doctor)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setContentsMargins(14, 12, 14, 10)
         outer.setSpacing(10)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        title = QLabel("项目状态")
-        title.setObjectName("sectionTitleCard")
-        head.addWidget(title)
-        head.addStretch(1)
-        self.refresh_btn = AnimatedButton("刷新", variant="mini")
-        # 「刷新」是用户主动要最新版本，必须绕过缓存重扫；切页面走 reload() 默认。
-        self.refresh_btn.clicked.connect(lambda *_: self.reload(force_versions=True))
-        head.addWidget(self.refresh_btn)
-        outer.addLayout(head)
+        # -- 顶部导航栏 + 右侧安装控制区 --------------------------------------
+        self.sub_nav = SubNavBar()
+        self.sub_nav.current_changed.connect(self.select_project)
 
-        self.hint = QLabel(
-            "显示每个项目从哪来、当前版本、按什么参数运行。"
-            "版本号取自子项目目录的 git 信息，没有 git 目录时显示「未知」。"
-        )
-        self.hint.setObjectName("hintLabel")
-        self.hint.setWordWrap(True)
-        outer.addWidget(self.hint)
+        self.install_combo = QComboBox()
+        self.install_combo.setMinimumWidth(190)
+        self.install_combo.setToolTip("选择要安装的受支持项目")
+        self.install_combo.currentIndexChanged.connect(lambda *_: self._sync_install_button())
 
+        self.install_btn = AnimatedButton("安装项目", variant="primary")
+        self.install_btn.setObjectName("primary")
+        self.install_btn.clicked.connect(self._on_install_clicked)
+
+        self.sub_nav.add_trailing(self.install_combo)
+        self.sub_nav.add_trailing(self.install_btn)
+        outer.addWidget(self.sub_nav)
+
+        # -- 详情滚动区 -------------------------------------------------------
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         enable_smooth_scroll(scroll)
         inner = QWidget()
         inner.setObjectName("central")
-        self._list_layout = QVBoxLayout(inner)
-        self._list_layout.setContentsMargins(2, 2, 8, 8)
-        self._list_layout.setSpacing(10)
-        self._list_layout.addStretch(1)
+        body = QVBoxLayout(inner)
+        body.setContentsMargins(2, 2, 6, 8)
+        body.setSpacing(12)
+
+        self._empty_label = QLabel("当前没有已注册项目，可在右上角下拉框选择并安装支持的项目。")
+        self._empty_label.setObjectName("pagePlaceholder")
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        body.addWidget(self._empty_label)
+
+        # Card 1: 概览 & 操作按钮
+        self.hero_card = HoverGlowCard()
+        self.hero_card.setObjectName("card")
+        hero_layout = QVBoxLayout(self.hero_card)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(10)
+
+        hero_top = QHBoxLayout()
+        hero_top.setSpacing(10)
+        self.accent_bar = QFrame()
+        self.accent_bar.setFixedSize(4, 22)
+        self.title_label = ElidedLabel("", min_width=80, max_hint_width=460)
+        self.title_label.setObjectName("sectionTitleCard")
+        self.key_pill = QLabel("")
+        self.key_pill.setObjectName("configPill")
+        self.status_badge = QLabel("")
+        self.status_badge.setObjectName("configPill")
+        self.version_pill = QLabel("版本：未知")
+        self.version_pill.setObjectName("configPill")
+        self.refresh_ver_btn = AnimatedButton("刷新版本", variant="mini")
+        self.refresh_ver_btn.clicked.connect(lambda *_: self.reload(force_versions=True))
+        self.repo_btn = AnimatedButton("GitHub", variant="mini")
+        self.repo_btn.clicked.connect(self._open_repo)
+        hero_top.addWidget(self.accent_bar)
+        hero_top.addWidget(self.title_label, 1)
+        hero_top.addWidget(self.key_pill)
+        hero_top.addWidget(self.status_badge)
+        hero_top.addWidget(self.version_pill)
+        hero_top.addWidget(self.refresh_ver_btn)
+        hero_top.addWidget(self.repo_btn)
+        hero_layout.addLayout(hero_top)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.gui_btn = AnimatedButton("打开此项目界面", variant="primary")
+        self.gui_btn.setObjectName("primary")
+        self.gui_btn.clicked.connect(lambda: self.open_gui_requested.emit(self._current_key) if self._current_key else None)
+        self.doctor_btn = AnimatedButton("环境检测")
+        self.doctor_btn.clicked.connect(self._on_doctor_clicked)
+        self.update_btn = AnimatedButton("更新项目")
+        self.update_btn.clicked.connect(self._on_update_clicked)
+        self.reinstall_btn = AnimatedButton("重装项目")
+        self.reinstall_btn.clicked.connect(self._on_reinstall_clicked)
+        self.delete_btn = AnimatedButton("删除项目", variant="danger")
+        self.delete_btn.setObjectName("danger")
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+        for btn in (self.gui_btn, self.doctor_btn, self.update_btn, self.reinstall_btn):
+            actions.addWidget(btn)
+        actions.addStretch(1)
+        actions.addWidget(self.delete_btn)
+        hero_layout.addLayout(actions)
+        body.addWidget(self.hero_card)
+
+        # Card 2: 参数信息与核心配置编辑
+        self.meta_card = HoverGlowCard()
+        self.meta_card.setObjectName("card")
+        meta_layout = QVBoxLayout(self.meta_card)
+        meta_layout.setContentsMargins(18, 14, 18, 14)
+        meta_layout.setSpacing(10)
+
+        meta_cap = QLabel("核心参数与配置")
+        meta_cap.setObjectName("sectionTitleCard")
+        meta_layout.addWidget(meta_cap)
+
+        self._meta_grid = QGridLayout()
+        self._meta_grid.setHorizontalSpacing(14)
+        self._meta_grid.setVerticalSpacing(6)
+        self._meta_grid.setColumnStretch(1, 1)
+        self._meta_values = {}
+        self._meta_caps = []
+        self._open_project_dir_btn = AnimatedButton("打开目录", variant="mini")
+        self._open_project_dir_btn.clicked.connect(lambda: self._emit_dir("project"))
+        self._open_config_dir_btn = AnimatedButton("打开配置", variant="mini")
+        self._open_config_dir_btn.clicked.connect(lambda: self._emit_dir("config"))
+
+        meta_rows = [
+            ("repo", "GitHub 仓库", None),
+            ("version", "当前版本", None),
+            ("launch_type", "启动方式", None),
+            ("path", "项目目录", self._open_project_dir_btn),
+            ("config_dir", "配置目录", self._open_config_dir_btn),
+            ("runner", "解释器 / 程序", None),
+            ("args", "启动参数", None),
+            ("configs", "已发现配置", None),
+        ]
+        for r_idx, (field, label, extra_btn) in enumerate(meta_rows):
+            cap = QLabel(label)
+            cap.setObjectName("hintLabel")
+            cap.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            val = ElidedLabel("", min_width=60, max_hint_width=760)
+            val.setObjectName("cardDetail")
+            self._meta_grid.addWidget(cap, r_idx, 0)
+            self._meta_grid.addWidget(val, r_idx, 1)
+            if extra_btn is not None:
+                self._meta_grid.addWidget(extra_btn, r_idx, 2)
+            self._meta_caps.append(cap)
+            self._meta_values[field] = val
+        cap_w = max(QFontMetrics(self._meta_caps[0].font()).horizontalAdvance(c.text()) for c in self._meta_caps) + 10
+        for cap in self._meta_caps:
+            cap.setFixedWidth(cap_w)
+        meta_layout.addLayout(self._meta_grid)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setObjectName("toolbarDivider")
+        meta_layout.addWidget(sep)
+
+        edit_cap = QLabel("可编辑运行参数（保存后写入 afk_projects.yaml）")
+        edit_cap.setObjectName("hintLabel")
+        meta_layout.addWidget(edit_cap)
+
+        form_row1 = QHBoxLayout()
+        form_row1.setSpacing(10)
+        self.enabled_check = QCheckBox("启用此项目")
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(0, 10)
+        self.retry_spin.setPrefix("重试 ")
+        self.retry_spin.setSuffix(" 次")
+        self.hang_spin = QSpinBox()
+        self.hang_spin.setRange(60, 14400)
+        self.hang_spin.setPrefix("卡死超时 ")
+        self.hang_spin.setSuffix(" 秒")
+        self.min_runtime_spin = QSpinBox()
+        self.min_runtime_spin.setRange(0, 3600)
+        self.min_runtime_spin.setPrefix("最短运行 ")
+        self.min_runtime_spin.setSuffix(" 秒")
+        form_row1.addWidget(self.enabled_check)
+        form_row1.addWidget(self.retry_spin)
+        form_row1.addWidget(self.hang_spin)
+        form_row1.addWidget(self.min_runtime_spin)
+        form_row1.addStretch(1)
+        meta_layout.addLayout(form_row1)
+
+        form_row2 = QHBoxLayout()
+        form_row2.setSpacing(12)
+        self.admin_check = QCheckBox("需要管理员权限")
+        self.finish_check = QCheckBox("要求完成标记")
+        self.emu_check = QCheckBox("接管模拟器")
+        self.stop_err_check = QCheckBox("出错即停止")
+        self.win_finish_check = QCheckBox("等窗口结束")
+        for chk in (self.admin_check, self.finish_check, self.emu_check, self.stop_err_check, self.win_finish_check):
+            form_row2.addWidget(chk)
+        form_row2.addStretch(1)
+        meta_layout.addLayout(form_row2)
+
+        form_row3 = QHBoxLayout()
+        form_row3.setSpacing(8)
+        self.default_cfg_cap = QLabel("默认配置文件 / 实例")
+        self.default_cfg_cap.setObjectName("hintLabel")
+        self.default_cfg_combo = QComboBox()
+        self.default_cfg_combo.setEditable(True)
+        self.default_cfg_combo.setMinimumWidth(200)
+        self.save_params_btn = AnimatedButton("保存参数", variant="primary")
+        self.save_params_btn.setObjectName("primary")
+        self.save_params_btn.clicked.connect(self._save_params)
+        form_row3.addWidget(self.default_cfg_cap)
+        form_row3.addWidget(self.default_cfg_combo)
+        form_row3.addStretch(1)
+        form_row3.addWidget(self.save_params_btn)
+        meta_layout.addLayout(form_row3)
+        body.addWidget(self.meta_card)
+
+        # Card 3: 诊断 / 安装 / 更新输出
+        self.output_card = HoverGlowCard()
+        self.output_card.setObjectName("card")
+        out_layout = QVBoxLayout(self.output_card)
+        out_layout.setContentsMargins(18, 14, 18, 14)
+        out_layout.setSpacing(8)
+        out_head = QHBoxLayout()
+        out_head.setSpacing(8)
+        self.output_title = QLabel("环境检测 / 操作输出")
+        self.output_title.setObjectName("sectionTitleCard")
+        self.output_summary = QLabel("")
+        self.output_summary.setObjectName("hintLabel")
+        self.clear_output_btn = AnimatedButton("清空", variant="mini")
+        out_head.addWidget(self.output_title)
+        out_head.addWidget(self.output_summary, 1)
+        out_head.addWidget(self.clear_output_btn)
+        out_layout.addLayout(out_head)
+
+        self.output_view = QPlainTextEdit()
+        self.output_view.setReadOnly(True)
+        self.output_view.setUndoRedoEnabled(False)
+        self.output_view.setMaximumBlockCount(2000)
+        self.output_view.setMinimumHeight(180)
+        mono = QFont("Cascadia Mono", 9)
+        mono.setStyleHint(QFont.Monospace)
+        self.output_view.setFont(mono)
+        enable_smooth_scroll(self.output_view)
+        self.clear_output_btn.clicked.connect(self.output_view.clear)
+        out_layout.addWidget(self.output_view)
+        body.addWidget(self.output_card)
+
+        body.addStretch(1)
         scroll.setWidget(inner)
         self._scroll = scroll
         outer.addWidget(scroll, 1)
 
         self.reload()
 
-    # -- 构建 ---------------------------------------------------------------
-    def reload(self, force_versions=False):
-        """按当前注册表重建列表（切换页面、保存注册表后都会调）。
-
-        force_versions=True 时无视版本缓存、把所有项目重扫一遍（「刷新」按钮
-        用这个）；日常切页只扫新增或换了路径的项目——每个项目要跑一次
-        `git describe`（几十毫秒），5 个项目来回切三次就是 15 次子进程，
-        切页会明显发涩（实测 reload 30ms + 后台 15 次 git 调用）。
-        """
-        registry = self._registry_getter() or {}
-        projects = registry.get("projects", {}) or {}
-        # 清掉旧块（保留尾部 stretch）
-        while self._list_layout.count() > 1:
-            item = self._list_layout.takeAt(0)
-            widget = item.widget() if item is not None else None
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-        self._blocks = {}
-        for key, spec in projects.items():
-            block = _ProjectBlock(key, spec, self._color_getter(key))
-            block.set_state(bool((spec or {}).get("enabled", True)))
-            # 命中缓存的版本先填上，避免重建后闪一下「未知」再变回来。
-            cached = self._version_cache.get(self._project_path(key, spec))
-            if cached:
-                block.set_version(cached)
-            self._blocks[key] = block
-            self._list_layout.insertWidget(self._list_layout.count() - 1, block)
-        self._align_caps()
-        self._start_version_scan(projects, force=force_versions)
+    # -- 数据与导航同步 -------------------------------------------------------
+    def _projects(self):
+        return (self._registry_getter() or {}).get("projects", {}) or {}
 
     def _project_path(self, key, spec):
-        """项目 git 目录的绝对路径字符串（缓存键）；没有 path 时返回空串。"""
         path = (spec or {}).get("path")
         if not path:
             return ""
         return str(config.ROOT / str(path))
 
-    def _align_caps(self):
-        """按最长标签统一各块左列的宽度（含 QSS 字号与 DPI 的影响）。
+    def _populate_install_combo(self, registry):
+        cur = self.install_combo.currentData()
+        self.install_combo.blockSignals(True)
+        self.install_combo.clear()
+        for item in project_ops.SUPPORTED_PROJECTS:
+            k = item["key"]
+            short = str(item["display_name"]).split("（")[0]
+            installed = project_ops.is_project_installed(k, registry)
+            label = "{0}（已安装）".format(short) if installed else "{0}（{1}）".format(short, k)
+            self.install_combo.addItem(label, k)
+        idx = self.install_combo.findData(cur)
+        self.install_combo.setCurrentIndex(max(0, idx))
+        self.install_combo.blockSignals(False)
+        self._sync_install_button(registry)
 
-        历史缺陷：列宽写死 setFixedWidth(88)。「要求完成标记」实测 72px、
-        「卡死超时(秒)」68px，看着够但没有任何余量——换个字体/缩放比就被
-        截成「要求完成标记」「卡死超时(秒」。现在实测后加 8px 余量，且取
-        所有块里的最大值，保证每张卡的列仍然对齐。
-        """
-        if not self._blocks:
-            return
-        width = max(block.cap_width_hint() for block in self._blocks.values())
-        if width <= 0:
-            return
-        width += 8
-        for block in self._blocks.values():
-            block.align_caps(width)
+    def _sync_install_button(self, registry=None):
+        registry = registry if registry is not None else self._registry_getter()
+        key = str(self.install_combo.currentData() or "")
+        installed = bool(key) and project_ops.is_project_installed(key, registry)
+        if installed:
+            self.install_btn.setText("已安装")
+            self.install_btn.setEnabled(False)
+            self.install_btn.setToolTip("{0} 已安装；如需重新部署请点下方的「重装项目」".format(key))
+        else:
+            self.install_btn.setText("安装项目")
+            self.install_btn.setEnabled(bool(key) and not self._op_busy)
+            self.install_btn.setToolTip("克隆并构建安装 {0}".format(key))
 
+    def reload(self, force_versions=False):
+        registry = self._registry_getter() or {}
+        projects = registry.get("projects", {}) or {}
+        theme = current_theme()
+        colors = tuple((k, str(self._color_getter(k))) for k in projects)
+        snap = (copy.deepcopy(projects), theme, colors)
+
+        self._populate_install_combo(registry)
+
+        if (
+            not force_versions
+            and self._rendered_snapshot == snap
+            and self.sub_nav.tab_keys() == list(projects.keys())
+        ):
+            self._start_version_scan(projects, force=False)
+            if self._current_key in projects:
+                self._sync_install_button(registry)
+                return
+
+        self._rendered_snapshot = snap
+        self.sub_nav.clear_tabs()
+        for key, spec in projects.items():
+            short = str((spec or {}).get("display_name", key)).split("（")[0]
+            self.sub_nav.add_tab(
+                key,
+                short,
+                icon=_dot_icon(self._color_getter(key)),
+                tooltip=str((spec or {}).get("display_name", key)),
+            )
+
+        has = bool(projects)
+        self._empty_label.setVisible(not has)
+        self.hero_card.setVisible(has)
+        self.meta_card.setVisible(has)
+        self.output_card.setVisible(has)
+
+        if has:
+            target = self._current_key if self._current_key in projects else next(iter(projects))
+            self.sub_nav.set_current(target, emit=False)
+            self.select_project(target)
+        else:
+            self._current_key = ""
+        self._start_version_scan(projects, force=force_versions)
+
+    def select_project(self, key):
+        projects = self._projects()
+        spec = projects.get(key)
+        if spec is None:
+            return
+        self._current_key = key
+        self.sub_nav.set_current(key, emit=False)
+        spec = spec or {}
+        color = self._color_getter(key)
+        registry = self._registry_getter() or {}
+        installed = project_ops.is_project_installed(key, registry)
+        enabled = bool(spec.get("enabled", True))
+
+        self.accent_bar.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
+        name = str(spec.get("display_name", key))
+        self.title_label.setText(name)
+        self.title_label.setToolTip(name)
+        self.key_pill.setText(key)
+        self.status_badge.setText(
+            "{0} · {1}".format("已安装" if installed else "未安装", "已启用" if enabled else "已禁用")
+        )
+
+        pdir = self._project_path(key, spec)
+        cached_ver = self._version_cache.get(pdir) or str(spec.get("version") or "")
+        ver_text = cached_ver or "未知"
+        self.version_pill.setText("版本：" + ver_text)
+
+        repo = str(spec.get("repo") or "").strip()
+        url = _repo_url(repo)
+        self.repo_btn.setVisible(bool(url))
+        self.repo_btn.setText(repo or "GitHub")
+        self.repo_btn.setToolTip(url)
+
+        has_gui = bool(spec.get("gui"))
+        self.gui_btn.setEnabled(has_gui and installed and not self._op_busy)
+        self.gui_btn.setToolTip(
+            "独立打开 {0} 的原配置界面".format(key)
+            if (has_gui and installed)
+            else ("项目目录不存在，请先安装" if not installed else "注册表未配置 gui 入口")
+        )
+        self.update_btn.setEnabled(installed and not self._op_busy)
+        self.reinstall_btn.setEnabled(not self._op_busy)
+        self.doctor_btn.setEnabled(not self._op_busy)
+        self.delete_btn.setEnabled(not self._op_busy)
+
+        # -- 元数据网格 -------------------------------------------------------
+        cfg_dir = config.config_dir_for(key, spec)
+        runner = spec.get("exe") or spec.get("python") or "-"
+        args = " ".join(str(a) for a in (spec.get("args") or [])) or "-"
+        discovered = project_ops.discover_project_configs(key, spec)
+        cfg_summary = "、".join(lbl for lbl, _v in discovered) if discovered else "未发现（使用默认配置）"
+
+        meta_map = {
+            "repo": url or "未填写",
+            "version": ver_text,
+            "launch_type": str(spec.get("launch_type") or "-"),
+            "path": pdir or "未填写",
+            "config_dir": str(cfg_dir),
+            "runner": str(runner),
+            "args": args,
+            "configs": cfg_summary,
+        }
+        for field, val_text in meta_map.items():
+            lbl = self._meta_values[field]
+            lbl.setText(val_text)
+            lbl.setToolTip(val_text)
+        self._open_project_dir_btn.setEnabled(bool(pdir) and Path(pdir).exists())
+        self._open_config_dir_btn.setEnabled(cfg_dir.exists())
+
+        # -- 可编辑表单 -------------------------------------------------------
+        self._loading_form = True
+        try:
+            self.enabled_check.setChecked(enabled)
+            self.retry_spin.setValue(int(spec.get("retry", 1) or 0))
+            self.hang_spin.setValue(max(60, int(spec.get("hang_timeout", 900) or 900)))
+            self.min_runtime_spin.setValue(max(0, int(spec.get("min_runtime_sec", 0) or 0)))
+            self.admin_check.setChecked(bool(spec.get("require_admin", False)))
+            self.finish_check.setChecked(bool(spec.get("require_finish", False)))
+            self.emu_check.setChecked(bool(spec.get("manage_emulator", False)))
+            self.stop_err_check.setChecked(bool(spec.get("stop_on_error", False)))
+            self.win_finish_check.setChecked(bool(spec.get("window_finish", False)))
+
+            uses_instance = key == "MaaEnd" or any("{instance}" in str(a) for a in (spec.get("args") or []))
+            cur_cfg = str(spec.get("instance" if uses_instance else "config_name") or "")
+            self.default_cfg_cap.setText("默认实例" if uses_instance else "默认配置文件")
+            self.default_cfg_combo.blockSignals(True)
+            self.default_cfg_combo.clear()
+            self.default_cfg_combo.addItem("", "")
+            for lbl, val in discovered:
+                self.default_cfg_combo.addItem(val, val)
+            if cur_cfg and self.default_cfg_combo.findData(cur_cfg) < 0:
+                self.default_cfg_combo.addItem(cur_cfg, cur_cfg)
+            self.default_cfg_combo.setEditText(cur_cfg)
+            self.default_cfg_combo.blockSignals(False)
+        finally:
+            self._loading_form = False
+
+    def refresh_theme(self):
+        self._rendered_snapshot = None
+        for btn in (
+            self.install_btn,
+            self.refresh_ver_btn,
+            self.repo_btn,
+            self.gui_btn,
+            self.doctor_btn,
+            self.update_btn,
+            self.reinstall_btn,
+            self.delete_btn,
+            self._open_project_dir_btn,
+            self._open_config_dir_btn,
+            self.save_params_btn,
+            self.clear_output_btn,
+        ):
+            btn.set_variant(btn.variant_name)
+        self.reload()
+
+    # -- 操作与后台任务 -------------------------------------------------------
+    def _emit_dir(self, kind):
+        spec = self._projects().get(self._current_key) or {}
+        if kind == "project":
+            pdir = self._project_path(self._current_key, spec)
+            if pdir:
+                self.open_path_requested.emit(Path(pdir))
+        else:
+            self.open_path_requested.emit(config.config_dir_for(self._current_key, spec))
+
+    def _open_repo(self):
+        spec = self._projects().get(self._current_key) or {}
+        url = _repo_url(spec.get("repo"))
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _save_params(self):
+        key = self._current_key
+        if not key or self._loading_form:
+            return
+        try:
+            data = config.load_yaml(config.PROJECTS_YAML, {}) or {}
+        except Exception as exc:
+            QMessageBox.critical(self, "读取失败", str(exc))
+            return
+        projects = data.setdefault("projects", {})
+        spec = projects.get(key)
+        if not isinstance(spec, dict):
+            QMessageBox.warning(self, "未找到项目", "afk_projects.yaml 中没有 {0}".format(key))
+            return
+        spec["enabled"] = bool(self.enabled_check.isChecked())
+        spec["retry"] = int(self.retry_spin.value())
+        spec["hang_timeout"] = int(self.hang_spin.value())
+        spec["min_runtime_sec"] = int(self.min_runtime_spin.value())
+        for field, chk in (
+            ("require_admin", self.admin_check),
+            ("require_finish", self.finish_check),
+            ("manage_emulator", self.emu_check),
+            ("stop_on_error", self.stop_err_check),
+            ("window_finish", self.win_finish_check),
+        ):
+            val = bool(chk.isChecked())
+            if val:
+                spec[field] = True
+            elif field in spec:
+                spec[field] = False
+
+        uses_instance = key == "MaaEnd" or any("{instance}" in str(a) for a in (spec.get("args") or []))
+        cfg_field = "instance" if uses_instance else "config_name"
+        cfg_val = self.default_cfg_combo.currentText().strip()
+        if cfg_val:
+            spec[cfg_field] = cfg_val
+        else:
+            spec.pop(cfg_field, None)
+
+        try:
+            config.save_yaml(config.PROJECTS_YAML, data)
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
+            return
+        self._rendered_snapshot = None
+        self.reload()
+        self._log("core", "info", "已保存 {0} 的项目参数".format(key))
+        self.projects_changed.emit()
+
+    def _set_op_busy(self, busy):
+        self._op_busy = bool(busy)
+        for btn in (self.doctor_btn, self.update_btn, self.reinstall_btn, self.delete_btn, self.save_params_btn):
+            btn.setEnabled(not busy)
+        if self._current_key:
+            spec = self._projects().get(self._current_key) or {}
+            installed = project_ops.is_project_installed(self._current_key, self._registry_getter())
+            self.gui_btn.setEnabled(bool(spec.get("gui")) and installed and not busy)
+            self.update_btn.setEnabled(installed and not busy)
+        self._sync_install_button()
+
+    def _append_op_line(self, text):
+        if text:
+            self.output_view.appendPlainText(str(text))
+
+    def _on_op_done(self, kind, ok, summary):
+        self._set_op_busy(False)
+        self.output_summary.setText(summary)
+        self._append_op_line("[{0}] {1}".format("完成" if ok else "失败", summary))
+        self._log("core", "info" if ok else "error", summary)
+        self._rendered_snapshot = None
+        self.reload(force_versions=True)
+        if kind in ("install", "reinstall"):
+            self.projects_changed.emit()
+
+    def _on_install_clicked(self):
+        if self._op_busy:
+            return
+        key = str(self.install_combo.currentData() or "")
+        if not key:
+            return
+        if project_ops.is_project_installed(key, self._registry_getter()):
+            self._sync_install_button()
+            return
+        self._set_op_busy(True)
+        self._current_key = key
+        self.output_title.setText("安装项目：{0}".format(key))
+        self.output_summary.setText("正在安装…")
+        self.output_view.setPlainText("开始安装 {0}...\n".format(key))
+
+        def worker():
+            try:
+                ok, msg = project_ops.install_project(
+                    key, bus=self._bus, log_cb=self._op_line.emit
+                )
+            except Exception as exc:
+                ok, msg = False, str(exc)
+            self._op_done.emit("install", bool(ok), "{0} {1}".format(key, msg))
+
+        threading.Thread(target=worker, daemon=True, name="afk-install-" + key).start()
+
+    def _on_reinstall_clicked(self):
+        key = self._current_key
+        if not key or self._op_busy:
+            return
+        choice = QMessageBox.question(
+            self,
+            "重装项目",
+            "将删除 {0} 的源码目录并重新克隆与构建。\n用户配置（configs/{0}）会完整保留，确定继续吗？".format(key),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        spec = copy.deepcopy(self._projects().get(key) or {})
+        self._set_op_busy(True)
+        self.output_title.setText("重装项目：{0}".format(key))
+        self.output_summary.setText("正在重装…")
+        self.output_view.setPlainText("开始重装 {0}...\n".format(key))
+
+        def worker():
+            try:
+                ok, msg = project_ops.reinstall_project(
+                    key, spec=spec, bus=self._bus, log_cb=self._op_line.emit
+                )
+            except Exception as exc:
+                ok, msg = False, str(exc)
+            self._op_done.emit("reinstall", bool(ok), "{0} {1}".format(key, msg))
+
+        threading.Thread(target=worker, daemon=True, name="afk-reinstall-" + key).start()
+
+    def _on_delete_clicked(self):
+        key = self._current_key
+        if not key or self._op_busy:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("删除项目")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("确定删除项目「{0}」吗？".format(key))
+        box.setInformativeText("用户配置（configs/{0}）不会被删除；你可以选择是否同时删除本地源码目录。".format(key))
+        btn_reg = box.addButton("仅从配置中移除", QMessageBox.AcceptRole)
+        btn_files = box.addButton("同时删除源码目录", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_cancel or clicked is None:
+            return
+        delete_files = clicked == btn_files
+        try:
+            project_ops.delete_project(key, delete_files=delete_files, bus=self._bus)
+        except Exception as exc:
+            QMessageBox.critical(self, "删除失败", str(exc))
+            return
+        self._current_key = ""
+        self._rendered_snapshot = None
+        self.output_summary.setText("已删除 {0}".format(key))
+        self._log(
+            "core",
+            "info",
+            "已删除项目 {0}{1}".format(key, "（并清理源码目录）" if delete_files else ""),
+        )
+        self.reload()
+        self.projects_changed.emit()
+
+    def _on_update_clicked(self):
+        key = self._current_key
+        if not key or self._op_busy:
+            return
+        spec = copy.deepcopy(self._projects().get(key) or {})
+        self._set_op_busy(True)
+        self.output_title.setText("更新项目：{0}".format(key))
+        self.output_summary.setText("正在检查并拉取更新…")
+        self.output_view.setPlainText("开始更新 {0}...\n".format(key))
+
+        def worker():
+            try:
+                from afk_core.events import EventBus
+                from afk_core.updater import Updater
+
+                bus = self._bus or EventBus()
+                res = Updater(bus, config.settings()).update_project(key, spec)
+                updated = bool((res or {}).get("updated"))
+                steps = (res or {}).get("steps") or []
+                for step in steps:
+                    self._op_line.emit("步骤：{0}".format(step))
+                msg = "已更新至最新" if updated else "已是最新版本（或无需更新）"
+                ok = True
+            except Exception as exc:
+                ok, msg = False, "更新失败：{0}".format(exc)
+            self._op_done.emit("update", ok, "{0} {1}".format(key, msg))
+
+        threading.Thread(target=worker, daemon=True, name="afk-update-" + key).start()
+
+    def _on_doctor_clicked(self):
+        key = self._current_key
+        if not key or self._op_busy:
+            return
+        spec = copy.deepcopy(self._projects().get(key) or {})
+        self._set_op_busy(True)
+        self.output_title.setText("环境检测：{0}".format(key))
+        self.output_summary.setText("正在检测…")
+        self.output_view.setPlainText("正在对 {0} 执行环境检测...\n".format(key))
+
+        def worker():
+            try:
+                results = doctor.run_project_checks(key, spec)
+            except Exception as exc:
+                results = [{"status": "fail", "name": key, "detail": str(exc)}]
+            self._doctor_ready.emit(key, results)
+
+        threading.Thread(target=worker, daemon=True, name="afk-doctor-" + key).start()
+
+    def _render_project_doctor(self, key, results):
+        self._set_op_busy(False)
+        lines = []
+        summary = doctor.summary(results)
+        for item in results:
+            lines.append(
+                "[{0:<4}] {1:<26} {2}".format(
+                    item.get("status", "ok"),
+                    item.get("name", ""),
+                    item.get("detail", ""),
+                )
+            )
+        text = "通过 {ok} · 告警 {warn} · 失败 {fail}（共 {total} 项）".format(**summary)
+        self.output_title.setText("环境检测：{0}".format(key))
+        self.output_summary.setText(text)
+        self.output_view.setPlainText("\n".join(lines))
+
+    # -- 后台 git 版本扫描 ----------------------------------------------------
     def _start_version_scan(self, projects, force=False):
-        """后台读各子项目 git 版本（每次 git 调用几十毫秒，串起来会让切页卡顿）。
-
-        历史缺陷：只要上一轮扫描线程还活着就直接 return。用户在「项目注册表」
-        里存盘（或新增项目）会立刻触发 reload，「新增挂机项目」建出来的那一张
-        卡就永远停在「未知」——线程早就拿着旧的项目清单跑完了，没人再扫它。
-        现在改成往同一个队列里追加目标：线程还活着就往队列里补，它自己会继续
-        消费；线程已经结束就新起一个。
-
-        同时按路径缓存结果：切页会反复 reload，而 git 版本在两次切页之间不会
-        变——同一个路径没必要重复跑 git（实测来回切三次多打了 15 次子进程）。
-        """
         targets = []
         with self._scan_lock:
             for key, spec in projects.items():
@@ -402,9 +979,7 @@ class ProjectStatusPage(QWidget):
                     continue
                 targets.append((key, path))
             if targets:
-                self._scan_pending.extend(
-                    t for t in targets if t not in self._scan_pending
-                )
+                self._scan_pending.extend(t for t in targets if t not in self._scan_pending)
                 self._scan_inflight.update(path for _key, path in targets)
         if not targets:
             return
@@ -416,7 +991,6 @@ class ProjectStatusPage(QWidget):
         self._version_thread.start()
 
     def _version_worker(self):
-        """逐个消费待扫队列；扫完队列空才退出（期间新追加的目标也会被扫到）。"""
         while True:
             with self._scan_lock:
                 if not self._scan_pending:
@@ -426,14 +1000,21 @@ class ProjectStatusPage(QWidget):
                 version = read_version(path)
             except Exception:
                 version = ""
-            # 顺手写缓存：即便这一轮 GUI 线程刚好正在重建卡片（_apply_version
-            # 找不到块），下次 reload 也能把版本号直接填回去。
             with self._scan_lock:
                 self._version_cache[path] = version
                 self._scan_inflight.discard(path)
             self.version_ready.emit(key, version)
 
     def _apply_version(self, key, version):
-        block = self._blocks.get(key)
-        if block is not None:
-            block.set_version(version)
+        if key != self._current_key:
+            return
+        spec = self._projects().get(key) or {}
+        text = version or str(spec.get("version") or "") or "未知"
+        self.version_pill.setText("版本：" + text)
+        lbl = self._meta_values.get("version")
+        if lbl is not None:
+            lbl.setText(text)
+            lbl.setToolTip(text)
+
+
+ProjectStatusPage = ProjectConfigPage

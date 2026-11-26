@@ -8,25 +8,22 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
-    QScrollArea,
-    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QSystemTrayIcon,
@@ -35,29 +32,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from afk_core import config, doctor, idle, listval, numval
+from afk_core import config, doctor, idle, listval, numval, project_ops
 from afk_core.events import EventBus
 from afk_core.idle import IdleWatcher
 from afk_core.repair import RepairEngine
 from afk_core.scheduler import Scheduler
-from afk_core.supervisor import Supervisor
+from afk_core.supervisor import Supervisor, normalize_chain_tasks
 
 from gui.modern import (
     AnimatedButton,
     AnimatedPill,
     CardBackground,
     ElidedLabel,
-    FlowHost,
-    HoverGlowCard,
-    ParallelLinks,
-    StatusDot,
     add_shadow,
     apply_theme,
     current_theme,
-    enable_smooth_scroll,
     fade_in_widget,
     fade_in_window,
-    links_color,
 )
 from gui.idle_prompt import (
     DECISION_BACKGROUND,
@@ -66,9 +57,21 @@ from gui.idle_prompt import (
     IdlePromptDialog,
     decide_on_timeout,
 )
+from gui.cards import (
+    BUSY_STATUSES,
+    CARDS_MIN_HEIGHT,
+    STATUS_DETAIL_FALLBACK,
+    STATUS_TEXT,
+    CardsScrollArea,
+    ProjectCard,
+    _theme_status_colors,
+)
 from gui.advanced_panel import AdvancedPanel
+from gui.live_log_columns import CORE_KEY, CORE_TITLE, MultiColumnLogBoard
 from gui.nav_rail import NavRail
-from gui.project_status_page import ProjectStatusPage
+from gui.project_status_page import ProjectConfigPage, ProjectStatusPage
+from gui.run_order_page import RunOrderPage
+from gui.run_stage import RunStageWidget
 from gui.settings_page import SettingsPage
 from gui.widget import DesktopWidget
 from gui import icons, themes
@@ -77,19 +80,7 @@ from gui import icons, themes
 # 它会跟着当前主题走）。
 STATUS_COLORS = themes.STATUS_PALETTE[themes.DEFAULT_THEME]
 
-STATUS_TEXT = {
-    "success": "完成",
-    "success_unverified": "完成(未校验)",
-    "running": "运行中",
-    "pending": "等待",
-    "failed": "失败",
-    "hang": "卡死",
-    "stopped": "已停止",
-}
 
-# 还没收尾的状态：卡片上「启动」置灰、「停止」可点。hang（卡死）也算在跑，
-# 否则卡住时反而点不到「停止」。
-BUSY_STATUSES = ("pending", "running", "hang")
 
 # 切过滤条件时最多重画多少行日志。event_buffer 上限 5000，全量重画实测
 # 422ms（GUI 主线程僵住半秒），2000 行 156ms、1500 行 125ms；取 2000 作为
@@ -108,17 +99,6 @@ LOG_DRAIN_BUDGET_MS = 25.0
 # event_buffer 与 events.jsonl 里（切过滤器时能看到），并写一行提示说明跳过了多少。
 LOG_RENDER_BATCH_LIMIT = 400
 
-# 没有 pid/exit/message 可显示时的详情行文案。必须按状态给，不能统一写
-# 「运行中…」，否则排队中的卡片会显示成「等待 / 运行中...」自相矛盾。
-STATUS_DETAIL_FALLBACK = {
-    "running": "运行中…",
-    "success": "已完成",
-    "success_unverified": "已完成（未校验）",
-    "pending": "等待启动",
-    "failed": "已失败",
-    "stopped": "已停止",
-    "hang": "无响应",
-}
 
 # 项目身份色（兼容旧引用；真正取色请用 _theme_project_colors() / _project_color()，
 # 它们会跟着当前主题走）。
@@ -141,26 +121,12 @@ CHAIN_TEXT = {
 CHAIN_COLORS = {key: themes.chain_color(themes.DEFAULT_THEME, key) for key in CHAIN_TEXT}
 
 
-def _theme_status_colors(theme=None):
-    """当前主题下的状态色表（卡片状态点、状态文字）。
-
-    历史缺陷：STATUS_COLORS 是一份写死的深色配色，状态文字直接
-    `setStyleSheet("color: ...")`。切到浅色主题后 #34d399 / #60a5fa 落在白卡上
-    对比度只有 1.9 / 2.5，状态几乎看不见（7 个状态全部低于 WCAG AA 的 4.5）。
-    这里按主题取表，深浅两套都由 gui/themes.py 给。
-    """
-    name = themes.normalize_theme(theme or current_theme())
-    return themes.STATUS_PALETTE.get(name, themes.STATUS_PALETTE[themes.DEFAULT_THEME])
-
-
 def _theme_chain_colors(theme=None):
-    name = themes.normalize_theme(theme or current_theme())
-    return {key: themes.chain_color(name, key) for key in CHAIN_TEXT}
+    return themes.chain_color_table(theme or current_theme())
 
 
 def _theme_level_colors(theme=None):
-    name = themes.normalize_theme(theme or current_theme())
-    return {level: themes.log_color(name, level) for level in ("error", "warn")}
+    return themes.level_color_table(theme or current_theme())
 
 
 def _theme_project_colors(custom=None, theme=None):
@@ -233,357 +199,32 @@ def _preferred_window_size(screen=None):
     return min(width, limit_w), min(height, limit_h)
 
 
-def make_icon(theme=None):
-    """应用图标：深/浅主题各一套配色（浅色主题下用深底会像一块黑补丁）。
+_APP_ICON_CACHE = {}
 
-    颜色走 themes 的设计令牌，和 QSS 用同一套值；没传 theme 时取当前主题。
-    """
-    token = themes.resolve(theme or current_theme())
+
+def make_icon(theme=None):
+    """应用图标：深/浅主题各一套配色，并按主题名缓存位图避免重复光栅化。"""
+    norm = themes.normalize_theme(theme or current_theme())
+    cached = _APP_ICON_CACHE.get(norm)
+    if cached is not None:
+        return cached
+    token = themes.resolve(norm)
     pix = QPixmap(64, 64)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(Qt.NoPen)
     painter.setBrush(QColor(token["panel"]))
-    painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
+    painter.drawRoundedRect(0, 0, 64, 64, 15, 15)
     painter.setBrush(QColor(token["accent"]))
-    painter.drawEllipse(8, 8, 48, 48)
+    painter.drawEllipse(9, 9, 46, 46)
     painter.setPen(QColor(token["on_accent"]))
-    painter.setFont(QFont("Arial", 17, QFont.Bold))
+    painter.setFont(QFont("Inter", 16, QFont.Bold))
     painter.drawText(pix.rect(), Qt.AlignCenter, "AFK")
     painter.end()
-    return QIcon(pix)
-
-
-# apply_spec 的哨兵值：区分「没传 on_gui」和「显式传 None（这个项目没有界面入口）」
-_UNSET = object()
-
-
-class ProjectCard(HoverGlowCard):
-    # 按住卡片移动超过这么多像素才算拖拽（避免点按钮/微抖动误触发重排）
-    DRAG_THRESHOLD = 8
-
-    # 卡片被拖动、移动、松手；参数是该卡的 key / 全局坐标
-    drag_started = Signal(str)
-    drag_moved = Signal(str, QPoint)
-    drag_finished = Signal(str)
-
-    def __init__(self, key, spec, color, on_start, on_stop, on_logs, on_gui=None,
-                 on_parallel=None, on_remove=None):
-        super().__init__()
-        self.key = key
-        self.spec = spec
-        self.color = color
-        self.on_start = on_start
-        self.on_stop = on_stop
-        self.on_logs = on_logs
-        self.on_gui = on_gui
-        self.on_parallel = on_parallel
-        self.on_remove = on_remove
-        self._parallel = False
-        self._parallel_pending = False
-        self._press_pos = None
-        self._dragging = False
-        self.setObjectName("card")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
-
-        accent = QFrame()
-        accent.setFixedHeight(4)
-        accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
-        layout.addWidget(accent)
-        self.accent = accent
-
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        self.dot = StatusDot(_theme_status_colors()["pending"])
-        display_name = str(spec.get("display_name", key))
-        # 用 ElidedLabel 而不是 QLabel：QLabel 的 minimumSizeHint 等于整段文字宽度，
-        # 注册表里写个长 display_name（实测 128 字 → 1232px）会把项目卡和整个窗口
-        # 的最小宽度一起顶出去。
-        self.name_label = ElidedLabel(display_name.split("（")[0], min_width=72)
-        self.name_label.setObjectName("cardName")
-        if display_name != self.name_label.text():
-            self.name_label.setToolTip(display_name)
-        head.addWidget(self.dot)
-        head.addWidget(self.name_label, 1)
-        # 拖动把手（只能靠把手拖动卡片，避免点按钮时误拖）
-        self.drag_handle = QLabel()
-        self.drag_handle.setObjectName("cardGrip")
-        self.drag_handle.setPixmap(
-            icons.make("grip", themes.icon_color(current_theme()), 14).pixmap(14, 14)
-        )
-        self.drag_handle.setCursor(Qt.OpenHandCursor)
-        self.drag_handle.setToolTip("按住拖动可调整运行顺序")
-        self.drag_handle.installEventFilter(self)
-        head.addWidget(self.drag_handle)
-        # 删除卡片（只是从总览里藏起来，设置页里能恢复）
-        self.close_btn = AnimatedButton("", variant="mini")
-        self.close_btn.setObjectName("cardClose")
-        self.close_btn.setIcon(icons.make("close", themes.icon_color(current_theme(), subtle=True), 12))
-        self.close_btn.setFixedSize(22, 22)
-        self.close_btn.setToolTip("从总览里移除这个项目（可在设置页恢复）")
-        self.close_btn.clicked.connect(lambda: self.on_remove(self.key) if self.on_remove else None)
-        head.addWidget(self.close_btn)
-        layout.addLayout(head)
-
-        self.status_label = QLabel("等待")
-        self.status_label.setObjectName("cardStatus")
-        # 记住当前画出来的状态文字/颜色，update_state 里据此跳过无变化的写入
-        self._status_text = "等待"
-        self._status_color = _theme_status_colors()["pending"]
-        self.status_label.setStyleSheet("color: {0};".format(self._status_color))
-        layout.addWidget(self.status_label)
-
-        self.detail_label = QLabel("未运行")
-        self.detail_label.setObjectName("cardDetail")
-        self.detail_label.setWordWrap(True)
-        self.detail_label.setMinimumHeight(30)
-        layout.addWidget(self.detail_label)
-
-        self.attempt_label = QLabel("")
-        self.attempt_label.setObjectName("cardAttempt")
-        layout.addWidget(self.attempt_label)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(6)
-        self.gui_btn = AnimatedButton("界面", variant="mini")
-        self.start_btn = AnimatedButton("启动", variant="mini")
-        self.stop_btn = AnimatedButton("停止", variant="mini")
-        self.logs_btn = AnimatedButton("日志", variant="mini")
-        # 并行：点一次进入「待配对」，再点相邻的另一张卡就组成一组
-        self.parallel_btn = AnimatedButton("并行", variant="parallel")
-        self.parallel_btn.setObjectName("parallel")
-        self.parallel_btn.setCheckable(True)
-        self.parallel_btn.setToolTip("与相邻的项目同时运行：两张相邻的卡各点一次")
-        self.parallel_btn.clicked.connect(
-            lambda: self.on_parallel(self.key) if self.on_parallel else None
-        )
-        # 点击时再看一眼 self.on_gui：注册表里的 gui 段可能在运行中被改掉，
-        # apply_spec 会把 on_gui 置空，这里不能把回调固定死在构造时的值上。
-        def _gui_clicked():
-            if self.on_gui is None:
-                return
-            # 防抖：点击后短暂禁用，避免双击拉起两个实例
-            self.gui_btn.setEnabled(False)
-            self.on_gui(self.key)
-            QTimer.singleShot(1500, lambda: self.gui_btn.setEnabled(True))
-
-        self.gui_btn.clicked.connect(_gui_clicked)
-        self.gui_btn.setVisible(self.on_gui is not None)
-        self.start_btn.clicked.connect(lambda: self.on_start(self.key))
-        self.stop_btn.clicked.connect(lambda: self.on_stop(self.key))
-        self.logs_btn.clicked.connect(lambda: self.on_logs(self.key))
-        buttons.addWidget(self.gui_btn)
-        buttons.addWidget(self.start_btn)
-        buttons.addWidget(self.stop_btn)
-        buttons.addWidget(self.logs_btn)
-        buttons.addWidget(self.parallel_btn)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
-        # 注册表里 enabled: false 的项目，链会直接跳过。历史缺陷：卡片上一点
-        # 标识都没有（状态还是「等待」），用户点「启动」只得到一条日志
-        # 「project disabled, skipped」，看起来像点了没反应。
-        self._apply_enabled()
-
-    # -- 启用状态 -----------------------------------------------------------
-    @staticmethod
-    def _set_text_if_changed(label, text):
-        """文本没变就不写控件（setText 会触发重排，300ms 轮询下纯属浪费）。"""
-        if label.text() != text:
-            label.setText(text)
-
-    def _set_status_text(self, text, color):
-        """写状态文字与颜色，并记住上次画的内容（没变就不碰控件）。
-
-        _poll 每 300ms 对每张卡调一次 update_state，而 setText/setStyleSheet
-        都会让 Qt 重算样式（实测 5 张卡空转 20 轮打了 100 次 setStyleSheet、
-        3.0ms/轮）。缓存必须和控件内容一起改：`_apply_enabled` 也会直接写这
-        个标签（写「已禁用」），漏同步缓存的话，恢复启用后 update_state 会
-        以为「还是等待」而跳过写入，卡片永远停在「已禁用」（冒烟实测）。
-        """
-        if text == self._status_text and color == self._status_color:
-            return
-        self._status_text = text
-        self._status_color = color
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet("color: {0};".format(color))
-
-    def _apply_enabled(self, busy=None):
-        """enabled: false 时把卡片标灰、禁用启动按钮并说明原因。
-
-        busy 传 None 表示不清楚当前有没有在跑，沿用上一次算出来的值。
-        """
-        enabled = bool((self.spec or {}).get("enabled", True))
-        self._enabled = enabled
-        if enabled:
-            tip = ""
-        else:
-            tip = "注册表里这个项目是 enabled: false，跑链时会跳过；要启用请到「项目注册表」改成 true"
-            self._set_status_text("已禁用", _theme_status_colors()["pending"])
-            self.dot.set_state(_theme_status_colors()["pending"], pulse=False)
-            self._set_text_if_changed(self.detail_label, "注册表里 enabled: false，链会跳过它")
-        self.start_btn.setToolTip(tip)
-        self.parallel_btn.setEnabled(enabled)
-        self.parallel_btn.setToolTip(tip or "与相邻的项目同时运行：两张相邻的卡各点一次")
-        # 禁用也要留着「停止」：用户取消勾选时，之前启动的进程不会自己退出。
-        self._apply_buttons(busy=busy)
-
-    def is_enabled(self):
-        return bool(getattr(self, "_enabled", True))
-
-    # -- 启动 / 停止按钮 -----------------------------------------------------
-    def _apply_buttons(self, busy=None):
-        """按「这个项目现在有没有在跑」调整启动/停止两个按钮。
-
-        历史缺陷：两个按钮一直可点。
-        - 已经跑起来再点「启动」→ supervisor 只 emit 一条 `already running` 的
-          warn，界面上看不出点过了；
-        - 没在跑时点「停止」→ `stop_project()` 直接 `return False`，一条日志都
-          没有，用户以为按钮坏了。
-
-        busy 不传就沿用上一次 update_state 算出来的状态（`_apply_enabled` 会在
-        构造与 apply_spec 时调到这里，那时还没有 run 可看）。
-        """
-        if busy is None:
-            busy = bool(getattr(self, "_busy", False))
-        self._busy = bool(busy)
-        enabled = self.is_enabled()
-        self.start_btn.setEnabled(enabled and not busy)
-        # 「停止」只看有没有在跑：注册表里刚改成 enabled: false 时，之前启动的
-        # 那个进程并不会自己退出，得留一个能停它的入口（「全部停止」也能停，
-        # 但用户会先看这张卡）。
-        self.stop_btn.setEnabled(busy)
-        if not enabled:
-            self.stop_btn.setToolTip("停止这个项目（会连同它的子进程一起结束）" if busy else "")
-        elif busy:
-            self.start_btn.setToolTip("这个项目已经在运行；要重跑请先「停止」")
-            self.stop_btn.setToolTip("停止这个项目（会连同它的子进程一起结束）")
-        else:
-            self.start_btn.setToolTip("")
-            self.stop_btn.setToolTip("这个项目没在运行，没有可停止的东西")
-
-    # -- 并行状态 -----------------------------------------------------------
-    def set_parallel(self, active, pending=False):
-        """active=已在并行组里，pending=点了一次正等相邻的那张。"""
-        self._parallel = bool(active)
-        self._parallel_pending = bool(pending) and not active
-        self.parallel_btn.blockSignals(True)
-        self.parallel_btn.setChecked(self._parallel or self._parallel_pending)
-        self.parallel_btn.blockSignals(False)
-        if self._parallel:
-            text, tip = "并行中", "已与相邻项目同时运行，再点一次取消"
-        elif self._parallel_pending:
-            text, tip = "待配对", "再点相邻的另一张卡的「并行」按钮即可组成一组"
-        else:
-            text, tip = "并行", "与相邻的项目同时运行：两张相邻的卡各点一次"
-        self.parallel_btn.setText(text)
-        self.parallel_btn.setToolTip(tip)
-
-    def is_parallel(self):
-        return self._parallel
-
-    def is_parallel_pending(self):
-        return self._parallel_pending
-
-    # -- 拖动排序 -----------------------------------------------------------
-    def eventFilter(self, obj, ev):
-        if obj is self.drag_handle:
-            if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
-                self._press_pos = ev.globalPosition().toPoint()
-                self._dragging = False
-                return True
-            if ev.type() == QEvent.MouseMove and self._press_pos is not None:
-                pos = ev.globalPosition().toPoint()
-                if not self._dragging:
-                    delta = pos - self._press_pos
-                    if delta.manhattanLength() >= self.DRAG_THRESHOLD:
-                        self._dragging = True
-                        self.drag_handle.setCursor(Qt.ClosedHandCursor)
-                        self.drag_started.emit(self.key)
-                if self._dragging:
-                    self.drag_moved.emit(self.key, pos)
-                return True
-            if ev.type() == QEvent.MouseButtonRelease and self._press_pos is not None:
-                was_dragging = self._dragging
-                self._press_pos = None
-                self._dragging = False
-                self.drag_handle.setCursor(Qt.OpenHandCursor)
-                if was_dragging:
-                    self.drag_finished.emit(self.key)
-                return True
-        return super().eventFilter(obj, ev)
-
-    def apply_spec(self, spec, color=None, on_gui=_UNSET):
-        """注册表里这个项目的显示名/颜色/gui 入口改了之后刷新卡片。
-
-        历史缺陷：_reload_registry 只补新增卡片、删多余卡片，已存在的卡片一律
-        沿用构造时的 spec——用户在「项目注册表」里改了 display_name 再保存，
-        左侧导航和副标题都变了，项目卡上的名字还是旧的，看起来像没保存成功。
-        颜色同理（settings.yaml 的 gui.project_colors 改完要跟着变）；
-        「界面」按钮也一样，gui 段被删掉后按钮还留着，点下去照样去拉起一个
-        已经没有界面入口的进程。
-        """
-        self.spec = spec or {}
-        display_name = str(self.spec.get("display_name", self.key))
-        short = display_name.split("（")[0]
-        if self.name_label.text() != short:
-            self.name_label.setText(short)
-        self.name_label.setToolTip(display_name if display_name != short else "")
-        if on_gui is not _UNSET:
-            self.on_gui = on_gui
-        self.gui_btn.setVisible(self.on_gui is not None)
-        if color and color != self.color:
-            self.color = color
-            self.accent.setStyleSheet("background: {0}; border-radius: 2px;".format(color))
-        # enabled 也可能在注册表里被改（false → true），刷新时要跟着恢复/置灰
-        self._apply_enabled()
-
-    def update_state(self, run):
-        status = run.get("status", "pending") if run else "pending"
-        if not self.is_enabled() and (run is None or status not in ("running", "hang")):
-            # 禁用的项目本来就不会被链启动。这里必须放在最前面：注册表里刚改成
-            # enabled: false 时，runs 里往往还留着上一次的 failed/success 记录，
-            # 若按 run 渲染，卡片会一直写「失败」，把「已禁用」这条唯一线索藏住
-            # （实测：禁用后卡片仍显示「失败 / exit=-2 | 需要管理员权限…」）。
-            # 只有它此刻真的还在跑（running/hang）才让 run 优先显示；pending
-            # 说明「还没启动」，禁用项目永远不会迎来那一轮，同样让位给「已禁用」。
-            # 还在跑时把 busy 传下去，「停止」按钮要留着——取消勾选不会杀掉已启动的进程。
-            self._apply_enabled(busy=bool(run) and status in ("running", "hang"))
-            return
-        # 「在跑」= pending/running/hang 这三种都还没收尾（hang 卡死时更要能点停止）。
-        # 用它决定启动/停止按钮谁可点：跑起来之后「启动」置灰、「停止」亮起。
-        self._apply_buttons(busy=bool(run) and status in BUSY_STATUSES)
-        palette = _theme_status_colors()
-        color = palette.get(status, palette["pending"])
-        # 运行中/卡死时状态点呼吸脉冲（卡死闪得更快）
-        period = 1.1 if status == "hang" else 1.6
-        self.dot.set_state(color, pulse=status in ("running", "hang"), period=period)
-        # 状态文字只在真的变了才写（_set_status_text 自己比对缓存）：_poll 每
-        # 300ms 对每张卡调一次 update_state，setText/setStyleSheet 都会让 Qt
-        # 重算样式，全量重写一遍纯属无效工作（实测空转 20 轮打了 100 次
-        # setStyleSheet、3.0ms/轮）。
-        self._set_status_text(STATUS_TEXT.get(status, status), color)
-        if run is None:
-            self._set_text_if_changed(self.detail_label, "未运行")
-            self._set_text_if_changed(self.attempt_label, "")
-            return
-        parts = []
-        if run.get("pid"):
-            parts.append("pid={0}".format(run["pid"]))
-        if run.get("exit_code") is not None:
-            parts.append("exit={0}".format(run["exit_code"]))
-        if run.get("last_message"):
-            parts.append(run["last_message"][:110])
-        # 兜底文案必须跟状态走：历史缺陷是无条件写「运行中...」，于是排队中的
-        # 卡片（status=pending、还没有 pid/exit/message）也显示成「等待 / 运行中...」，
-        # 状态行和详情行互相矛盾，用户以为项目已经在跑。
-        detail = " | ".join(parts) if parts else STATUS_DETAIL_FALLBACK.get(status, "")
-        self._set_text_if_changed(self.detail_label, detail)
-        self._set_text_if_changed(self.attempt_label, "尝试 {0} 次".format(run.get("attempt", 1)))
+    icon = QIcon(pix)
+    _APP_ICON_CACHE[norm] = icon
+    return icon
 
 
 class MainWindow(QMainWindow):
@@ -603,6 +244,9 @@ class MainWindow(QMainWindow):
     # 过渡的合适值，但拖动时每次鼠标移动都会重启一轮，160ms 追不上手速，邻居
     # 看起来像「松手才变」；缩到 90ms 才跟手，同时保留了滑动感而非瞬移。
     DRAG_ANIM_MS = 90
+    # 响应式断点：< 820px 左侧导航自动收缩为 56px 纯图标栏；< 640px 工具栏切换纵向堆叠
+    COMPACT_NAV_WIDTH = 820
+    MOBILE_BREAKPOINT = 640
 
     def __init__(self):
         super().__init__()
@@ -612,7 +256,8 @@ class MainWindow(QMainWindow):
         self.no_widget = "--no-widget" in sys.argv
         custom_colors = (self.settings.get("gui") or {}).get("project_colors") or {}
         # 按开窗时读到的主题取色板（main() 已经在建窗口前 apply_theme 过）
-        self.project_colors = _theme_project_colors(custom_colors, self._active_theme())
+        self._applied_theme = self._active_theme()
+        self.project_colors = _theme_project_colors(custom_colors, self._applied_theme)
         self.setWindowTitle("Auto-AFK 一键挂机")
         # 默认尺寸按屏幕可用区域收敛：写死 1360x900 在 1366x768 的笔记本上
         # 会矮出屏幕 132px（窗口底边压到任务栏以下，底部按钮点不到），
@@ -627,32 +272,26 @@ class MainWindow(QMainWindow):
         self.bus.start_server()
         self.repair = RepairEngine(self.bus, self.settings)
         self.supervisor = Supervisor(self.bus, settings=self.settings, repair=self.repair, on_change=self._on_change)
-        self.cards = {}
-        # 总览页里被「移除」掉的项目（只是不显示，注册表里仍在）。
-        # 单独存一份到 settings 的 gui.hidden_projects，设置页能把它们放回来——
-        # 直接删注册表里的项目太重了，用户常常只是想暂时收起两个。
-        # 写成 "BAAH"（标量）时旧代码会迭代出 ['B','A','A','H']，等于什么都没隐藏，
-        # 且一个字都不报——见 afk_core/listval.py。
-        self._hidden_projects = listval.as_str_list(
-            (self.settings.get("gui") or {}).get("hidden_projects"),
-            what="gui.hidden_projects",
-        )
-        # 并行组：与 chain.parallel_blocks 同步，卡片之间的连线按它画
-        self._parallel_blocks = self._read_parallel_blocks()
-        # 点了「并行」但还没配成对的那张卡
-        self._parallel_pending = None
-        self._drag_key = None
-        # 拖动时「光标在卡片内的落点」，第一次移动时确定后保持不动
-        self._drag_grab = None
+        self._registry_cache = config.registry()
         self._did_intro = False
         self._last_chain_for_completion = None
         self._last_done_today = None
+        self._last_chain_busy = None
+        self._ts_cache_sec = -1
+        self._ts_cache_str = ""
+        self._narrow_mode = False
+        # 懒加载的次级页面实例（「运行顺序」「项目配置」「设置 + 高级设置」首屏不实例化，
+        # 切页或访问对应 property 时才挂载进 stack，降低冷启动耗时与控件树体积）
+        self._order_slot = None
+        self._order_page_inst = None
+        self._projects_slot = None
+        self._projects_page_inst = None
+        self._settings_slot = None
+        self._settings_page_inst = None
+        self._advanced_inst = None
         self.event_buffer = deque(maxlen=5000)
-        # 洪峰期间是否有日志被跳过不画（累积条数 + 上次提示时间，用于节流）
         self._skipped_since_notice = 0
         self._skip_notice_at = 0.0
-        # settings.yaml 里 schedule.time 写坏时的原文（None 表示正常；空串也
-        # 算坏值，所以不能用空串当「正常」哨兵），见 _parse_schedule_time。
         self._bad_schedule_time = None
         self._build_ui()
         self._build_tray()
@@ -740,24 +379,6 @@ class MainWindow(QMainWindow):
         elif (self.settings.get("gui", {}) or {}).get("autostart_chain_on_launch"):
             QTimer.singleShot(2000, self.start_chain)
 
-        # 静默启动勾选的项目界面（原生独立打开，只拉进程、不嵌入）
-        # 注册表只读一次：这段原本在列表推导里连调 config.registry()，每个候选
-        # key 迭代两次、整体再读两次。registry() 每次都要重读并重新解析
-        # afk_projects.yaml（走 C 加速后仍要 1.2ms），勾了 5 个项目就是
-        # 十几次无谓读盘，开窗时多花十几毫秒。
-        registry_projects = config.registry().get("projects") or {}
-        # 同上：写成 "BAAH" 会被逐字符迭代，勾选框一个都匹配不上，用户以为设置丢了。
-        silent_keys = [
-            k for k in listval.as_str_list(
-                (self.settings.get("gui") or {}).get("silent_open_projects"),
-                what="gui.silent_open_projects",
-            )
-            if k in registry_projects and registry_projects.get(k, {}).get("gui")
-        ]
-        if silent_keys:
-            self._append_log("core", "info", "启动时打开项目界面: {0}".format(", ".join(silent_keys)))
-            QTimer.singleShot(3000, lambda: self._open_silent_pages(silent_keys))
-
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("central")
@@ -779,7 +400,8 @@ class MainWindow(QMainWindow):
         # 一律由卡片上的「界面」按钮用原生方式独立打开。
         self.nav = NavRail()
         self.nav.add_item("overview", "总览", icon="home")
-        self.nav.add_item("projects", "项目状态", icon="status")
+        self.nav.add_item("order", "运行顺序", icon="order")
+        self.nav.add_item("projects", "项目配置", icon="status")
         self.nav.add_item("settings", "设置", icon="settings")
         self.nav.finish()
         self.nav.navigate.connect(self._navigate)
@@ -791,66 +413,93 @@ class MainWindow(QMainWindow):
 
         overview = QWidget()
         overview.setObjectName("central")
+        self._overview_page = overview
         root = QVBoxLayout(overview)
-        root.setContentsMargins(14, 12, 14, 10)
+        root.setContentsMargins(16, 12, 16, 10)
         root.setSpacing(12)
+        self._overview_layout = root
 
         header = QFrame()
         header.setObjectName("header")
         header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(18, 14, 18, 12)
-        header_layout.setSpacing(10)
+        header_layout.setContentsMargins(18, 13, 18, 11)
+        header_layout.setSpacing(9)
 
         top = QHBoxLayout()
         top.setSpacing(12)
+        self._header_top_layout = top
         logo = QLabel()
-        logo.setPixmap(make_icon().pixmap(40, 40))
+        logo.setPixmap(make_icon().pixmap(36, 36))
+        self._header_logo = logo
         title_box = QVBoxLayout()
-        title_box.setSpacing(0)
+        title_box.setSpacing(1)
         title = QLabel("Auto-AFK")
         title.setObjectName("title")
         # 副标题列出全部项目名，注册表里名字一长就把窗口最小宽度顶出去
         # （实测 1409px）；用 ElidedLabel 让它按可用宽度裁，完整文本进 tooltip。
         _subtitle_text = self._subtitle_text()
-        subtitle = ElidedLabel(_subtitle_text, min_width=120)
+        subtitle = ElidedLabel(_subtitle_text, min_width=100)
         subtitle.setObjectName("subtitle")
         subtitle.setToolTip(_subtitle_text)
         # 存引用：注册表改过之后副标题要跟着重新生成（项目数量变了）
         self._subtitle_label = subtitle
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        top.addWidget(logo)
-        top.addLayout(title_box)
-        top.addStretch(1)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(11)
+        brand_row.addWidget(logo)
+        brand_row.addLayout(title_box, 1)
+        top.addLayout(brand_row, 1)
+
+        primary_actions = QHBoxLayout()
+        primary_actions.setSpacing(8)
         self.chain_pill = AnimatedPill("空闲", _theme_chain_colors()["idle"])
         self.chain_btn = AnimatedButton("一键挂机", variant="primary")
         self.chain_btn.setObjectName("primary")
-        add_shadow(self.chain_btn, alpha=120, blur=18, dy=3)
+        add_shadow(self.chain_btn, alpha=105, blur=16, dy=2)
         self.stop_all_btn = AnimatedButton("全部停止", variant="danger")
         self.stop_all_btn.setObjectName("danger")
-        top.addWidget(self.chain_pill)
-        top.addWidget(self.chain_btn)
-        top.addWidget(self.stop_all_btn)
+        primary_actions.addWidget(self.chain_pill)
+        primary_actions.addWidget(self.chain_btn)
+        primary_actions.addWidget(self.stop_all_btn)
+        top.addLayout(primary_actions)
         header_layout.addLayout(top)
 
+        def _divider():
+            line = QFrame()
+            line.setObjectName("toolbarDivider")
+            line.setFixedHeight(16)
+            return line
+
         controls = QHBoxLayout()
-        controls.setSpacing(8)
+        controls.setSpacing(6)
+        self._header_controls_layout = controls
+        tools_group = QHBoxLayout()
+        tools_group.setSpacing(6)
         self.doctor_btn = AnimatedButton("环境自检")
         self.patch_btn = AnimatedButton("校验补丁")
         self.open_logs_btn = AnimatedButton("打开日志")
         self.open_configs_btn = AnimatedButton("打开配置")
         self.update_btn = AnimatedButton("立即更新")
         self.mumu_btn = AnimatedButton("更新MuMu")
+        div1, div2 = _divider(), _divider()
+        self._toolbar_dividers = (div1, div2)
         for widget in (
             self.doctor_btn,
             self.patch_btn,
+            div1,
             self.open_logs_btn,
             self.open_configs_btn,
+            div2,
             self.update_btn,
             self.mumu_btn,
         ):
-            controls.addWidget(widget)
-        controls.addStretch(1)
+            tools_group.addWidget(widget)
+        tools_group.addStretch(1)
+        controls.addLayout(tools_group, 1)
+
+        switches_group = QHBoxLayout()
+        switches_group.setSpacing(8)
         self.pre_run_check = QCheckBox("运行前更新")
         pre_cfg = self.settings.get("pre_run", {}) or {}
         self.pre_run_check.setChecked(bool(pre_cfg.get("enabled", True)))
@@ -864,149 +513,59 @@ class MainWindow(QMainWindow):
         self._sync_schedule_tooltip()
         self.schedule_check.toggled.connect(self._toggle_schedule)
         self.schedule_time.timeChanged.connect(self._toggle_schedule)
-        controls.addWidget(self.pre_run_check)
-        controls.addWidget(self.schedule_check)
-        controls.addWidget(self.schedule_time)
+        switches_group.addWidget(self.pre_run_check)
+        switches_group.addWidget(self.schedule_check)
+        switches_group.addWidget(self.schedule_time)
+        controls.addLayout(switches_group)
         header_layout.addLayout(controls)
         root.addWidget(header)
 
-        # 标题不叫「项目状态」：左侧导航里已经有一页叫「项目状态」（版本/仓库/
-        # 参数汇总），这里放的是可操作的项目卡片，重名会让用户以为点错了页。
-        cards_title = QLabel("挂机项目")
-        cards_title.setObjectName("sectionTitle")
-        root.addWidget(cards_title)
-        # 用 FlowLayout 而非 QHBoxLayout：5 张卡横排会把窗口最小宽度顶到 1592px，
-        # 1366/1440 宽的笔记本上窗口撑出屏幕。流式布局按可用宽度自动折行；
-        # 外层 FlowHost 负责把「折成几行就有多高」报给父布局，否则第二行会被
-        # 画到下面的页签上面（窄窗口下实测重叠）。
-        # 横向间距 20 而不是 12：并行连线要画在两张卡的缝隙里，缝隙只有 12px
-        # 时连线两端的光环会叠在一起、看不出是「一条线连着两张卡」。20px 下
-        # 连线本体有 20px 以上，发光与能量脉冲都放得下。
-        cards_host = FlowHost(h_spacing=20, v_spacing=12)
-        cards_row = cards_host.flow()
-        self.cards_host = cards_host
-        # 卡片之间画并行连线的覆盖层：挂在 cards_host 上、跟它一样大，
-        # 鼠标事件穿透。放在这里而不是卡片上，是因为跨卡片的线会被卡片边界裁掉。
-        self.links = ParallelLinks(cards_host)
-        self.links.set_color(links_color())
-        # 卡片区宽度有两种变化路径：一种是窗口被拖动（MainWindow.resizeEvent 会
-        # 调 _sync_cards_height），另一种是滚动条出现/消失、或卡片增删导致的
-        # 「宿主自己变宽变窄」——后者不经过主窗口，谁也不通知连线层。实测
-        # 1360x900 下宿主从 1122 变到 1136 后，连线层还停在 1122，最右列卡片
-        # 的后 14px 落在浮层之外（弧线起点被裁掉）。挂个钩子由宿主自己报。
-        cards_host.set_resize_hook(lambda: self.links.setGeometry(cards_host.rect()))
-        for key, spec in self._ordered_project_items():
-            if key in self._hidden_projects:
-                continue
-            card = ProjectCard(
-                key, spec, self._project_color(key),
-                self.start_project, self.stop_project, self.show_project_logs,
-                on_gui=self.open_project_page if spec.get("gui") else None,
-                on_parallel=self.toggle_parallel,
-                on_remove=self.hide_card,
-            )
-            self.cards[key] = card
-            cards_row.addWidget(card)
-            card.drag_started.connect(self._on_card_drag_started)
-            card.drag_moved.connect(self._on_card_drag_moved)
-            card.drag_finished.connect(self._on_card_drag_finished)
-        # 卡片区可滚动：卡片是等宽定宽的，窗口窄时折成两行、矮屏上就没地方放了。
-        # 直接把它塞进 QVBoxLayout 会把主窗口最小高度顶到 821px——1366x768 的
-        # 笔记本（可用 728）上窗口底部按钮直接掉出屏幕。套一层滚动区后最小高度
-        # 只剩一行的量，空间够时仍然完整显示不出现滚动条。
-        cards_scroll = CardsScrollArea()
-        cards_scroll.setObjectName("cardsScroll")
-        cards_scroll.setWidgetResizable(True)
-        cards_scroll.setFrameShape(QFrame.NoFrame)
-        cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        cards_scroll.setMinimumHeight(CARDS_MIN_HEIGHT)
-        cards_scroll.setWidget(cards_host)
-        enable_smooth_scroll(cards_scroll)
-        self.cards_scroll = cards_scroll
-        root.addWidget(cards_scroll, 0)
+        stage_title = QLabel("运行状态")
+        stage_title.setObjectName("sectionTitle")
+        root.addWidget(stage_title)
+        self.run_stage = RunStageWidget()
+        self.run_stage.set_gui_probe(self._can_open_gui)
+        self.run_stage.stop_requested.connect(self.stop_project)
+        self.run_stage.gui_requested.connect(self.open_project_page)
+        self.run_stage.logs_requested.connect(self.show_project_logs)
+        self.run_stage.open_order_requested.connect(lambda: self._navigate("order"))
+        root.addWidget(self.run_stage, 0)
 
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
         splitter.setMinimumHeight(SPLITTER_MIN_HEIGHT)
         self._log_splitter = splitter
-        # 实时日志直接铺在总览页下方。历史：这里原先是 AnimatedTabWidget，页签
-        # 「实时日志 / 错误报告 / 项目注册表 / 设置 / 修复规则 / 环境自检」六页
-        # 挤在一条栏里（2026-11-23 用户反馈：这排当导航太重）。后五项已经收进
-        # 设置页的「高级设置」，只剩日志一项，再套一层页签纯属白占一行高度。
-        log_panel = QWidget()
-        self.log_panel = log_panel
-        log_layout = QVBoxLayout(log_panel)
-        log_layout.setContentsMargins(10, 10, 10, 10)
-        log_layout.setSpacing(8)
-        log_controls = QHBoxLayout()
-        log_controls.setSpacing(8)
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItem("全部项目", "")
-        for key in (config.registry().get("projects", {}) or {}).keys():
-            self.filter_combo.addItem(key, key)
-        self.filter_combo.addItem("core", "core")
-        self.filter_combo.currentIndexChanged.connect(self._rerender_log)
-        self.autoscroll_check = QCheckBox("自动滚动")
-        self.autoscroll_check.setChecked(True)
-        clear_btn = AnimatedButton("清空显示")
-        clear_btn.clicked.connect(self._clear_log)
-        log_controls.addWidget(QLabel("过滤:"))
-        log_controls.addWidget(self.filter_combo)
-        log_controls.addWidget(self.autoscroll_check)
-        log_controls.addWidget(clear_btn)
-        log_controls.addStretch(1)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(8000)
-        self.log_view.setFont(QFont("Consolas", 9))
-        enable_smooth_scroll(self.log_view)
-        log_layout.addLayout(log_controls)
-        log_layout.addWidget(self.log_view)
 
-        splitter.addWidget(log_panel)
+        auto_open_logs = bool((self.settings.get("gui") or {}).get("auto_open_running_logs", True))
+        self.log_board = MultiColumnLogBoard(auto_open=auto_open_logs)
+        self.log_board.set_column_providers(self._project_color, self._backfill_lines_for)
+        self.log_board.auto_open_toggled.connect(self._toggle_auto_open_logs)
+        self.log_board.rerender_requested.connect(self._rerender_log)
+        self._sync_log_catalog()
+        self.log_board.open_column(CORE_KEY, CORE_TITLE, self._project_color(CORE_KEY))
+
+        splitter.addWidget(self.log_board)
         root.addWidget(splitter, 1)
-
 
         self.stack.addWidget(overview)  # index 0 = 总览
 
-        # -- 项目状态页 ------------------------------------------------------------
-        self.projects_page = ProjectStatusPage(
-            registry_getter=lambda: config.registry(),
-            color_getter=self._project_color,
-            log_fn=self._append_log,
-        )
-        self.stack.addWidget(self.projects_page)
+        # -- 路由级懒加载占位槽（首屏只构建总览页） ----------------------------
+        self._order_slot = QWidget()
+        self._order_slot.setObjectName("central")
+        self.stack.addWidget(self._order_slot)  # index 1 = 运行顺序（懒加载）
 
-        # -- 设置页 ----------------------------------------------------------------
-        # 高级设置（错误报告 / 项目注册表 / 设置原文 / 修复规则 / 环境自检）原来
-        # 是总览页下的五个页签，用户要求整条页签栏去掉、只留实时日志，其余搬进
-        # 设置。面板要拿主窗口的回调（保存校验、自检、打开目录），所以先建面板
-        # 再把它交给 SettingsPage，由它挂在页面末尾。
-        self.advanced = AdvancedPanel(
-            save_text=self._save_text,
-            load_text=self._load_text,
-            open_path=self._open_path,
-            run_doctor=self._run_doctor_task,
-        )
-        self.settings_page = SettingsPage(log_fn=self._append_log, advanced=self.advanced)
-        self.settings_page.changed.connect(self._on_settings_changed)
-        self.settings_page.theme_changed.connect(self._on_theme_changed)
-        self.settings_page.restore_requested.connect(self.restore_card)
-        self.settings_page.project_added.connect(self._on_project_added)
-        self.stack.addWidget(self.settings_page)
+        self._projects_slot = QWidget()
+        self._projects_slot.setObjectName("central")
+        self.stack.addWidget(self._projects_slot)  # index 2 = 项目配置（懒加载）
+
+        self._settings_slot = QWidget()
+        self._settings_slot.setObjectName("central")
+        self.stack.addWidget(self._settings_slot)  # index 3 = 设置（懒加载）
 
         self.nav.set_active("overview", animate=False)
         self.setCentralWidget(central)
 
-        # 开窗时把配置里已经存在的并行组画出来。历史缺陷：这里建完卡片就收工，
-        # 只有 _rebuild_cards()（换肤/重载注册表）才会刷新并行状态——于是上次
-        # 退出前设好的并行组，重开程序后卡片全写「并行」，连线也不画，看着像
-        # 并行设置丢了（其实 chain.parallel_blocks 还在，跑起来仍然是同时跑）。
-        self._sync_parallel_state()
-        # 手工编辑过 settings.yaml 的项目可能留着失效/互相重叠的并行块（拖散过、
-        # 或手动写了 A-B 与 B-C 两块）。不修剪的话界面与 supervisor 会各说各话，
-        # 而且每次跑链都刷一条「并行块已忽略」告警。只在真有改动时写盘。
-        self._prune_parallel_blocks()
+        self._update_run_stage(self.supervisor.status_snapshot())
 
         self.chain_btn.clicked.connect(self.start_chain)
         self.stop_all_btn.clicked.connect(self.supervisor.stop_all)
@@ -1017,28 +576,171 @@ class MainWindow(QMainWindow):
         self.update_btn.clicked.connect(self.run_updates)
         self.mumu_btn.clicked.connect(self.run_mumu_updater)
 
+    # -- 路由级懒加载属性访问器（兼容直接取 window.order_page / projects_page / settings_page / advanced） --
+    def _ensure_order_page(self):
+        if self._order_page_inst is not None:
+            return self._order_page_inst
+        page = RunOrderPage(
+            registry_getter=lambda: config.registry(),
+            settings_getter=lambda: config.settings(),
+            color_getter=self._project_color,
+            log_fn=self._append_log,
+            runs_getter=lambda: (self.supervisor.status_snapshot().get("runs") or {}),
+        )
+        page.order_changed.connect(self._on_order_changed)
+        page.start_requested.connect(self.start_project)
+        page.stop_requested.connect(self.stop_project)
+        page.logs_requested.connect(self.show_project_logs)
+        page.gui_requested.connect(self.open_project_page)
+        self._order_page_inst = page
+        if self._order_slot is not None:
+            idx = self.stack.indexOf(self._order_slot)
+            if idx >= 0:
+                was_current = self.stack.currentWidget() is self._order_slot
+                self.stack.removeWidget(self._order_slot)
+                self._order_slot.deleteLater()
+                self._order_slot = None
+                self.stack.insertWidget(idx, page)
+                if was_current:
+                    self.stack.setCurrentWidget(page)
+        return page
+
+    def _ensure_projects_page(self):
+        if self._projects_page_inst is not None:
+            return self._projects_page_inst
+        page = ProjectConfigPage(
+            registry_getter=lambda: config.registry(),
+            color_getter=self._project_color,
+            log_fn=self._append_log,
+            bus=self.bus,
+        )
+        page.projects_changed.connect(self._reload_registry)
+        page.open_gui_requested.connect(self.open_project_page)
+        page.open_path_requested.connect(self._open_path)
+        self._projects_page_inst = page
+        if self._projects_slot is not None:
+            idx = self.stack.indexOf(self._projects_slot)
+            if idx >= 0:
+                was_current = self.stack.currentWidget() is self._projects_slot
+                self.stack.removeWidget(self._projects_slot)
+                self._projects_slot.deleteLater()
+                self._projects_slot = None
+                self.stack.insertWidget(idx, page)
+                if was_current:
+                    self.stack.setCurrentWidget(page)
+        return page
+
+    def _ensure_advanced(self):
+        if self._advanced_inst is None:
+            self._advanced_inst = AdvancedPanel(
+                save_text=self._save_text,
+                load_text=self._load_text,
+                open_path=self._open_path,
+                run_doctor=self._run_doctor_task,
+            )
+        return self._advanced_inst
+
+    def _ensure_settings_page(self):
+        if self._settings_page_inst is not None:
+            return self._settings_page_inst
+        adv = self._ensure_advanced()
+        page = SettingsPage(log_fn=self._append_log, advanced=adv, bus=self.bus)
+        page.changed.connect(self._on_settings_changed)
+        page.theme_changed.connect(self._on_theme_changed)
+        page.open_path_requested.connect(self._open_path)
+        page.reset_window_size_requested.connect(self._reset_window_size)
+        self._settings_page_inst = page
+        if self._settings_slot is not None:
+            idx = self.stack.indexOf(self._settings_slot)
+            if idx >= 0:
+                was_current = self.stack.currentWidget() is self._settings_slot
+                self.stack.removeWidget(self._settings_slot)
+                self._settings_slot.deleteLater()
+                self._settings_slot = None
+                self.stack.insertWidget(idx, page)
+                if was_current:
+                    self.stack.setCurrentWidget(page)
+        return page
+
+    @property
+    def order_page(self):
+        return self._ensure_order_page()
+
+    @order_page.setter
+    def order_page(self, value):
+        self._order_page_inst = value
+
+    @property
+    def projects_page(self):
+        return self._ensure_projects_page()
+
+    @projects_page.setter
+    def projects_page(self, value):
+        self._projects_page_inst = value
+
+    @property
+    def advanced(self):
+        self._ensure_settings_page()
+        return self._advanced_inst
+
+    @advanced.setter
+    def advanced(self, value):
+        self._advanced_inst = value
+
+    @property
+    def settings_page(self):
+        return self._ensure_settings_page()
+
+    @settings_page.setter
+    def settings_page(self, value):
+        self._settings_page_inst = value
+
+    # 兼容直接访问旧字段的调用点
+    @property
+    def log_view(self):
+        return self.log_board.log_view
+
+    @property
+    def cards(self):
+        return self._order_page_inst.cards if self._order_page_inst is not None else {}
+
+    @property
+    def cards_host(self):
+        return self._order_page_inst.cards_host if self._order_page_inst is not None else None
+
+    @property
+    def links(self):
+        return self._order_page_inst.links if self._order_page_inst is not None else None
+
     def _navigate(self, key):
-        """导航栏切换页面（总览 / 项目状态 / 设置）。"""
+        """导航栏切换页面（总览 / 运行顺序 / 项目配置 / 设置）。"""
         page = None
         if key == "overview":
             page = self.stack.widget(0)
+        elif key == "order":
+            already_built = self._order_page_inst is not None
+            page = self._ensure_order_page()
+            if already_built:
+                page.update_runs(self.supervisor.status_snapshot().get("runs"))
         elif key == "projects":
-            page = self.projects_page
-            page.reload()
+            already_built = self._projects_page_inst is not None
+            page = self._ensure_projects_page()
+            if already_built:
+                page.reload()
         elif key == "settings":
-            self.settings_page.reload_from_disk()
-            page = self.settings_page
+            already_built = self._settings_page_inst is not None
+            page = self._ensure_settings_page()
+            if already_built:
+                page.reload_from_disk()
         else:
             return
         if page is None:
             return
-        # 离开设置页时把防抖中的改动写掉：数值框改成「停止变动 400ms 后落盘」，
-        # 用户改完立刻切页/关窗口，未到期的改动不能丢。
-        settings_page = getattr(self, "settings_page", None)
+        settings_page = self._settings_page_inst
         if settings_page is not None and self.stack.currentWidget() is settings_page:
             settings_page.flush_pending()
         self.stack.setCurrentWidget(page)
-        self.nav.set_active(key, animate=False)
+        self.nav.set_active(key, animate=self.isVisible())
         fade_in_widget(page, duration=150)
 
     def open_project_page(self, key):
@@ -1066,481 +768,185 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=worker, daemon=True, name="afk-gui-" + key).start()
 
-    # -- 卡片顺序 / 归属 -------------------------------------------------------
+    # -- 运行顺序 / 总览舞台 / 多列日志桥接 -----------------------------------
     def _registry_projects(self):
-        return config.registry().get("projects", {}) or {}
+        return (self._registry_cache or config.registry()).get("projects", {}) or {}
 
-    def _ordered_project_items(self):
-        """按运行顺序（chain.order）列出 (key, spec)，未列出的垫底。
+    def _base_project_for(self, key):
+        text = str(key or CORE_KEY)
+        if text == CORE_KEY:
+            return CORE_KEY
+        entry = self.supervisor._task_entry_for(text) if hasattr(self, "supervisor") else None
+        if entry is not None:
+            return entry.get("project", text)
+        if "#" in text:
+            return text.split("#", 1)[0]
+        return text
 
-        注册表里的键顺序是 yaml 的书写顺序，不等于运行顺序——chain.order 才是
-        supervisor 排程的依据（apply_chain_order）。总览上卡片的先后必须和它
-        一致，否则用户拖完卡片看到的顺序和真正跑的顺序是两套。
-        """
+    def _can_open_gui(self, key):
+        base = self._base_project_for(key)
+        spec = self._registry_projects().get(base) or {}
+        return bool(spec.get("gui"))
+
+    def _task_display_info(self, task_id):
+        """返回 (短显示名, 配置名)；同时兼容任务 ID（如 BAAH#2）和原始项目键。"""
         projects = self._registry_projects()
-        order = listval.as_str_list(
-            (self.settings.get("chain") or {}).get("order"), what="chain.order"
-        )
-        rank = {k: i for i, k in enumerate(order)}
-        keys = sorted(projects.keys(), key=lambda k: rank.get(k, len(rank)))
-        return [(k, projects[k]) for k in keys]
+        tasks = project_ops.load_tasks(self.settings, {"projects": projects})
+        entry = next((t for t in tasks if t["id"] == task_id), None)
+        base = entry["project"] if entry is not None else self._base_project_for(task_id)
+        spec = projects.get(base) or {}
+        short = str(spec.get("display_name", base)).split("（")[0] or base
+        cfg = (entry or {}).get("config") or ""
+        if not cfg:
+            uses_inst = base == "MaaEnd" or any("{instance}" in str(a) for a in (spec.get("args") or []))
+            cfg = str(spec.get("instance" if uses_inst else "config_name") or "")
+        if task_id != base and "#" in str(task_id):
+            short = "{0} #{1}".format(short, str(task_id).split("#", 1)[1])
+        return short, cfg
 
-    def _save_chain_order(self, keys, *, log_text=None):
-        """把卡片顺序写回 settings.yaml 的 chain.order。"""
-        keys = [str(k) for k in keys]
+    def _log_col_info(self, key):
+        if key == CORE_KEY:
+            return CORE_TITLE, self._project_color(CORE_KEY)
+        short, cfg = self._task_display_info(key)
+        title = "{0} ({1})".format(short, cfg) if cfg else short
+        return title, self._project_color(key)
 
+    def _status_pair(self, status):
+        palette = _theme_status_colors()
+        return STATUS_TEXT.get(status, status), palette.get(status, palette["pending"])
+
+    def _sync_log_catalog(self):
+        board = getattr(self, "log_board", None)
+        if board is None:
+            return
+        projects = self._registry_projects()
+        tasks = project_ops.load_tasks(self.settings, {"projects": projects})
+        items = []
+        seen = set()
+        for task in tasks:
+            tid = task["id"]
+            if tid in seen:
+                continue
+            seen.add(tid)
+            items.append((tid, self._log_col_info(tid)[0]))
+        for key, spec in projects.items():
+            if key in seen:
+                continue
+            seen.add(key)
+            short = str((spec or {}).get("display_name", key)).split("（")[0] or key
+            items.append((key, short))
+        board.set_catalog(items)
+
+    def _backfill_lines_for(self, key):
+        board = getattr(self, "log_board", None)
+        if board is None:
+            return []
+        known_cols = set(board.column_keys()) | {key}
+        lines = []
+        for event in self.event_buffer:
+            if not board.accepts(event):
+                continue
+            proj = str(event.get("project") or CORE_KEY)
+            if key == CORE_KEY:
+                if proj != CORE_KEY and proj in known_cols:
+                    continue
+            elif proj != key:
+                continue
+            lines.append(self._event_to_html(event))
+        return lines[-LOG_RERENDER_LIMIT:]
+
+    def _toggle_auto_open_logs(self, checked):
         def mutate(settings):
-            chain = settings.setdefault("chain", {})
-            if not isinstance(chain, dict):
-                chain = {}
-                settings["chain"] = chain
-            chain["order"] = list(keys)
+            settings.setdefault("gui", {})["auto_open_running_logs"] = bool(checked)
 
         self._mutate_settings(mutate)
-        if log_text:
-            self._append_log("core", "info", log_text)
-        self._sync_parallel_state()
+        self._append_log("core", "info", "项目运行时自动开启日志列: {0}".format("开" if checked else "关"))
 
-    def _apply_card_order(self, keys, animate=True):
-        """按给定 key 顺序重排卡片控件（不重建，保留运行状态与信号）。
+    def _on_order_changed(self):
+        self.settings = config.settings()
+        self.supervisor.settings = self.settings
+        self._sync_log_catalog()
+        self._update_run_stage(self.supervisor.status_snapshot())
+        if self._settings_page_inst is not None:
+            self._settings_page_inst.reload_from_disk()
 
-        animate=True 时位置变化走补间（160ms 缓出）而不是瞬移；拖动过程中
-        每次 reorder 都 animate，松手那一次用 animate=False 收尾——否则松手
-        的落位会被动画再拖一遍，看起来像「弹了一下」。
-        """
-        host = getattr(self, "cards_host", None)
-        cards = getattr(self, "cards", {}) or {}
-        if host is None:
-            return
-        ordered = [cards[k] for k in keys if k in cards]
-        ordered += [c for k, c in cards.items() if k not in keys]
-        host.set_order(ordered)
-        if animate:
-            host.animate_next_layout()
-        self._sync_parallel_state()
-        self._sync_cards_height()
-
-    def hide_card(self, key):
-        """卡片上的 × —— 从总览收起（注册表不动，设置页可恢复）。"""
-        card = (getattr(self, "cards", {}) or {}).get(key)
-        if card is None:
-            return
-        hidden = [k for k in self._hidden_projects if k != key] + [key]
-
+    def _reset_window_size(self):
         def mutate(settings):
             gui_cfg = settings.setdefault("gui", {})
-            if not isinstance(gui_cfg, dict):
-                gui_cfg = {}
-                settings["gui"] = gui_cfg
-            gui_cfg["hidden_projects"] = list(hidden)
+            gui_cfg.pop("window_size", None)
 
-        self._hidden_projects = hidden
         self._mutate_settings(mutate)
-        # 并行组里如果有它，一并移除（不然连线指向一张不存在的卡）
-        self._parallel_blocks = [b for b in self._parallel_blocks if key not in b]
-        self._write_parallel_blocks()
-        flow = card.parentWidget()
-        host = getattr(self, "cards_host", None)
-        if host is not None:
-            host.flow().removeWidget(card)
-        elif flow is not None:
-            flow.layout().removeWidget(card)
-        card.setParent(None)
-        card.deleteLater()
-        self.cards.pop(key, None)
-        if self._parallel_pending == key:
-            self._parallel_pending = None
-        self._sync_parallel_state()
-        self._sync_cards_height()
-        page = getattr(self, "settings_page", None)
-        if page is not None:
-            page.reload_from_disk()
-        # 卡片上的 × 只是「从总览收起」，不会停掉正在跑的项目。历史缺陷：日志
-        # 一律写「已从总览移除 X（设置页可恢复）」，用户以为点了 × 就等于停掉，
-        # 实际上进程、窗口、占用的模拟器都还在——等它跑到卡死也没人知道去哪停。
-        run = (getattr(self, "supervisor", None) and self.supervisor.runs.get(key)) or None
-        if run is not None and not run.terminal:
-            self._append_log(
-                "core", "warn",
-                "{0} 仍在运行，只是从总览收起了；要停止请先在「设置 → 已隐藏的项目」"
-                "把它放回总览再点「停止」".format(key),
-            )
-        else:
-            self._append_log("core", "info", "已从总览移除 {0}（设置页可恢复）".format(key))
+        self._geometry_restoring = True
+        try:
+            self.resize(*_preferred_window_size())
+            self._fit_to_screen()
+        finally:
+            self._geometry_restoring = False
+        self._append_log("core", "info", "已重置为默认窗口尺寸")
 
-    def restore_card(self, key):
-        """把隐藏的项目放回总览（设置页「已隐藏的项目」用）。"""
-        if key in self._hidden_projects:
-            self._hidden_projects = [k for k in self._hidden_projects if k != key]
-
-            def mutate(settings):
-                gui_cfg = settings.setdefault("gui", {})
-                if not isinstance(gui_cfg, dict):
-                    gui_cfg = {}
-                    settings["gui"] = gui_cfg
-                gui_cfg["hidden_projects"] = list(self._hidden_projects)
-
-            self._mutate_settings(mutate)
-        self._reload_registry()
-
-    # -- 并行分组 -------------------------------------------------------------
-    def _read_parallel_blocks(self):
-        """从 chain.parallel_blocks 读出并行组。
-
-        写成 ``["A","B"]``（少一层列表）或 ``"A"`` 时旧代码整块丢掉、一个字不报，
-        用户点了「并行」保存后重开程序发现连线没了——见 afk_core/listval.py。
-        """
-        return listval.as_str_groups(
-            (self.settings.get("chain") or {}).get("parallel_blocks"),
-            what="chain.parallel_blocks",
+    def _update_run_stage(self, snapshot):
+        stage = getattr(self, "run_stage", None)
+        if stage is None:
+            return
+        projects = self._registry_projects()
+        tasks = [t["id"] for t in project_ops.load_tasks(self.settings, {"projects": projects}) if t.get("enabled", True)]
+        runs = (snapshot or {}).get("runs") or {}
+        queue = (snapshot or {}).get("chain_queue") or []
+        chain_status = (snapshot or {}).get("chain_status") or "idle"
+        stage.update_stage(
+            tasks=tasks,
+            runs=runs,
+            queue=queue,
+            chain_status=chain_status,
+            name_of=lambda k: self._task_display_info(k)[0],
+            config_of=lambda k: self._task_display_info(k)[1],
+            color_of=self._project_color,
+            status_of=self._status_pair,
         )
-
-    def _write_parallel_blocks(self, log_text=None):
-        blocks = [list(b) for b in self._parallel_blocks if len(b) >= 2]
-
-        def mutate(settings):
-            chain = settings.setdefault("chain", {})
-            if not isinstance(chain, dict):
-                chain = {}
-                settings["chain"] = chain
-            chain["parallel_blocks"] = blocks
-
-        self._mutate_settings(mutate)
-        if log_text:
-            self._append_log("core", "info", log_text)
-
-    def _card_index(self, key):
-        keys = [k for k in (getattr(self, "cards", {}) or {}).keys()]
-        host = getattr(self, "cards_host", None)
-        if host is not None:
-            widgets = host.ordered_widgets()
-            visible = [w.key for w in widgets if hasattr(w, "key")]
-            if key in visible:
-                return visible.index(key)
-        return keys.index(key) if key in keys else -1
 
     def visible_card_keys(self):
-        """总览上卡片当前的实际顺序（测试与内部逻辑都用它）。"""
-        host = getattr(self, "cards_host", None)
-        if host is not None:
-            return [w.key for w in host.ordered_widgets() if hasattr(w, "key")]
-        return list((getattr(self, "cards", {}) or {}).keys())
-
-    def _adjacent_pair(self, first, second):
-        """两张卡在**运行顺序与界面顺序**上都必须相邻，才能组成并行组。
-
-        「只能相邻」是用户明确要求：把不相邻的两个项目设成并行等于跳过中间
-        那个项目的先后约束，实际执行顺序会变得没法解释。所以两边都要紧挨着。
-        """
-        visible = self.visible_card_keys()
-        if first in visible and second in visible:
-            i, j = visible.index(first), visible.index(second)
-            return abs(i - j) == 1
-        order = listval.as_str_list(
-            (self.settings.get("chain") or {}).get("order"), what="chain.order"
-        )
-        if first in order and second in order:
-            return abs(order.index(first) - order.index(second)) == 1
-        return True
+        if self._order_page_inst is not None:
+            return self._order_page_inst.visible_card_keys()
+        return [t["id"] for t in project_ops.load_tasks(self.settings, self._registry_cache)]
 
     def parallel_groups(self):
-        """当前有效的并行组（组员都还显示着，且仍然是相邻的）。
-
-        历史缺陷：只检查组员「还显示着」，不检查是否仍然相邻。用户在总览上把
-        一张卡拖到别处之后，原本相邻的并行组被拆开了，界面照样显示「并行中」
-        并画着连线，但 supervisor 的 merge_parallel_blocks 会因为「项目之间
-        隔着别的项目」把整块作废——界面说同时跑，实际是顺序跑，用户看不出来。
-        这里按卡片当前顺序校验连续性，不连续的组直接不算数（连线也跟着消失）。
-        """
-        visible = self.visible_card_keys()
-        visible_set = set(visible)
-        groups = []
-        claimed = set()
-        for block in self._parallel_blocks:
-            members = [k for k in block if k in (getattr(self, "cards", {}) or {})]
-            if len(members) < 2 or not all(k in visible_set for k in members):
-                continue
-            indices = sorted(visible.index(k) for k in members)
-            if indices != list(range(indices[0], indices[0] + len(indices))):
-                continue
-            # 同一个项目不能同时在两个并行组里：supervisor 的 merge_parallel_blocks
-            # 遇到这种重叠会把后面的整块作废并告警（只认第一次出现的那块）。界面
-            # 若把两块都画成「并行中」，用户看到的是三张卡都亮着并行、实际只同时
-            # 跑两块中的第一块。这里同样只认先出现的那组，其余交给
-            # _prune_parallel_blocks() 从配置里清掉。
-            if claimed & set(members):
-                continue
-            claimed |= set(members)
-            # 按卡片顺序返回，连线才连相邻的那几张
-            groups.append(sorted(members, key=visible.index))
-        return groups
-
-    def _prune_parallel_blocks(self):
-        """把因为拖动/隐藏而不再相邻的并行组从配置里清掉。
-
-        parallel_groups() 已经会把不相邻的组判为无效（界面不画连线、不显示
-        「并行中」），但 chain.parallel_blocks 里还留着那一对。留着会有两个
-        后果：一是 supervisor 每次跑链都会告警「并行块已忽略」刷日志；二是
-        用户再点其中一张卡的「并行」会命中 toggle_parallel 的「已在某个组里
-        → 退出」分支，日志写「取消并行」，可界面上那张卡明明没在并行中。
-        """
-        blocks = self.parallel_groups()
-        kept = {tuple(sorted(g)) for g in blocks}
-        before = [list(b) for b in self._parallel_blocks]
-        dropped = [b for b in before if tuple(sorted(b)) not in kept]
-        if not dropped:
-            return
-        self._parallel_blocks = [list(g) for g in blocks]
-        self._write_parallel_blocks()
-        self._append_log(
-            "core", "warn",
-            "并行组已取消：{0} 里的项目不再相邻".format("、".join("+".join(b) for b in dropped)),
-        )
+        if self._order_page_inst is not None:
+            return self._order_page_inst.parallel_groups()
+        return []
 
     def toggle_parallel(self, key):
-        """卡片「并行」按钮：第一次点记下待配对，第二次点相邻的另一张组成一组。
-
-        已经有一组（A-B）并行时，再点第三张 C、然后点组边缘的 B，就并成
-        A-B-C 三张同时跑——用户要求「多项目并行同理」，不能只支持两张。
-        """
-        # 先把已经不相邻的失效组清掉：否则下面「已在某个组里 → 取消」的分支
-        # 会把一张界面上根本没显示「并行中」的卡当成在并行组里。
-        self._prune_parallel_blocks()
-        pending = self._parallel_pending
-
-        # -- 1. 「待配对的那张 + 这一张」→ 新建或扩展一组 --------------------
-        # 这一段必须排在下面的「已在组里 → 退出」之前。历史缺陷：A-B 已经并行
-        # 时点 C 再点 B，会先命中退出分支把 B 从 A-B 里摘掉、组里只剩 A 于是
-        # 整组作废——用户想让三张一起跑，结果一个并行都不剩，而且日志写的是
-        # 「取消并行」，看不出发生了什么。
-        if pending is not None and pending != key:
-            if not self._adjacent_pair(pending, key):
-                self._append_log(
-                    "core", "warn",
-                    "只能把相邻的两个项目设为并行：{0} 和 {1} 之间还隔着别的项目".format(pending, key),
-                )
-                self._parallel_pending = None
-                self._sync_parallel_state()
-                return
-            # 与已有组共享端点时合并成一组（A-B 之后再点 C 和 B，变成 A-B-C）
-            target = None
-            for block in self._parallel_blocks:
-                if pending in block or key in block:
-                    target = block
-                    break
-            if target is None:
-                self._parallel_blocks.append([pending, key])
-            else:
-                if pending not in target:
-                    target.append(pending)
-                if key not in target:
-                    target.append(key)
-                # 组内按卡片顺序排一次，连线才连相邻的
-                visible = self.visible_card_keys()
-                target.sort(key=lambda k: visible.index(k) if k in visible else 999)
-            self._parallel_pending = None
-            self._write_parallel_blocks(
-                log_text="并行：{0} 与 {1} 将同时运行".format(pending, key)
-            )
-            self._sync_parallel_state()
-            return
-
-        # -- 2. 没有待配对的卡：这一张若已在组里就退出该组 --------------------
-        if pending is None:
-            for block in list(self._parallel_blocks):
-                if key in block:
-                    block.remove(key)
-                    if len(block) < 2:
-                        self._parallel_blocks = [b for b in self._parallel_blocks if b is not block]
-                    self._parallel_pending = None
-                    self._write_parallel_blocks(
-                        log_text="取消并行：{0}".format(key)
-                    )
-                    # 组里剩下的成员可能因此不再相邻（A-B-C 去掉中间的 B，只剩
-                    # A 和 C，中间隔着 B）。那时整组都失效，界面上已经不显示
-                    # 「并行中」，配置里不能还留着一个 supervisor 会告警的块。
-                    self._prune_parallel_blocks()
-                    self._sync_parallel_state()
-                    return
-            self._parallel_pending = key
-            self._sync_parallel_state()
-            return
-
-        # -- 3. pending == key：用户又点了一次同一张 → 取消待配对 -------------
-        self._parallel_pending = None
-        self._sync_parallel_state()
-
-    def _sync_parallel_state(self):
-        """把并行组的视觉状态刷到卡片与连线层上。"""
-        groups = self.parallel_groups()
-        member_of = {}
-        for block in groups:
-            for key in block:
-                member_of[key] = block
-        for key, card in (getattr(self, "cards", {}) or {}).items():
-            active = key in member_of
-            card.set_parallel(active, pending=(self._parallel_pending == key))
-        links = getattr(self, "links", None)
-        host = getattr(self, "cards_host", None)
-        if links is None or host is None:
-            return
-        links.setGeometry(host.rect())
-        widgets = []
-        for block in groups:
-            widgets.append([self.cards.get(k) for k in block])
-        active = []
-        if self._parallel_pending and self._parallel_pending in self.cards:
-            active = [self.cards[self._parallel_pending]]
-        links.set_groups(widgets, active=active)
-        links.raise_()
-
-    # -- 卡片拖动排序 ---------------------------------------------------------
-    def _on_card_drag_started(self, key):
-        self._drag_key = key
-        card = (getattr(self, "cards", {}) or {}).get(key)
-        if card is None:
-            return
-        host = getattr(self, "cards_host", None)
-        # 拖动期间这张卡脱离排版（set_floating），由 _on_card_drag_moved 按
-        # 光标位置 move()；它空出来的格子由其他卡补上，用户才看得出在拖。
-        if host is not None:
-            host.set_floating(card)
-        self._drag_grab = None
-        card.setWindowOpacity(0.85)
-        card.raise_()
-
-    def _grab_offset(self, card, host, pos):
-        """光标落在卡片内的偏移（第一次移动时确定，之后保持，避免卡片跳一下）。
-
-        用「首次移动时的光标位置 - 卡片当前位置」而不是按下点：拖动阈值是 8px，
-        按下点早就丢了；而且实测按按下点算会让卡片先向左上跳 8px 再跟手。
-        """
-        if self._drag_grab is not None:
-            return self._drag_grab
-        local = card.mapFromParent(pos)
-        # 抓取点必须落在卡片自己身上：正常拖动时第一次 move 只挪了 8px（拖动
-        # 阈值），偏移一定在卡内；但「一次跳很远」的场景（光标已经在外面的
-        # 另一张卡上）算出来的偏移会大于卡片尺寸，pos - grab 直接变成负数，
-        # 卡片被夹到 (0,0) —— 用户看到的是「拖起来就弹回左上角」。
-        local.setX(max(0, min(local.x(), max(0, card.width() - 1))))
-        local.setY(max(0, min(local.y(), max(0, card.height() - 1))))
-        self._drag_grab = local
-        return local
-
-    def _on_card_drag_moved(self, key, global_pos):
-        """拖动中：卡片跟着光标走，同时按位置换顺序（邻居滑开让位）。"""
-        host = getattr(self, "cards_host", None)
-        cards = getattr(self, "cards", {}) or {}
-        if host is None:
-            return
-        pos = host.mapFromGlobal(global_pos)
-        moving = cards.get(key)
-        if moving is None:
-            return
-        # 1. 卡片本身跟随光标（被夹在宿主范围内，别拖出可视区）
-        grab = self._grab_offset(moving, host, pos)
-        x = pos.x() - grab.x()
-        y = pos.y() - grab.y()
-        x = max(0, min(x, max(0, host.width() - moving.width())))
-        y = max(0, min(y, max(0, host.height() - moving.height())))
-        if moving.pos() != QPoint(x, y):
-            moving.move(x, y)
-
-        # 2. 按光标落在哪张卡上决定插入位置（浮起的那张不参与比较）
-        widgets = [w for w in host.ordered_widgets() if hasattr(w, "key") and w is not moving]
-        if not widgets:
-            return
-        target_index = len(widgets)
-        for index, widget in enumerate(widgets):
-            geo = widget.geometry()
-            # 判断「光标已经越过这张卡的中线」：横向看 x，纵向看是否换了行
-            if pos.y() < geo.center().y():
-                if pos.x() < geo.center().x():
-                    target_index = index
-                else:
-                    target_index = index + 1
-                break
-            target_index = index + 1
-        current = host.index_of(moving)
-        # 顺序列表里 moving 自己的位置也要减去（它前面有几个非 moving 的卡）
-        order = [w for w in host.ordered_widgets() if hasattr(w, "key")]
-        try:
-            current_slot = order.index(moving)
-        except ValueError:
-            current_slot = current
-        if current_slot == target_index:
-            return
-        order.remove(moving)
-        order.insert(max(0, min(target_index, len(order))), moving)
-        # 用 set_order 只动内部顺序，不摘控件——摘了再插的那套写法在
-        # 2026-11-23 之前一次都没成功过（见 FlowHost.insert_widget 的注释）。
-        # 注意顺序：必须先置补间标志再 set_order。set_order 内部会立刻
-        # invalidate/activate 触发一次布局，晚一步置位的话那次布局把卡片直接
-        # 钉到终点，后面的动画找不到位移差（实测 running_animations() 恒 0）。
-        host.animate_next_layout(self.DRAG_ANIM_MS)
-        host.set_order(order)
-        host.sync_height(host.width())
-        self._sync_parallel_state()
-
-    def _on_card_drag_finished(self, key):
-        card = (getattr(self, "cards", {}) or {}).get(key)
-        host = getattr(self, "cards_host", None)
-        if card is not None:
-            card.setWindowOpacity(1.0)
-        if host is not None:
-            # 抬起来的那张要落回格子：先清 floating 再让布局带着补间把它
-            # 滑回去，否则它会停在被拖到的任意位置、和邻居重叠。
-            host.clear_floating()
-            host.animate_next_layout()
-            host.sync_height(host.width())
-            self._sync_parallel_state()
-        self._drag_grab = None
-        self._drag_key = None
-        keys = self.visible_card_keys()
-        # 拖动只改显示顺序时也要落盘：supervisor 的排程顺序就是 chain.order，
-        # 不写回去用户会觉得「拖了没生效」。
-        self._apply_card_order(keys, animate=False)
-        self._save_chain_order(keys, log_text="运行顺序已更新：{0}".format(" → ".join(keys)))
-        # 拖动可能把原本相邻的并行组拆开，配置里那一对要跟着作废
-        self._prune_parallel_blocks()
-
+        return self.order_page.toggle_parallel(key)
 
     def _reload_project_colors(self):
-        """settings.yaml 的 gui.project_colors 改了之后让卡片/日志配色跟上。
-
-        历史缺陷：project_colors 只在 MainWindow.__init__ 里读一次并 snapshot 成
-        self.project_colors。用户在「设置」tab 里改某个项目的颜色（或在 yaml 里加
-        gui.project_colors）再保存，卡片顶部色条以及实时日志里该项目的前缀颜色
-        全是开窗时那份旧配色，看起来像没保存。
-        """
         custom = (self.settings.get("gui") or {}).get("project_colors") or {}
-        # 按当前主题重取整张表：换肤后也要能拿到新主题那套身份色
         self.project_colors = _theme_project_colors(custom, self._active_theme())
-        for key, card in (getattr(self, "cards", {}) or {}).items():
-            color = self._project_color(key)
-            if card.color != color:
-                card.apply_spec(card.spec, color)
+        if self._order_page_inst is not None:
+            runs = (self.supervisor.status_snapshot().get("runs") or {}) if hasattr(self, "supervisor") else {}
+            self._order_page_inst.refresh_theme(self._project_color, runs)
 
     def _on_settings_changed(self):
         self.settings = config.settings()
         self.supervisor.settings = self.settings
-        # 修复引擎也持有 settings 与 repair_rules：之前只同步了 supervisor，
-        # 结果在「设置」里关掉 repair.enabled、或改 max_rounds，挂机时照样按
-        # 旧配置重试（引擎手上的还是开窗时那份 dict）。
         repair_engine = getattr(self, "repair", None)
         if repair_engine is None:
             repair_engine = getattr(self.supervisor, "repair", None)
         if repair_engine is not None:
             repair_engine.reload(self.settings)
+        gui_cfg = self.settings.get("gui") or {}
         if self.widget is not None:
-            gui_cfg = self.settings.get("gui") or {}
             want = bool(gui_cfg.get("widget_enabled", False))
             if self.widget.isVisible() != want:
                 self.widget.setVisible(want)
-        # 托盘勾选项跟随设置页变化（阻塞信号避免回写）
+        board = getattr(self, "log_board", None)
+        if board is not None:
+            want_auto = bool(gui_cfg.get("auto_open_running_logs", True))
+            if board.auto_open_check.isChecked() != want_auto:
+                board.auto_open_check.blockSignals(True)
+                board.auto_open_check.setChecked(want_auto)
+                board.auto_open_check.blockSignals(False)
         idle_cfg = self.settings.get("idle") or {}
         for action, want in (
-            (getattr(self, "widget_action", None), bool((self.settings.get("gui") or {}).get("widget_enabled", False))),
+            (getattr(self, "widget_action", None), bool(gui_cfg.get("widget_enabled", False))),
             (getattr(self, "idle_action", None), bool(idle_cfg.get("enabled", False))),
         ):
             if action is None or action.isChecked() == want:
@@ -1549,41 +955,23 @@ class MainWindow(QMainWindow):
             action.setChecked(want)
             action.blockSignals(False)
         self._reload_project_colors()
+        self._sync_header_settings()
         self._sync_settings_editor()
         self._apply_theme(self._theme_name(), persist=False)
-        # 设置页也能改运行顺序（拖动「运行顺序」列表）。主题真的变了时
-        # _apply_theme 会走 _rebuild_cards，那里已经按 chain.order 建卡；主题没变
-        # 时它只刷配色，卡片顺序原地不动——实测在设置里连拖两次顺序，第一次
-        # 恰好因为首启主题从空变成 dark 触发重建而跟上了，第二次就纹丝不动，
-        # 用户看到的是「在设置里排好的顺序根本没生效」。这里显式重排一次。
-        self._apply_card_order([key for key, _ in self._ordered_project_items()])
+        self._sync_log_catalog()
+        self._update_run_stage(self.supervisor.status_snapshot())
+        if self._order_page_inst is not None:
+            self._order_page_inst.reload_tasks(self.settings, self._registry_cache)
 
     def _theme_name(self):
-        """当前主题名（settings.yaml 的 gui.theme，未知值回退默认）。"""
         gui_cfg = self.settings.get("gui") or {}
         return themes.normalize_theme(gui_cfg.get("theme"))
 
     def _active_theme(self):
-        """界面上正在生效的主题。
-
-        不能只看 settings.yaml：`_apply_theme(name)` 是「切到 name」的动作，
-        而 settings 里的 gui.theme 由调用方先写盘（设置页会）。两者短暂不一致
-        时（程序内直接 _apply_theme、或外部配置文件还没落盘）必须相信真正画到
-        屏幕上的那一套，否则卡片色条与日志前缀会拿到上一套主题的颜色。
-        """
         return getattr(self, "_current_theme", None) or self._theme_name()
 
     def _apply_theme(self, name, persist=True):
-        """换肤：重刷 QSS、重取按钮配色、重设背景底板与连线颜色。
-
-        控件颜色不是全部走 QSS：AnimatedButton 在 paintEvent 里自绘、卡片色条是
-        运行时写死的字符串，所以换主题必须把卡片重建一遍（apply_spec 只刷新文字
-        与色条，不动按钮 variant 快照）。其余情况（同一主题、只改背景图）不重建，
-        避免每次改设置都把卡片连同运行状态一起重来。
-        """
         name = themes.normalize_theme(name)
-        # 记下「屏幕上真正生效的那套主题」：取色一律走 _active_theme()，
-        # 避免设置还没落盘时卡片色条/日志前缀拿到上一套颜色。
         self._current_theme = name
         app = QApplication.instance()
         if app is not None:
@@ -1606,58 +994,48 @@ class MainWindow(QMainWindow):
         if nav is not None and hasattr(nav, "set_icon_color"):
             token = themes.resolve(name)
             nav.set_icon_color(token["nav_text"], accent=token["accent"])
-        links = getattr(self, "links", None)
-        if links is not None:
-            links.set_color(links_color())
-        # 标题栏/任务栏图标是位图，换肤后要重画一张，否则浅色主题下还是一块深底
         self.setWindowIcon(make_icon(name))
-        # 项目身份色也是两套：换肤后必须重算，否则卡片色条与日志前缀还是旧主题
-        # 那套（浅色底上 #ffb74d 这类亮色对比度只有 1.7，前缀几乎看不见）。
+        header_logo = getattr(self, "_header_logo", None)
+        if header_logo is not None:
+            header_logo.setPixmap(make_icon(name).pixmap(36, 36))
+        if getattr(self, "tray", None) is not None:
+            self.tray.setIcon(make_icon(name))
         custom_colors = (self.settings.get("gui") or {}).get("project_colors") or {}
         self.project_colors = _theme_project_colors(custom_colors, name)
         changed = getattr(self, "_applied_theme", None) != name
         self._applied_theme = name
         if changed:
-            # 卡片以外的按钮（头部、日志工具栏、设置页、项目状态页、
-            # 高级设置区块里那些）都不随 _rebuild_cards 一起重建，
-            # 而 AnimatedButton 的配色是构造时的快照 —— 不主动刷一遍，
-            # 切到浅色主题后它们仍然画着深色底（实测 33 个按钮里 9 个
-            # 还是 #1a2130 / #3d7dfa / #251821 这套深色值）。
             self._refresh_button_variants()
-            # 卡片里的按钮是 AnimatedButton（自绘），换肤后重建才能拿到新配色。
-            self._rebuild_cards()
-            # 「项目状态」页有自己的色条与文字色，同样按主题取色，需要就地重建。
-            projects_page = getattr(self, "projects_page", None)
-            if projects_page is not None:
-                projects_page.reload()
-        else:
-            self._sync_parallel_state()
+            runs = {}
+            try:
+                runs = (self.supervisor.status_snapshot().get("runs") or {}) if hasattr(self, "supervisor") else {}
+            except Exception:
+                runs = {}
+            if getattr(self, "run_stage", None) is not None:
+                self.run_stage.refresh_theme()
+                self._update_run_stage(self.supervisor.status_snapshot())
+            if getattr(self, "log_board", None) is not None:
+                self.log_board.refresh_theme(self._project_color)
+                if self.event_buffer:
+                    self._rerender_log()
+            if self._order_page_inst is not None:
+                self._order_page_inst.refresh_theme(self._project_color, runs)
+            if getattr(self, "widget", None) is not None:
+                self.widget.refresh_theme()
+            if self._advanced_inst is not None:
+                self._advanced_inst.refresh_theme()
+            if self._projects_page_inst is not None:
+                self._projects_page_inst.refresh_theme()
+            if self._settings_page_inst is not None:
+                self._settings_page_inst.refresh_theme()
 
     def _refresh_button_variants(self):
-        """让所有已存在的 AnimatedButton 重新取一遍本主题的配色。
-
-        AnimatedButton 在 paintEvent 里自绘背景/边框，配色是 __init__ 时的
-        快照（`button_spec(variant)`）。卡片会随 _rebuild_cards() 重建，但
-        头部、日志工具栏、设置页、项目状态页、高级设置里的按钮不会，于是
-        切主题后它们停在旧主题的深色底上。
-        """
         for button in self.findChildren(AnimatedButton):
             button.set_variant(button.variant_name)
 
     def _on_theme_changed(self, name):
-        """设置页切换主题：立刻换肤（settings 已由设置页写盘并 emit changed）。"""
         self.settings = config.settings()
         self._apply_theme(name)
-
-    def _on_project_added(self, key):
-        """设置页新增了挂机项目：重读注册表，让新卡片出现。"""
-        self._reload_registry()
-        self._append_log("core", "info", "已新增项目 {0}".format(key))
-
-    def _open_silent_pages(self, keys):
-        """启动时按设置打开（不嵌入、不隐藏）勾选项目的界面窗口。"""
-        for key in keys:
-            self._open_project_gui(key)
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(make_icon(), self)
@@ -1707,22 +1085,16 @@ class MainWindow(QMainWindow):
 
     def _load_text(self, edit, path):
         """把文件内容读进编辑器（面板搬进 gui/advanced_panel.py，脏标记归它管）。"""
-        advanced = getattr(self, "advanced", None)
+        advanced = self._advanced_inst or self.advanced
         if advanced is None:
             return
         advanced.load_text(edit, path)
-        if edit is advanced.settings_edit:
+        if advanced._settings_edit is not None and edit is advanced._settings_edit:
             advanced.mark_settings_loaded()
 
     def _sync_settings_editor(self):
-        """设置文件在别处被改后，若「设置原文」编辑器没被用户动过就跟着刷新。
-
-        历史缺陷：那个编辑器只在开窗时读一次盘，用户在头部开关或设置页里改了
-        配置，再回到高级设置点「保存设置」，会把过期文本整份写回，刚改的配置
-        被静默覆盖回旧值（实测 pre_run.enabled 改 False 后又被写回 True）。
-        编辑器搬进 gui/advanced_panel.py 后这套判断跟着搬过去，这里只转发。
-        """
-        advanced = getattr(self, "advanced", None)
+        """设置文件在别处被改后，若高级设置已创建且编辑器未脏就跟着刷新。"""
+        advanced = self._advanced_inst
         if advanced is not None:
             advanced.sync_settings_editor()
 
@@ -1767,17 +1139,14 @@ class MainWindow(QMainWindow):
             if saved == Path(config.SETTINGS_YAML):
                 self.settings = config.settings()
                 self.supervisor.settings = self.settings
-                if getattr(self, "settings_page", None) is not None:
+                if self._settings_page_inst is not None:
                     self.settings_page.reload_from_disk()
                 self._sync_header_settings()
                 # 托盘勾选、桌面小组件可见性也要跟着文件走。
-                # 历史缺陷：这里原本只同步了头部三个控件，用户在「设置」tab 里把
-                # idle.enabled 改成 false 或 gui.widget_enabled 改成 true 并保存，
-                # 托盘菜单仍显示旧勾选、小组件既不出现也不消失。
                 self._on_settings_changed()
                 # 刚写进去的就是编辑器里这一份，脏标记清掉，后续外部改动可以再同步
-                advanced = getattr(self, "advanced", None)
-                if advanced is not None and edit is advanced.settings_edit:
+                advanced = self._advanced_inst
+                if advanced is not None and advanced._settings_edit is not None and edit is advanced._settings_edit:
                     advanced.mark_settings_loaded()
             elif saved == Path(config.PROJECTS_YAML):
                 self._reload_registry()
@@ -1791,192 +1160,78 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 
-    def _make_card(self, key, spec):
-        """建一张项目卡并接好所有信号（三处建卡路径共用，避免参数漏传）。"""
-        card = ProjectCard(
-            key, spec, self._project_color(key),
-            self.start_project, self.stop_project, self.show_project_logs,
-            on_gui=self.open_project_page if spec.get("gui") else None,
-            on_parallel=self.toggle_parallel,
-            on_remove=self.hide_card,
-        )
-        card.drag_started.connect(self._on_card_drag_started)
-        card.drag_moved.connect(self._on_card_drag_moved)
-        card.drag_finished.connect(self._on_card_drag_finished)
-        return card
-
-    def _rebuild_cards(self):
-        """按当前注册表 + chain.order + 隐藏列表整体重建卡片区。
-
-        为什么整体重建：卡片里的 AnimatedButton 是在 paintEvent 里自绘的，配色
-        是构造时抓的快照（themes.BUTTONS），换主题后不重建就还是旧色。注册表变更
-        与「恢复隐藏卡片」也走这条路，避免维护三份增量同步逻辑。
-        """
-        host = getattr(self, "cards_host", None)
-        if host is None:
-            return
-        flow = host.flow()
-        for card in (getattr(self, "cards", {}) or {}).values():
-            flow.removeWidget(card)
-            card.setParent(None)
-            card.deleteLater()
-        self.cards = {}
-        for key, spec in self._ordered_project_items():
-            if key in self._hidden_projects:
-                continue
-            card = self._make_card(key, spec)
-            self.cards[key] = card
-            flow.addWidget(card)
-        self._sync_parallel_state()
-        self._sync_cards_height()
-
     def _drop_stale_project_keys(self, projects):
-        """注册表里已经不存在的项目，从运行顺序、隐藏列表、并行组里清掉。
-
-        历史缺陷：在「项目注册表」页签里删掉一个项目后，`chain.order`、
-        `gui.hidden_projects`、`gui.silent_open_projects`、`chain.parallel_blocks`
-        四处仍留着它的键。后果：链按 chain.order 排程，走到不存在的项目会命中
-        「跳过未知项目」分支（每次跑链都刷一条告警）；「设置 → 已隐藏的项目」
-        里永远挂着一个已经删掉的项目，点「放回总览」毫无反应；并行组里那一对
-        会被 supervisor 判成「隔着别的项目」整块作废；静默启动列表里的死键让
-        每次开窗都去拉起一个不存在的项目的界面（失败后只在日志里留一行）。
-
-        只有真发现残留时才写盘，避免每次重新加载都改一遍 settings.yaml。
-        返回被清掉的键（给调用方写日志）。
-        """
+        """注册表里已删除的项目，从 chain.order / chain.tasks / chain.parallel_blocks 清掉。"""
         alive = set(projects)
-        order = listval.as_str_list(
-            (self.settings.get("chain") or {}).get("order"), what="chain.order"
-        )
-        hidden = [str(k) for k in (self._hidden_projects or [])]
-        blocks = [list(b) for b in (self._parallel_blocks or [])]
-        silent = listval.as_str_list(
-            (self.settings.get("gui") or {}).get("silent_open_projects"),
-            what="gui.silent_open_projects",
-        )
-        stale = sorted(
-            (set(order) | set(hidden) | set(silent) | {k for b in blocks for k in b}) - alive
-        )
-        if not stale:
+        chain = self.settings.get("chain") or {}
+        raw_tasks = chain.get("tasks") if isinstance(chain.get("tasks"), list) else None
+        order = listval.as_str_list(chain.get("order"), what="chain.order")
+        blocks = listval.as_str_groups(chain.get("parallel_blocks"), what="chain.parallel_blocks")
+
+        dropped_task_ids = set()
+        if raw_tasks is not None:
+            for item in raw_tasks:
+                if isinstance(item, dict) and str(item.get("project") or "") not in alive:
+                    dropped_task_ids.add(str(item.get("id") or item.get("project") or ""))
+        stale_order = [k for k in order if k in dropped_task_ids or (raw_tasks is None and k not in alive)]
+        stale_blocks = [
+            k for b in blocks for k in b
+            if k in dropped_task_ids or (raw_tasks is None and k not in alive)
+        ]
+        if not dropped_task_ids and not stale_order and not stale_blocks:
             return []
-        new_order = [k for k in order if k in alive]
-        new_hidden = [k for k in hidden if k in alive]
-        new_blocks = []
-        for block in blocks:
-            kept = [k for k in block if k in alive]
-            if len(kept) >= 2:
-                new_blocks.append(kept)
 
         def mutate(settings):
             chain_cfg = settings.setdefault("chain", {})
             if not isinstance(chain_cfg, dict):
                 chain_cfg = {}
                 settings["chain"] = chain_cfg
-            chain_cfg["order"] = list(new_order)
-            chain_cfg["parallel_blocks"] = [list(b) for b in new_blocks]
-            gui_cfg = settings.setdefault("gui", {})
-            if not isinstance(gui_cfg, dict):
-                gui_cfg = {}
-                settings["gui"] = gui_cfg
-            gui_cfg["hidden_projects"] = list(new_hidden)
-            gui_cfg["silent_open_projects"] = [k for k in silent if k in alive]
+            if isinstance(chain_cfg.get("tasks"), list):
+                chain_cfg["tasks"] = [
+                    t for t in chain_cfg["tasks"]
+                    if isinstance(t, dict) and str(t.get("project") or "") in alive
+                ]
+                kept_ids = {t["id"] for t in chain_cfg["tasks"] if t.get("id")}
+                chain_cfg["order"] = [k for k in order if k in kept_ids]
+                dead = dropped_task_ids
+            else:
+                chain_cfg["order"] = [k for k in order if k in alive]
+                dead = set(stale_order) | set(stale_blocks)
+            new_blocks = []
+            for block in blocks:
+                kept = [k for k in block if k not in dead]
+                if len(kept) >= 2:
+                    new_blocks.append(kept)
+            chain_cfg["parallel_blocks"] = new_blocks
 
-        # 先更新内存里的副本，_mutate_settings 会重读文件并替换 self.settings
-        self._hidden_projects = new_hidden
-        self._parallel_blocks = new_blocks
         self._mutate_settings(mutate)
-        self._append_log(
-            "core", "info",
-            "注册表里已经没有 {0}，已从运行顺序/隐藏列表/并行组里一并清掉".format("、".join(stale)),
-        )
-        return stale
+        return sorted(dropped_task_ids | set(stale_order) | set(stale_blocks))
 
     def _reload_registry(self):
-        """「项目注册表」保存后让界面跟上新注册表。
-
-        历史缺陷：这里原来什么都没做。改完注册表一保存，文件是对的，但界面、
-        supervisor、设置页全都还在用开窗时读到的那一份——用户新增的项目不出现
-        在总览页和左侧导航、删掉的项目卡片还在、改过的显示名/启用状态不生效。
-        重新读盘后按差异同步两处：项目卡、设置页（含运行顺序）。左侧导航只有
-        「总览」「项目状态」「设置」三项，不再随注册表增删。
-        """
+        """注册表变动后刷新运行顺序页、项目配置页、日志目录与副标题。"""
         registry = config.registry()
         projects = registry.get("projects", {}) or {}
+        self._registry_cache = registry
         self.supervisor.registry = registry
-        # -- 1. 项目卡：缺的补上，多的撤掉，其余更新文案/颜色 ----------------
-        cards = getattr(self, "cards", {})
-        host = getattr(self, "cards_host", None)
-        flow = host.flow() if host is not None else None
-        for key, spec in projects.items():
-            if key in cards:
-                # 已存在的卡片也要跟新显示名：否则改完 display_name 保存后导航和
-                # 副标题都变了，卡片标题还是旧的。
-                cards[key].apply_spec(
-                    spec,
-                    self._project_color(key),
-                    self.open_project_page if spec.get("gui") else None,
-                )
-                continue
-            if flow is None or key in self._hidden_projects:
-                continue
-            card = self._make_card(key, spec)
-            cards[key] = card
-            flow.addWidget(card)
-        for key in [k for k in cards if k not in projects]:
-            card = cards.pop(key)
-            if flow is not None:
-                flow.removeWidget(card)
-            card.setParent(None)
-            card.deleteLater()
-        # 注册表里删掉的项目，在 chain.order / hidden_projects / parallel_blocks
-        # 里的残留键也要一起清（否则设置页的「已隐藏」永远挂着一个幽灵项）
         self._drop_stale_project_keys(projects)
-        # 卡片顺序要跟 chain.order（用户拖动改的顺序）一致，并把并行连线重画。
-        # 历史缺陷：这里用的是「此刻的界面顺序」，而新补进来的卡片是
-        # flow.addWidget 追加在尾部的，于是「隐藏一张卡再从设置页放回来」会让它
-        # 跑到最后一位——用户明明只是点了个 × 又点回来，运行顺序就被改了。
-        # 按 _ordered_project_items()（读 chain.order，未列出则按注册表书写顺序）
-        # 重排，放回来的卡片就回原位。
-        self._apply_card_order([k for k, _ in self._ordered_project_items()])
-        # -- 2. 日志过滤器、设置页、副标题 -----------------------------------
-        combo = getattr(self, "filter_combo", None)
-        if combo is not None:
-            wanted = list(projects.keys()) + ["core"]
-            current = combo.currentData() or ""
-            existing = [combo.itemData(i) for i in range(combo.count())]
-            if existing != ["", *wanted]:
-                combo.blockSignals(True)
-                combo.clear()
-                combo.addItem("全部项目", "")
-                for key in wanted:
-                    combo.addItem(key, key)
-                idx = combo.findData(current)
-                combo.setCurrentIndex(idx if idx >= 0 else 0)
-                combo.blockSignals(False)
-                # 重建下拉框时是 blockSignals 的，currentIndexChanged 不会触发
-                # _rerender_log。历史缺陷：删掉当前过滤着的项目后，下拉框已回到
-                # 「全部项目」，日志区却还是那份按旧项目过滤过的内容（其它项目的
-                # 历史日志一行都不显示），两处不一致。这里补一次重绘。
-                self._rerender_log()
-        settings_page = getattr(self, "settings_page", None)
-        if settings_page is not None:
-            settings_page.reload_from_disk()
-        # 「项目状态」页也按注册表现场建块。历史缺陷：它只在 __init__ 与
-        # _navigate("projects") 时 reload，用户停在总览页改完注册表存盘，界面上
-        # 新项目卡片出现了、侧栏也能点进「项目状态」，但那页还是开窗时那份清单——
-        # 摘要里写着 4 个项目、注册表里已有 5 个，且没有任何提示。
-        projects_page = getattr(self, "projects_page", None)
-        if projects_page is not None:
-            projects_page.reload()
+        self.settings = config.settings()
+        self.supervisor.settings = self.settings
+
+        if self._order_page_inst is not None:
+            self._order_page_inst.reload_tasks(self.settings, registry)
+        if self._settings_page_inst is not None:
+            self._settings_page_inst.reload_from_disk()
+        if self._projects_page_inst is not None:
+            self._projects_page_inst.reload()
+
+        self._sync_log_catalog()
+        self._update_run_stage(self.supervisor.status_snapshot())
         label = getattr(self, "_subtitle_label", None)
         if label is not None:
             text = self._subtitle_text(registry)
             label.setText(text)
             label.setToolTip(text)
-        self._sync_cards_height()
-        self._append_log(
-            "core", "info", "项目注册表已重新加载：{0} 个项目".format(len(projects))
-        )
+        self._append_log("core", "info", "项目注册表已重新加载：{0} 个项目".format(len(projects)))
 
     def _sync_header_settings(self):
         """把「设置」tab 里手改 yaml 的结果同步回头部控件。
@@ -2121,12 +1376,14 @@ class MainWindow(QMainWindow):
     def start_chain(self):
         self.supervisor.settings = config.settings()
         self.supervisor.registry = config.registry()
+        self._registry_cache = self.supervisor.registry
         self.settings = self.supervisor.settings
         self.supervisor.run_chain()
 
     def start_chain_background(self):
         self.supervisor.settings = config.settings()
         self.supervisor.registry = config.registry()
+        self._registry_cache = self.supervisor.registry
         self.settings = self.supervisor.settings
         self.supervisor.start_chain(background_only=True)
 
@@ -2137,9 +1394,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self.supervisor.stop_project, args=(key,), daemon=True, name="afk-stop-" + key).start()
 
     def show_project_logs(self, key):
-        self.filter_combo.setCurrentIndex(max(0, self.filter_combo.findData(key)))
-        self.stack.setCurrentWidget(self.stack.widget(0))
-        self.nav.set_active("overview", animate=False)
+        self._navigate("overview")
+        title, color = self._log_col_info(key)
+        self.log_board.open_column(
+            key,
+            title,
+            color,
+            backfill_lines=self._backfill_lines_for(key),
+            focus=True,
+        )
 
     def _open_project_logs(self, key):
         """项目页「打开日志」：打开该项目本次运行自己的日志文件。
@@ -2180,13 +1443,7 @@ class MainWindow(QMainWindow):
         self._open_path(out_log if out_log is not None else config.LOGS_DIR)
 
     def _clear_log(self):
-        """清空实时日志显示。
-
-        历史缺陷：只清空了 QPlainTextEdit，event_buffer 里的历史仍留着——用户点
-        「清空显示」后一旦切换过滤下拉框就会触发 _rerender_log，把刚清掉的日志
-        全部重新画回来。清空显示就该是清空。
-        """
-        self.log_view.clear()
+        self.log_board.clear_all()
         self.event_buffer.clear()
 
     def _project_color(self, project):
@@ -2194,24 +1451,22 @@ class MainWindow(QMainWindow):
         key = str(project)
         if key in colors:
             return colors[key]
+        base = self._base_project_for(key)
+        if base in colors:
+            return colors[base]
         custom = (self.settings.get("gui") or {}).get("project_colors") or {}
-        # 注册表里没有这个项目（临时项、或刚在设置页加完还没刷新）：
-        # 按名字哈希落到当前主题的备用色板，别回退到深色那份亮色板。
-        return _project_color_for(key, self._active_theme(), custom)
+        return _project_color_for(base, self._active_theme(), custom)
 
-    def _log_at_bottom(self, slack=4):
-        """日志区当前是不是停在最底部（用户在追最新几行）。"""
-        bar = self.log_view.verticalScrollBar()
-        return bar.value() >= bar.maximum() - slack
-
-    def _scroll_log_to_bottom(self):
-        bar = self.log_view.verticalScrollBar()
-        bar.setValue(bar.maximum())
+    def _format_ts(self, ts=None):
+        raw = time.time() if ts is None else float(ts)
+        sec = int(raw)
+        if sec != self._ts_cache_sec:
+            self._ts_cache_sec = sec
+            self._ts_cache_str = time.strftime("%H:%M:%S", time.localtime(sec))
+        return self._ts_cache_str
 
     def _log_html(self, project, level, message, ts=None):
-        """拼一行日志的富文本（颜色按主题、内容转义）。"""
         project_color = self._project_color(project)
-        # 级别色同样按主题取：浅色底上 #fbbf24 的警告色几乎看不见。
         level_colors = _theme_level_colors()
         if level == "error":
             message_color = level_colors["error"]
@@ -2219,48 +1474,27 @@ class MainWindow(QMainWindow):
             message_color = level_colors["warn"]
         else:
             message_color = project_color
+        ts_str = ts if isinstance(ts, str) and ts else self._format_ts(ts)
         return '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
             project_color,
-            ts or time.strftime("%H:%M:%S"),
+            ts_str,
             _escape_html(str(project)),
             message_color,
             _escape_html(str(message)),
         )
 
-    def _append_log_html(self, lines):
-        """一次把多行拼进日志区。
-
-        逐条 appendHtml 每行约 0.05ms 且各触发一次重排；实测 400 行逐条 ≈19ms。
-        拼成一次更快，但要按段落拼而不是 `<br>`：`<br>` 只产生 1 个文本块，
-        `setMaximumBlockCount(8000)` 就失去意义（整段历史算一行，永远不截断），
-        `toPlainText()` 也没有换行。用 `<p style="margin:0">` 连接实测 400 行
-        10.8ms、块数正好 400，比 `<br>` 的 23.2ms 还快。
-        """
-        lines = [line for line in lines if line]
-        if not lines:
-            return
-        if len(lines) == 1:
-            self.log_view.appendHtml(lines[0])
-            return
-        self.log_view.appendHtml(
-            '<p style="margin:0">' + '</p><p style="margin:0">'.join(lines) + "</p>"
+    def _event_to_html(self, event):
+        return self._log_html(
+            event.get("project", "core"),
+            event.get("level", "info"),
+            event.get("message", ""),
+            ts=event.get("ts"),
         )
 
     def _append_log(self, project, level, message, autoscroll=True, emit_event=True):
-        # 先记下「追加之前」是不是在底部：一旦 appendHtml 把内容顶上去，
-        # maximum 就变了，那时再判断永远为假。
-        follow = self._log_at_bottom() if autoscroll else False
-        self.log_view.appendHtml(self._log_html(project, level, message))
-        # 历史缺陷：只要勾着「自动滚动」，每来一行都强制拉到底。用户往上翻着
-        # 看历史（或正在复制一段报错）时，链还在跑、日志还在刷，视图被不断
-        # 拽回底部，那段历史根本读不了。现在只在「追加前本来就在底部」时才
-        # 跟着滚；用户自己翻上去了就让他停在那里，新内容照样进 event_buffer。
-        if autoscroll and follow and self.autoscroll_check.isChecked():
-            self._scroll_log_to_bottom()
-        # 让 GUI 自身的动作也进入事件流（events.jsonl / 报告 / 远程订阅都能看到）。
-        # 否则用户开关设置、空闲决策、手动更新等关键动作只留在界面里，
-        # 排查问题时「日志里什么都没发生」——这正是之前空闲故障最难看的地方。
-        # 渲染来自事件流的事件时用 emit_event=False，避免把收到的再发一遍造成回声。
+        html = self._log_html(project, level, message)
+        if getattr(self, "log_board", None) is not None:
+            self.log_board.route_event_html(project, html)
         if emit_event:
             try:
                 self.bus.emit(
@@ -2269,70 +1503,23 @@ class MainWindow(QMainWindow):
                         "kind": "gui",
                         "level": str(level),
                         "message": str(message),
-                        # origin=gui 让 _poll 认出「这条是本进程自己刚画过的」：
-                        # 事件会经订阅队列回环一次，再渲染一遍就出现两行同样的日志。
                         "origin": "gui",
                     }
                 )
             except Exception as exc:
-                # 事件总线挂了不能影响界面日志渲染（这里在 GUI 主线程上，
-                # 抛出去就是一次未捕获异常），但也不能一声不响——排查问题时
-                # 「界面有日志、events.jsonl 里没有」最难查。
                 logging.getLogger("afk.gui").warning("emit gui log event failed: %s", exc)
 
-    def _matches_filter(self, event, filter_project):
-        if not filter_project:
-            return True
-        return event.get("project") == filter_project
-
     def _rerender_log(self):
-        """按当前过滤条件重建日志区。
-
-        历史缺陷：把 event_buffer（deque 上限 5000）里的匹配事件逐条重画，
-        实测 5000 行要 422ms、每轮还会 appendHtml 5000 次，全在 GUI 主线程上——
-        用户切一下过滤下拉框，界面就僵半秒（链还在跑时会连续切换，体感更明显）。
-        现在只重画最近 LOG_RERENDER_LIMIT 行（实测 2000 行 156ms、1500 行 125ms），
-        更早的历史仍在 event_buffer 与 events.jsonl 里，需要时看日志文件；
-        被截断时用一行灰字说明，避免用户以为日志丢了。
-        """
-        self.log_view.clear()
-        filter_project = self.filter_combo.currentData() or ""
-        matched = [e for e in self.event_buffer if self._matches_filter(e, filter_project)]
-        shown = matched[-LOG_RERENDER_LIMIT:]
-        if len(matched) > len(shown):
-            dropped = len(matched) - len(shown)
-            self.log_view.appendHtml(
-                '<span style="color:{0}">…… 更早的 {1} 条已经滚出显示区'
-                "（完整记录见 logs/events.jsonl），下面是最近 {2} 条</span>".format(
-                    _theme_level_colors()["warn"], dropped, len(shown)
-                )
+        if getattr(self, "log_board", None) is not None:
+            self.log_board.rerender_all(
+                self.event_buffer,
+                self._event_to_html,
+                limit=LOG_RERENDER_LIMIT,
             )
-        # 逐条 append 实测 2000 行 156ms；改成先攒 HTML 再一次性拼进视图
-        # （400 行 10.8ms 量级），切换过滤下拉框不再卡半秒。
-        self._append_log_html(
-            [
-                self._log_html(
-                    event.get("project", "core"),
-                    event.get("level", "info"),
-                    event.get("message", ""),
-                )
-                for event in shown
-            ]
-        )
-        if self.autoscroll_check.isChecked():
-            self._scroll_log_to_bottom()
 
     def _subtitle_text(self, registry=None):
-        """副标题里的项目名单从注册表算出来。
-
-        历史缺陷：写死成「三月七小助手 + BAAH + MaaEnd」，而注册表有 5 个项目，
-        绝区零一龙 和 BetterGI 一直被漏掉，副标题与实际能挂的项目不符。
-
-        registry 可由调用方传入：建界面时同一次构造要读它两遍（一次做文本、
-        一次做 tooltip），传进来就不用重复读盘解析。
-        """
         if registry is None:
-            registry = config.registry()
+            registry = getattr(self, "_registry_cache", None) or config.registry()
         names = []
         for key, spec in (registry.get("projects", {}) or {}).items():
             label = str(spec.get("display_name", key))
@@ -2342,11 +1529,11 @@ class MainWindow(QMainWindow):
         return "一键挂机 · {0} 统一编排".format(" + ".join(names))
 
     def _poll(self):
-        filter_project = self.filter_combo.currentData() or ""
-        follow = self._log_at_bottom()
+        board = getattr(self, "log_board", None)
         drained = 0
         skipped = 0
-        pending_html = []
+        rendered_count = 0
+        by_project = {}
         deadline = time.monotonic() + LOG_DRAIN_BUDGET_MS / 1000.0
         while drained < LOG_DRAIN_LIMIT:
             try:
@@ -2356,40 +1543,28 @@ class MainWindow(QMainWindow):
             drained += 1
             self.event_buffer.append(event)
             if event.get("kind") == "post_action" and (event.get("data") or {}).get("action") == "exit":
-                pending_html.append(self._log_html("core", "info", "结束后操作：关闭 Auto-AFK"))
+                by_project.setdefault(CORE_KEY, []).append(
+                    self._log_html("core", "info", "结束后操作：关闭 Auto-AFK")
+                )
                 QTimer.singleShot(800, self._quit)
                 continue
-            # origin=gui 的事件是本进程自己刚画到日志区的，订阅队列回流时不能再画一遍，
-            # 否则界面里同一行日志出现两次（用户看到「日志重复」）。仍留在 event_buffer
-            # 里，切过滤下拉框重建视图时它会正常出现一次。
             if event.get("origin") == "gui":
                 continue
-            if not self._matches_filter(event, filter_project):
+            if board is not None and not board.accepts(event):
                 continue
-            if len(pending_html) >= LOG_RENDER_BATCH_LIMIT:
-                # 这一轮要画的已经够多，剩下的本轮只进 event_buffer，不再画：
-                # 洪峰时一轮几千行全画进视图会把主线程钉住几秒（实测 1000 行
-                # 逐条 append 68ms，且日志区只看得到最后一屏）。
+            if rendered_count >= LOG_RENDER_BATCH_LIMIT:
                 skipped += 1
                 continue
-            pending_html.append(
-                self._log_html(
-                    event.get("project", "core"),
-                    event.get("level", "info"),
-                    event.get("message", ""),
-                )
-            )
-            # 时间预算：一次 _poll 最多占用主线程这么久，剩下的留到下一轮
-            # （事件仍在队列里，不会被丢）。
+            proj = str(event.get("project") or CORE_KEY)
+            by_project.setdefault(proj, []).append(self._event_to_html(event))
+            rendered_count += 1
             if drained % 128 == 0 and time.monotonic() > deadline:
                 break
         if skipped:
             self._skipped_since_notice += skipped
             now = time.monotonic()
-            # 提示本身也要节流：洪峰期间每轮都写一行的话，日志区会被这条
-            # 说明自己刷满，真正的报错反而被顶走。
             if now - self._skip_notice_at >= 2.0:
-                pending_html.append(
+                by_project.setdefault(CORE_KEY, []).append(
                     self._log_html(
                         "core",
                         "warn",
@@ -2399,20 +1574,26 @@ class MainWindow(QMainWindow):
                 )
                 self._skipped_since_notice = 0
                 self._skip_notice_at = now
-        self._append_log_html(pending_html)
-        if drained and follow and self.autoscroll_check.isChecked():
-            self._scroll_log_to_bottom()
+        if board is not None and by_project:
+            board.append_batch(by_project)
         snapshot = self.supervisor.status_snapshot()
-        for key, card in self.cards.items():
-            card.update_state(snapshot["runs"].get(key))
+        runs = snapshot.get("runs") or {}
+        if board is not None:
+            board.sync_running_projects(
+                runs,
+                self._log_col_info,
+                self._status_pair,
+                backfill_fn=self._backfill_lines_for,
+            )
+        self._update_run_stage(snapshot)
+        if self._order_page_inst is not None:
+            self._order_page_inst.update_runs(runs)
         chain = snapshot["chain_status"]
         text = CHAIN_TEXT.get(chain, chain)
         chain_colors = _theme_chain_colors()
         color = chain_colors.get(chain, chain_colors["idle"])
         self.chain_pill.set_state(text, color)
         self._sync_chain_controls(snapshot)
-        # 今日完成状态只算一次：小组件与设置页提示都要它，而 _is_done_today 虽然
-        # 有 mtime 缓存，仍要做一次 stat。
         done_today = self._is_done_today()
         if self.widget is not None and self.widget.isVisible():
             idle_status = self._idle_status_cached()
@@ -2422,31 +1603,19 @@ class MainWindow(QMainWindow):
                 idle_status.get("threshold_sec") or 0,
                 completed_today=done_today,
             )
-        # 链刚成功结束时刷新设置页的「今日状态」（避免用户看到过期信息）。
-        # 但不能只看链状态：标记文件也可能由 CLI 或另一个 Auto-AFK 进程写入，
-        # 本进程的 chain_status 一直是 idle，标签就永远停在「未完成」。所以再
-        # 比一次「今日是否已完成」的布尔值（读的是 mtime 缓存，几乎零开销）。
         if chain != self._last_chain_for_completion or done_today != self._last_done_today:
             self._last_chain_for_completion = chain
             self._last_done_today = done_today
-            if getattr(self, "settings_page", None) is not None:
+            if self._settings_page_inst is not None:
                 try:
-                    self.settings_page._refresh_completion_label()
+                    self._settings_page_inst._refresh_completion_label()
                 except Exception as exc:
-                    # 只是刷新「今天是否已完成」那行提示，失败不该影响主循环；
-                    # 但要留痕，否则用户会看到过期的完成状态却查不到原因。
                     logging.getLogger("afk.gui").warning(
                         "refresh completion label failed: %s", exc
                     )
 
     def _sync_chain_controls(self, snapshot=None):
-        """链在跑时把「一键挂机」置灰。
-
-        历史缺陷：链跑起来之后按钮照旧可点，点下去 `run_chain()` 只回一句
-        `chain already running` 的 warn，界面上看起来像没反应——用户会连点，
-        以为卡住了。改成忙时禁用并把文案换成「挂机中…」，「全部停止」保持
-        可点（有东西可停的时候才需要它）。
-        """
+        """链在跑时把「一键挂机」置灰；状态未变时直接短路跳过属性写入。"""
         if snapshot is None:
             try:
                 snapshot = self.supervisor.status_snapshot()
@@ -2454,10 +1623,10 @@ class MainWindow(QMainWindow):
                 logging.getLogger("afk.gui").debug("status snapshot failed: %s", exc)
                 snapshot = {}
         chain = str((snapshot or {}).get("chain_status") or "idle")
-        # 只信 chain_status。不要用 chain_running()：它把「手动单独启动的项目
-        # 还在跑」也算忙，那种情况下「一键挂机」跑整条链完全正常，不该置灰；
-        # 也不要用 _chain_thread.is_alive()，线程收尾与状态写回之间有时序空隙。
         busy = chain == "running"
+        if busy == self._last_chain_busy:
+            return
+        self._last_chain_busy = busy
         if busy:
             if self.chain_btn.isEnabled():
                 self.chain_btn.setEnabled(False)
@@ -2474,35 +1643,27 @@ class MainWindow(QMainWindow):
     def _on_change(self):
         pass
 
-    # -- 错误报告（面板搬进 gui/advanced_panel.py，这里只转发） -----------------
+    # -- 错误报告（面板搬进 gui/advanced_panel.py，按需实例化后转发） ---------
     def refresh_reports(self):
-        advanced = getattr(self, "advanced", None)
-        if advanced is not None:
-            advanced.refresh_reports()
+        self.advanced.refresh_reports()
 
     def open_selected_report(self):
-        advanced = getattr(self, "advanced", None)
-        if advanced is not None:
-            advanced.open_selected_report()
+        if self._advanced_inst is not None:
+            self._advanced_inst.open_selected_report()
 
     def run_doctor(self):
-        """总览页头部「环境自检」按钮：结果要写在设置页的「环境自检」区块里，
-        所以先切过去并把那一块展开，再走统一入口。"""
-        advanced = getattr(self, "advanced", None)
-        if advanced is not None:
-            advanced.expand("doctor")
-            self._navigate("settings")
+        """总览页头部「环境自检」按钮：切到设置 → 高级设置并展开「环境自检」区块。"""
+        self._navigate("settings")
+        self.settings_page.select_section("advanced")
+        self.advanced.expand("doctor")
         self._run_doctor_task()
 
     def _run_doctor_task(self):
         """真正的自检任务（头部按钮与高级设置区块里的按钮共用）。"""
         if not self._begin_task("doctor"):
             return
-        advanced = getattr(self, "advanced", None)
+        advanced = self.advanced
         if advanced is not None:
-            # 旧实现靠 tabs.setCurrentIndex(最后一个页签) 把结果页翻出来，页签
-            # 已整体移除；现在结果落在设置页的折叠区块里，必须先展开，否则
-            # 用户点「自检」跑完什么也看不到。
             advanced.expand("doctor")
             advanced.doctor_view.setPlainText("环境自检运行中...")
 
@@ -2710,8 +1871,8 @@ class MainWindow(QMainWindow):
             settings.setdefault("gui", {})["widget_enabled"] = show
 
         self._mutate_settings(mutate)
-        if getattr(self, "settings_page", None) is not None:
-            self.settings_page.reload_from_disk()
+        if self._settings_page_inst is not None:
+            self._settings_page_inst.reload_from_disk()
         self._append_log("core", "info", "桌面小组件: {0}".format("显示" if show else "隐藏"))
 
     def _show_main_window(self):
@@ -2794,8 +1955,8 @@ class MainWindow(QMainWindow):
         self._mutate_settings(mutate)
         if checked:
             self.idle_watcher.rearm()
-        if getattr(self, "settings_page", None) is not None:
-            self.settings_page.reload_from_disk()
+        if self._settings_page_inst is not None:
+            self._settings_page_inst.reload_from_disk()
         self._append_log(
             "core", "info", "空闲自动挂机: {0}".format("开" if checked else "关")
         )
@@ -2816,7 +1977,7 @@ class MainWindow(QMainWindow):
             lines.append("[{0:<4}] {1:<30} {2}".format(item["status"], item["name"], item.get("detail", "")))
         lines.append("")
         lines.append("ok={ok} warn={warn} fail={fail} total={total}".format(**summary))
-        advanced = getattr(self, "advanced", None)
+        advanced = self._advanced_inst
         view = advanced.doctor_view if advanced is not None else getattr(self, "doctor_view", None)
         if view is not None:
             view.setPlainText("\n".join(lines))
@@ -2848,8 +2009,8 @@ class MainWindow(QMainWindow):
                 self._flush_schedule()
             except Exception as exc:
                 logging.getLogger("afk.gui").warning("flush schedule on quit failed: %s", exc)
-        # 设置页的数值框走 400ms 防抖，关窗口时同样要补一次落盘
-        settings_page = getattr(self, "settings_page", None)
+        # 设置页的数值框走 400ms 防抖，关窗口时同样要补一次落盘（仅已加载时处理）
+        settings_page = self._settings_page_inst
         if settings_page is not None:
             try:
                 settings_page.flush_pending()
@@ -2879,14 +2040,12 @@ class MainWindow(QMainWindow):
         if not self._initial_geometry_applied:
             self._initial_geometry_applied = True
             self._fit_to_screen()
-        self._sync_cards_height()
         if self._did_intro:
             return
         self._did_intro = True
-        # 入场动画：窗口整体淡入，各卡片错峰级联淡入
         fade_in_window(self, duration=280)
-        for i, card in enumerate(self.cards.values()):
-            fade_in_widget(card, duration=300, delay=120 + i * 70)
+        if getattr(self, "run_stage", None) is not None:
+            fade_in_widget(self.run_stage, duration=260, delay=100)
 
     def _fit_to_screen(self):
         """首次显示时保证窗口完整落在屏幕可用区域内。
@@ -3002,106 +2161,49 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logging.getLogger("afk.gui").warning("failed to persist window size: %s", exc)
 
+    def _sync_responsive_layout(self):
+        """按窗口当前宽度切换桌面端 / 紧凑平板端 / 极窄移动端布局。
+
+        1. < 820px 时左侧导航自动收缩为 56px 纯图标栏，释放 140px 横向空间；
+        2. < 640px 时顶栏主操作区与工具栏改为纵向堆叠，收紧内容边距并隐藏竖向分隔线，
+           保证在窄屏/分屏/移动端尺寸下所有按钮与开关完整可见、不横向溢出。
+        """
+        width = self.width()
+        if width <= 0:
+            return
+        nav = getattr(self, "nav", None)
+        if nav is not None and hasattr(nav, "set_compact"):
+            nav.set_compact(width < self.COMPACT_NAV_WIDTH)
+
+        narrow = width < self.MOBILE_BREAKPOINT
+        if narrow != self._narrow_mode:
+            self._narrow_mode = narrow
+            overview_layout = getattr(self, "_overview_layout", None)
+            if overview_layout is not None:
+                if narrow:
+                    overview_layout.setContentsMargins(10, 8, 10, 8)
+                    overview_layout.setSpacing(8)
+                else:
+                    overview_layout.setContentsMargins(16, 12, 16, 10)
+                    overview_layout.setSpacing(12)
+            direction = QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight
+            for box in (
+                getattr(self, "_header_top_layout", None),
+                getattr(self, "_header_controls_layout", None),
+            ):
+                if box is not None:
+                    box.setDirection(direction)
+            for div in getattr(self, "_toolbar_dividers", ()):
+                div.setVisible(not narrow)
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        # 背景底板不在布局里（在 central 里 lower 到底层），尺寸得手动跟
         central = self.centralWidget()
         background = getattr(self, "background", None)
         if central is not None and background is not None:
             background.setGeometry(central.rect())
-        self._sync_cards_height()
+        self._sync_responsive_layout()
         self._on_window_resized()
-
-    def _sync_cards_height(self):
-        """按窗口当前宽度重算项目卡区域应有的高度（折成几行就有多高）。
-
-        必须在窗口真正 resize 之后算：布局求解阶段宽度还不可知，让它去猜
-        就会把 5 张卡当成竖排，把窗口最小高度顶到 1165（见 FlowHost 注释）。
-
-        这里只把「折行后需要的高度」报给滚动区当 sizeHint，不设固定高度：
-        空间够时滚动区长到刚好放下（看起来和没有滚动区一样），不够时布局把
-        它压到最小高度并出现滚动条。写成 setFixedHeight 会和窗口高度互相
-        反馈——钉高滚动区 → 窗口最小高度变大 → 布局把窗口撑高 → 再钉更高。
-        """
-        host = getattr(self, "cards_host", None)
-        if host is None:
-            return
-        width = host.width()
-        if width <= 0:
-            central = self.centralWidget()
-            width = (central.width() if central is not None else self.width()) - 24
-        host.sync_height(width)
-        # 并行连线层是浮在卡片区上的独立控件（不在布局里），尺寸得跟着宿主走。
-        # 历史缺陷：只有 _sync_parallel_state 会 setGeometry，而它只在点「并行」
-        # 或改顺序时调用——用户拖动窗口边缘把窗口拉大/缩小后，连线层还停在
-        # 旧尺寸（实测窗口从 1360 拉到 1500 后，host 宽 1276 而连线层仍是 827），
-        # 相邻卡片之间的弧线就画在错误的位置、甚至整段画不出来。
-        links = getattr(self, "links", None)
-        if links is not None:
-            links.setGeometry(host.rect())
-        scroll = getattr(self, "cards_scroll", None)
-        if scroll is None:
-            return
-        # 单行高度与行间距交给滚动区，让它在空间不够时把高度吸附到整行，
-        # 避免出现「第二行卡片被切在按钮中间」的半行。
-        scroll.set_row_metrics(host.single_row_height(), host.flow().v_spacing())
-        # 最小高度至少一整行：CARDS_MIN_HEIGHT(120) 比一行卡片还矮，窗口被压到
-        # 最小时卡片会停在「未运行」那一行，四个按钮全被切掉（截图见
-        # logs/_ui_r14/min_all.png）。这里设最小高度而不是固定高度——固定高度
-        # 会和窗口高度互相反馈（钉高 → 窗口最小高度变大 → 布局撑高 → 再钉更高）。
-        row_height = host.single_row_height()
-        if row_height > 0:
-            floor = max(CARDS_MIN_HEIGHT, row_height)
-            if scroll.minimumHeight() != floor:
-                scroll.setMinimumHeight(floor)
-        desired = host.rows_height_for(width)
-        if desired <= 0:
-            return
-        # 空间不够时把可用高度吸附到「能完整放下的整行数」：卡片高度一致，
-        # 半行会把按钮切在中间，看起来像界面画坏了。多余的空间让给下面的
-        # 日志区，滚动条则明确提示下面还有卡片。
-        available = self._cards_available_height()
-        if available > 0:
-            desired = min(desired, scroll.snapped_height(available))
-        if scroll.content_height() != desired:
-            scroll.set_content_height(desired)
-
-    def _cards_available_height(self):
-        """本页面里除卡片区之外的开销之外，还能留给卡片区多少像素。
-
-        用当前已求解的几何逐项累加（resizeEvent 里布局已经算过一轮），
-        而不是拿常量去猜——头部高度会随副标题换行变化。
-
-        日志页签所在的 QSplitter 是可伸展的那一个：算余量时按它可以被压到的
-        最小高度计（SPLITTER_MIN_HEIGHT），否则它当前占的高度会把余量吃掉，
-        卡片区永远被判成「只放得下一行」。
-        """
-        overview = self.stack.widget(0) if hasattr(self, "stack") else None
-        layout = overview.layout() if overview is not None else None
-        scroll = getattr(self, "cards_scroll", None)
-        if layout is None or scroll is None:
-            return 0
-        splitter = self._log_splitter
-        margins = layout.contentsMargins()
-        used = margins.top() + margins.bottom()
-        spacing = max(0, layout.spacing())
-        countable = 0
-        for index in range(layout.count()):
-            item = layout.itemAt(index)
-            if item is None:
-                continue
-            widget = item.widget()
-            if widget is scroll:
-                continue
-            countable += 1
-            if widget is None:
-                used += item.minimumSize().height()
-            elif widget is splitter:
-                used += SPLITTER_MIN_HEIGHT
-            else:
-                used += max(widget.height(), widget.minimumSizeHint().height())
-        used += spacing * max(0, countable)
-        return max(0, overview.height() - used)
 
     def _busy_project_keys(self):
         """还没跑到终态的项目键，按名字排序返回。
@@ -3121,17 +2223,7 @@ class MainWindow(QMainWindow):
         return sorted(busy)
 
     def _busy_project_label(self, key):
-        """卡片标题（就是用户看到的名字）；卡片已收起时退回项目键。"""
-        card = (getattr(self, "cards", None) or {}).get(key)
-        if card is not None:
-            try:
-                text = card.name_label.text()
-            except Exception as exc:
-                logging.getLogger("afk.gui").debug("read card label failed: %s", exc)
-            else:
-                if text:
-                    return text
-        return str(key)
+        return self._task_display_info(key)[0]
 
     def _confirm_quit_with_busy(self, keys):
         """有项目在跑时问一句；纯逻辑抽出来，冒烟可以直接替换掉这个函数。"""
@@ -3179,94 +2271,6 @@ class MainWindow(QMainWindow):
                 self._append_log("core", "info", "退出已取消：挂机链仍在运行")
             return
         self._quit()
-
-
-class CardsScrollArea(QScrollArea):
-    """项目卡区域的滚动容器。
-
-    卡片等宽定宽，窗口变窄会折行、变多行就更高。把它直接塞进 QVBoxLayout
-    会让它按内容高度报 sizeHint，主窗口最小高度随之涨到 821px —— 1366x768
-    笔记本（可用 728）上窗口底部按钮直接掉出屏幕。
-
-    做成滚动区后最小高度只剩一行的量；但 QScrollArea 的默认 sizeHint 偏小，
-    空间充足时它也只想占 160px（大屏上白白出现滚动条）。所以这里自己报
-    「内容需要的高度」作为 sizeHint，布局空间够就完整显示，不够才压小滚动。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._content_height = 0
-        self._row_height = 0
-        self._row_spacing = 0
-
-    def set_row_metrics(self, row_height, row_spacing):
-        """记下单行卡片高度与行间距，用来把可用高度吸附到整行。"""
-        row_height = int(row_height)
-        row_spacing = int(row_spacing)
-        if (row_height, row_spacing) == (self._row_height, self._row_spacing):
-            return
-        self._row_height = row_height
-        self._row_spacing = row_spacing
-        self.updateGeometry()
-
-    def snapped_height(self, available):
-        """把可用高度吸附到「能完整显示的整行数」上。
-
-        历史表现：1338px 宽时卡片折成 3+2，滚动区被压到 396px，第二行卡片
-        正好被切在按钮中间（只露出半个卡），看起来像界面画坏了。这里把高度
-        取成整行的倍数，多余的空间让给下面的日志页签。
-        """
-        available = int(available)
-        if available <= 0 or self._row_height <= 0:
-            return max(CARDS_MIN_HEIGHT, available)
-        step = self._row_height + self._row_spacing
-        rows = max(1, (available + self._row_spacing) // step)
-        snapped = rows * step - self._row_spacing
-        if snapped > available:
-            rows = max(1, rows - 1)
-            snapped = rows * step - self._row_spacing
-        return max(CARDS_MIN_HEIGHT, snapped)
-
-    def rows_for(self, height):
-        """给定高度能完整放下几行（不足一行按 1 行算）。"""
-        if self._row_height <= 0:
-            return 0
-        step = self._row_height + self._row_spacing
-        if height < self._row_height:
-            return 0
-        return max(1, (int(height) + self._row_spacing) // step)
-
-    def set_content_height(self, height):
-        height = int(height)
-        if height == self._content_height:
-            return
-        self._content_height = height
-        self.updateGeometry()
-
-    def content_height(self):
-        return self._content_height
-
-    def sizeHint(self):
-        hint = super().sizeHint()
-        if self._content_height <= 0:
-            return hint
-        return QSize(hint.width(), self._content_height)
-
-    def snap_height_for(self, available):
-        """测试用：给定可用高度时滚动区最终会占的高度。"""
-        return self.snapped_height(available)
-
-    def minimumSizeHint(self):
-        hint = super().minimumSizeHint()
-        # 知道了单行高度以后，最小高度至少得放得下一整行：CARDS_MIN_HEIGHT 只有
-        # 120px，比一行卡片（168px）还矮，窗口被压到最小时卡片会被切在「未运行」
-        # 那一行，四个按钮全看不见（截图见 logs/_ui_r14/min_all.png）。
-        # 留出整行的高度，宁可少放一行也不要把卡片切一半。
-        floor = CARDS_MIN_HEIGHT
-        if self._row_height > 0:
-            floor = max(floor, self._row_height)
-        height = max(hint.height(), floor)
-        return QSize(hint.width(), height)
 
 
 def _escape_html(text):

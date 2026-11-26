@@ -136,10 +136,21 @@ class DesktopWidget(QWidget):
         body.addStretch(1)
 
     # -- 外部接口 --------------------------------------------------------------
+    @staticmethod
+    def _set_text_if_changed(label, text):
+        if label.text() != text:
+            label.setText(text)
+
+    def refresh_theme(self):
+        """主窗口换肤时刷新小组件内自绘按钮与状态色。"""
+        for btn in (self.fold_btn, self.chain_btn, self.stop_btn, self.show_btn):
+            btn.set_variant(btn.variant_name)
+        self.update()
+
     def tick(self, snapshot, idle_status=None, threshold_sec=0, completed_today=False):
         """由主窗口轮询调用：snapshot 来自 supervisor.status_snapshot()。"""
         chain = (snapshot or {}).get("chain_status", "idle")
-        colors = chain_colors()
+        colors = themes.chain_color_table(current_theme())
         self.chain_pill.set_state(CHAIN_TEXT.get(chain, chain), colors.get(chain, colors["idle"]))
         running = [
             key
@@ -151,13 +162,11 @@ class DesktopWidget(QWidget):
             pulse=bool(running) or chain == "running",
             period=1.2,
         )
-        if running:
-            self.run_label.setText("正在运行：{0}".format("、".join(running)))
-        else:
-            self.run_label.setText("未运行任何任务")
+        run_text = "正在运行：{0}".format("、".join(running)) if running else "未运行任何任务"
+        self._set_text_if_changed(self.run_label, run_text)
 
         self._completed_today = bool(completed_today)
-        self.idle_label.setText(self._idle_text(idle_status, threshold_sec))
+        self._set_text_if_changed(self.idle_label, self._idle_text(idle_status, threshold_sec))
 
     def _idle_text(self, idle_status, threshold_sec):
         if not idle_status or not idle_status.get("enabled"):

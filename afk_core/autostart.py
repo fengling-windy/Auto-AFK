@@ -39,9 +39,13 @@ def build_command(mode=MODE_TRAY, extra_args=("--tray",)):
     """返回写进注册表 Run 键的完整命令行。"""
     if mode not in MODES:
         mode = MODE_TRAY
-    vbs = _root() / "tools" / _LAUNCHERS[mode]
-    command = 'wscript.exe "{0}"'.format(vbs)
     args = [str(a) for a in (extra_args or ())]
+    exe = _root() / "Auto-AFK.exe"
+    if exe.is_file() and mode == MODE_TRAY:
+        command = '"{0}"'.format(exe)
+    else:
+        vbs = _root() / "tools" / _LAUNCHERS[mode]
+        command = 'wscript.exe "{0}"'.format(vbs)
     if args:
         command += " " + " ".join(args)
     return command

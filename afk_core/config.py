@@ -1,6 +1,7 @@
 import copy
 import logging
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ def root_dir():
     env = os.environ.get("AFK_ROOT")
     if env:
         return Path(env)
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
@@ -554,7 +557,10 @@ def repair_rules():
 
 
 def project_dir(spec):
-    path = Path(spec.get("path", ""))
+    raw = str(spec.get("path", ""))
+    if os.name != "nt" and ":" not in raw:
+        raw = raw.replace("\\", "/")
+    path = Path(raw)
     if not path.is_absolute():
         path = ROOT / path
     return path
@@ -563,8 +569,15 @@ def project_dir(spec):
 def config_dir_for(key, spec):
     raw = spec.get("config_dir")
     if raw:
-        path = Path(raw)
+        raw_str = str(raw)
+        if os.name != "nt" and ":" not in raw_str:
+            raw_str = raw_str.replace("\\", "/")
+        path = Path(raw_str)
         if not path.is_absolute():
             path = ROOT / path
         return path
+    # 同项目多配置任务（如 BAAH#2）共用基项目的配置目录，不另建幽灵目录
+    base = spec.get("_base_project")
+    if base:
+        return ROOT / "configs" / str(base)
     return ROOT / "configs" / key

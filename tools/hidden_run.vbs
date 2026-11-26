@@ -1,7 +1,7 @@
 Option Explicit
 ' Start the GUI hidden: any console allocated by the pythonw/venv launcher chain
 ' is created with SW_HIDE so no black window ever flashes.
-Dim fso, sh, root, args, i, ts, f
+Dim fso, sh, root, exePath, args, i, ts, f
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
 root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
@@ -16,7 +16,12 @@ Set f = fso.OpenTextFile(ts, 8, True)
 f.WriteLine Now & " hidden_run enter args=[" & args & "]"
 f.Close
 Err.Clear
-sh.Run """" & root & "\.venv\Scripts\pythonw.exe"" """ & root & "\gui\main.py""" & args, 0, False
+exePath = root & "\Auto-AFK.exe"
+If fso.FileExists(exePath) Then
+    sh.Run """" & exePath & """" & args, 1, False
+Else
+    sh.Run """" & root & "\.venv\Scripts\pythonw.exe"" """ & root & "\gui\main.py""" & args, 0, False
+End If
 Set f = fso.OpenTextFile(ts, 8, True)
 f.WriteLine Now & " sh.Run Err=" & Err.Number & " " & Err.Description
 f.Close

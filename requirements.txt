@@ -1,0 +1,6 @@
+PySide6==6.11.1
+psutil>=5.9
+pyyaml>=6.0
+mss>=9.0
+onepush>=1.2
+winotify>=1.1

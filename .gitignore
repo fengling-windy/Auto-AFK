@@ -1,7 +1,18 @@
-# virtualenv / caches
+# virtualenv / caches / packaging
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+dist/
+build/
+packaging/output/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# editor / IDE
+.vscode/
+.idea/
 
 # runtime data
 logs/
@@ -30,4 +41,5 @@ configs/BetterGI/
 configs/MaaEnd/
 configs/March7thAssistant/
 configs/core/backups/
+configs/core/config/
 configs/core/github_token.txt

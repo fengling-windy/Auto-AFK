@@ -1,0 +1,119 @@
+name: Build & Release Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without leading v (e.g. 2.0.0)'
+        required: true
+        default: '2.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies and PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $raw = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.version }}" }
+          $ver = $raw.TrimStart('v')
+          if (-not $ver) { $ver = "2.0.0" }
+          "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Building version: $ver"
+
+      - name: Generate application icon and run headless import smoke
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          python -c "import setup.create_shortcuts as s; p = s.create_icon(); assert p, 'icon generation failed'"
+          python -c "from afk_core import config, project_ops, doctor, report; from gui import spring, themes; print('smoke imports ok')"
+
+      - name: Build Auto-AFK.exe with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean packaging\Auto-AFK.spec
+          if (-not (Test-Path dist\Auto-AFK\Auto-AFK.exe)) {
+            throw "dist\Auto-AFK\Auto-AFK.exe missing"
+          }
+
+      - name: Build Windows Installer (.exe) and Portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+            foreach ($cand in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $cand) { $iscc = $cand; break }
+            }
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            foreach ($cand in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $cand) { $iscc = $cand; break }
+            }
+          }
+          if (-not $iscc) { throw "ISCC.exe not found" }
+
+          New-Item -ItemType Directory -Force -Path packaging\output | Out-Null
+          & $iscc "/DAppVersion=$env:APP_VERSION" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+
+          $stage = "packaging\output\portable_stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "dist\Auto-AFK\*" $stage -Recurse -Force
+          New-Item -ItemType Directory -Force -Path "$stage\configs\core" | Out-Null
+          Copy-Item "configs\core\*.yaml" "$stage\configs\core" -Force
+          foreach ($dir in @("monitor_kit", "setup", "tools")) {
+            Copy-Item $dir "$stage\$dir" -Recurse -Force
+          }
+          Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($f in @("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "Auto-AFK.bat", "Auto-AFK-Admin.bat", "Auto-AFK-CLI.bat", "一键挂机.bat")) {
+            if (Test-Path $f) { Copy-Item $f $stage -Force }
+          }
+          Compress-Archive -Path "$stage\*" -DestinationPath "packaging\output\Auto-AFK-v$env:APP_VERSION-win64-portable.zip" -CompressionLevel Optimal
+          Remove-Item $stage -Recurse -Force
+
+          Get-ChildItem packaging\output -File | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Out-File -FilePath packaging\output\SHA256SUMS.txt -Encoding utf8
+          Get-Content packaging\output\SHA256SUMS.txt
+
+      - name: Upload installer & portable build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Auto-AFK-v${{ env.APP_VERSION }}-windows
+          path: packaging/output/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Auto-AFK ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            packaging/output/Auto-AFK-Setup-*.exe
+            packaging/output/Auto-AFK-*-portable.zip
+            packaging/output/SHA256SUMS.txt

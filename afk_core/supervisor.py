@@ -1,4 +1,5 @@
 import codecs
+import copy
 import json
 import logging
 import os
@@ -208,6 +209,36 @@ def merge_parallel_blocks(steps, blocks, warn=None):
 
 
 
+def normalize_chain_tasks(settings, registry):
+    """读 settings.chain.tasks，丢掉项目不存在的条目；没写（或为空）返回 []。
+
+    每条任务 ``{"id", "project", "config", "enabled"}``：同一个项目可以出现多次
+    （id 不同），各自指定不同的配置文件。
+    """
+    chain = (settings or {}).get("chain") or {}
+    raw = chain.get("tasks")
+    if not isinstance(raw, list):
+        return []
+    projects = (registry or {}).get("projects", {}) or {}
+    out = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        project = str(item.get("project") or "")
+        tid = str(item.get("id") or project)
+        if project not in projects or tid in seen:
+            continue
+        seen.add(tid)
+        out.append({
+            "id": tid,
+            "project": project,
+            "config": str(item.get("config") or "").strip(),
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return out
+
+
 class Supervisor:
     # chain_status 只可能是这五种；state.json 里读到别的东西（比如被手改成数字）
     # 一律当 idle 处理，避免界面上出现无法比较的状态。
@@ -234,6 +265,13 @@ class Supervisor:
         # cap in total (see settings.chain.max_attempts_per_project).
         self._chain_attempts = {}
         self._chain_max_attempts = 3
+        # 任务模式（settings.chain.tasks 非空）下：任务 id -> 任务条目；
+        # 链队列与「当前这一步在跑哪几个」给界面的「上一个 / 当前 / 下一个」用。
+        self._task_map = {}
+        self._task_mode = False
+        self._bg_filter = False
+        self._chain_queue = []
+        self._active_step_members = []
         self._lock = threading.RLock()
         self.bus.status_provider = self.status_snapshot
         self.bus.command_handler = self._handle_command
@@ -245,6 +283,46 @@ class Supervisor:
 
     def _groups(self):
         return self.registry.get("groups", [])
+
+    def _task_entry_for(self, key):
+        entry = self._task_map.get(key)
+        if entry is not None:
+            return entry
+        for task in normalize_chain_tasks(self.settings, self.registry):
+            if task["id"] == key:
+                return task
+        return None
+
+    def resolve_task_spec(self, task_id, task_entry=None):
+        """任务 id -> (基项目键, 生效的项目规格)。
+
+        没有任务条目（或条目没指定配置）时原样返回注册表里的规格，行为与旧版完全一致；
+        指定了配置就深拷贝一份、按规格里的占位符把它落到对应参数上。
+        """
+        entry = task_entry or self._task_entry_for(task_id)
+        base_key = entry["project"] if entry else task_id
+        base_spec = self._projects().get(base_key)
+        if base_spec is None:
+            return base_key, None
+        if entry is None:
+            return base_key, base_spec
+        spec = copy.deepcopy(base_spec)
+        spec["_base_project"] = base_key
+        cfg = str(entry.get("config") or "").strip()
+        if cfg:
+            args = [str(a) for a in (spec.get("args") or [])]
+            if any("{instance}" in a for a in args):
+                spec["instance"] = cfg
+            elif any("{config_name}" in a for a in args):
+                spec["config_name"] = cfg
+            elif args and args[0] == "startOneDragon":
+                spec["args"] = ["startOneDragon", cfg]
+            elif spec.get("sync_files"):
+                sync = [dict(item) for item in spec["sync_files"]]
+                sync[0]["store"] = cfg
+                spec["sync_files"] = sync
+            spec["config_name"] = cfg
+        return base_key, spec
 
     def background_group_ids(self):
         """标记 background: true 的组（不占用鼠标的任务，如云游戏/模拟器组）。
@@ -445,6 +523,8 @@ class Supervisor:
                 "runs": runs,
                 "pending": pending,
                 "event_port": self.bus.port,
+                "chain_queue": list(self._chain_queue),
+                "active_step_members": list(self._active_step_members),
             }
 
     def _build_command(self, key, spec):
@@ -544,10 +624,11 @@ class Supervisor:
         The spawned process is detached and owns its own window: it outlives
         Auto-AFK and is neither monitored nor cleaned up. Returns None on failure.
         """
-        spec = self._projects().get(key)
+        base_key, spec = self.resolve_task_spec(key)
         if spec is None:
             self._emit("core", "error", "unknown project: {0}".format(key), level="error")
             return None
+        key = base_key
         cmd, project = self._build_gui_command(key, spec)
         if cmd is None:
             self._emit(key, "gui", "no gui entry configured for this project", level="warn")
@@ -606,8 +687,8 @@ class Supervisor:
             env[str(k)] = str(v)
         return env
 
-    def start_project(self, key, attempt=1):
-        spec = self._projects().get(key)
+    def start_project(self, key, attempt=1, task_entry=None):
+        base_key, spec = self.resolve_task_spec(key, task_entry)
         if spec is None:
             self._emit("core", "error", "unknown project: {0}".format(key), level="error")
             return None
@@ -625,8 +706,8 @@ class Supervisor:
             self.runs[key] = run
 
         try:
-            configsync.ensure_links(key, spec)
-            sync_results = configsync.sync_in(key, spec)
+            configsync.ensure_links(base_key, spec)
+            sync_results = configsync.sync_in(base_key, spec)
         except Exception as exc:
             # 配置同步（建 junction / 拷配置）会碰项目目录。项目目录不存在、
             # 盘没插、路径写错时这里会抛 FileNotFoundError——原来是裸调用，
@@ -1071,7 +1152,7 @@ class Supervisor:
                 self._emit(key, "error", "emulator shutdown failed: {0}".format(exc), level="warn")
 
         try:
-            out = configsync.sync_out(key, spec)
+            out = configsync.sync_out(spec.get("_base_project") or key, spec)
             if out:
                 self._emit(key, "config", "; ".join(out))
         except Exception as exc:
@@ -1438,6 +1519,26 @@ class Supervisor:
         连起来的相邻卡片）会在建好步骤后把相邻步骤合成一步并强制并行。
         """
         steps = []
+        if self._task_mode:
+            allowed = None
+            if self._bg_filter:
+                allowed = {m for g in groups for m in (g.get("members") or [])}
+            for task in normalize_chain_tasks(self.settings, self.registry):
+                tid, base = task["id"], task["project"]
+                if not task["enabled"] or not self._projects().get(base, {}).get("enabled", True):
+                    continue
+                if allowed is not None and base not in allowed:
+                    continue
+                if only_keys is not None and tid not in only_keys:
+                    continue
+                steps.append({"group": {"id": tid}, "members": [tid], "parallel": False, "merged": False})
+            if parallel_blocks:
+                steps = merge_parallel_blocks(
+                    steps,
+                    parallel_blocks,
+                    warn=lambda text: self._emit("core", "chain", text, level="warn"),
+                )
+            return steps
         for group in groups:
             members = [
                 m
@@ -1480,7 +1581,8 @@ class Supervisor:
         # budget read
         if parallel:
             for member in members:
-                self.start_project(member, attempt=self._chain_attempts.get(member, 1))
+                self.start_project(member, attempt=self._chain_attempts.get(member, 1),
+                                   task_entry=self._task_map.get(member))
             while True:
                 if self._chain_stop.is_set():
                     return
@@ -1494,7 +1596,8 @@ class Supervisor:
             for member in members:
                 if self._chain_stop.is_set() or self._chain_soft.is_set():
                     return
-                self.start_project(member, attempt=self._chain_attempts.get(member, 1))
+                self.start_project(member, attempt=self._chain_attempts.get(member, 1),
+                                   task_entry=self._task_map.get(member))
                 while True:
                     if self._chain_stop.is_set():
                         return
@@ -1586,6 +1689,16 @@ class Supervisor:
         )
         self._chain_attempts = {}
         self._chain_max_attempts = cap
+        # 任务模式：chain.tasks 非空时按任务清单跑（同项目可多条、各用各的配置）；
+        # 否则走原来的分组路径，行为不变。
+        tasks = normalize_chain_tasks(self.settings, self.registry)
+        self._task_mode = bool(tasks)
+        self._task_map = {t["id"]: t for t in tasks}
+        self._bg_filter = bool(group_ids)
+        if self._task_mode:
+            chain_order = [t["id"] for t in tasks]
+        self._chain_queue = []
+        self._active_step_members = []
 
         overall_ok = True
         aborted = False
@@ -1595,6 +1708,7 @@ class Supervisor:
                 break
             if round_index == 1:
                 plan = self._chain_plan(groups, chain_order, None, parallel_blocks)
+                self._chain_queue = [m for step in plan for m in (step.get("members") or [])]
             else:
                 if not retry_failed_at_end:
                     break
@@ -1634,7 +1748,11 @@ class Supervisor:
                     "chain",
                     "group {0} started: {1} (parallel={2})".format(label, runnable, parallel),
                 )
-                self._launch_and_wait(runnable, parallel)
+                self._active_step_members = list(runnable)
+                try:
+                    self._launch_and_wait(runnable, parallel)
+                finally:
+                    self._active_step_members = []
                 if self._chain_stop.is_set():
                     break
                 failed = [

@@ -11,53 +11,53 @@
 
 # 深色（原有配色，改动即等于改视觉，非必要不要动）
 DARK = {
-    "window": "#0b0d12",
-    "panel": "#10141d",
-    "card": "#141926",
-    "card_border": "#212b3c",
-    "border": "#1d2432",
-    "sidebar_bg": "#0d1017",
-    "control_bg": "#1a2130",
-    "control_border": "#2a3547",
-    "control_bg_hover": "#243048",
-    "control_bg_press": "#151c2a",
-    "control_border_hover": "#3f5173",
-    "accent": "#3d7dfa",
-    "accent_hover": "#5594ff",
-    "accent_soft": "#4c8dff",
+    "window": "#090b10",
+    "panel": "#0f1219",
+    "card": "#131722",
+    "card_border": "#1f2636",
+    "border": "#1a202e",
+    "sidebar_bg": "#0b0e14",
+    "control_bg": "#171d2b",
+    "control_border": "#263044",
+    "control_bg_hover": "#20293d",
+    "control_bg_press": "#131824",
+    "control_border_hover": "#384866",
+    "accent": "#4f86f7",
+    "accent_hover": "#6698ff",
+    "accent_soft": "#4f86f7",
     "danger_text": "#ff92a2",
-    "danger_bg": "#251821",
-    "danger_bg_hover": "#33212c",
-    "danger_bg_press": "#1e1319",
-    "danger_border": "#48242f",
-    "input_bg_deep": "#0a0c11",
-    "input_bg": "#151b28",
-    "input_border": "#242f42",
+    "danger_bg": "#24161f",
+    "danger_bg_hover": "#311e2a",
+    "danger_bg_press": "#1c1118",
+    "danger_border": "#46222d",
+    "input_bg_deep": "#090b10",
+    "input_bg": "#131824",
+    "input_border": "#222b3d",
     "input_border_hover": "#33415c",
-    "selection": "#2b4a7a",
-    "text_strong": "#ecf1fa",
-    "text": "#d7deec",
-    "text_control": "#ccd6ea",
-    "section_title": "#b9c4da",
+    "selection": "#284675",
+    "text_strong": "#f1f5fc",
+    "text": "#dce3f0",
+    "text_control": "#d0daec",
+    "section_title": "#c0cbe0",
     "nav_text": "#8b97ad",
-    "nav_text_hover": "#cdd7ea",
-    "nav_text_checked": "#eef3fc",
-    "nav_checked_bg": "#1a2334",
-    "text_muted": "#7f8aa3",
-    "text_dim": "#5c667d",
-    "text_placeholder": "#5f6a82",
-    "text_disabled": "#59627a",
-    "disabled_bg": "#161c28",
-    "disabled_border": "#232c3d",
-    "scroll_handle": "#2b3547",
-    "scroll_handle_hover": "#3d4d6b",
-    "tooltip_bg": "#1a2130",
-    "tooltip_text": "#dfe6f5",
+    "nav_text_hover": "#dce4f2",
+    "nav_text_checked": "#f4f7fd",
+    "nav_checked_bg": "#182132",
+    "text_muted": "#8490a8",
+    "text_dim": "#5e6880",
+    "text_placeholder": "#5d6880",
+    "text_disabled": "#555f75",
+    "disabled_bg": "#141924",
+    "disabled_border": "#202838",
+    "scroll_handle": "#283244",
+    "scroll_handle_hover": "#3a4966",
+    "tooltip_bg": "#171d2b",
+    "tooltip_text": "#e4eaf7",
     "on_accent": "#ffffff",
     "on_selection": "#ffffff",
-    "overlay_subtle": "rgba(255, 255, 255, 0.04)",
-    "overlay_nav": "rgba(255, 255, 255, 0.045)",
-    "overlay_hover": "rgba(255, 255, 255, 0.06)",
+    "overlay_subtle": "rgba(255, 255, 255, 0.038)",
+    "overlay_nav": "rgba(255, 255, 255, 0.048)",
+    "overlay_hover": "rgba(255, 255, 255, 0.065)",
     # 单色小图标（拖动把手、关闭、打开仓库…）。这些是自绘位图，QSS 的 $nav_text
     # 换不到它们身上，必须按主题给：写死 #8b97ad / #7f8aa3 时，浅色白卡上的
     # 对比度只有 2.95 / 3.46，图标淡到几乎看不见。
@@ -65,19 +65,19 @@ DARK = {
     "icon_subtle": "#7f8aa3",
 }
 
-# 浅色：同一套令牌换色，行高/圆角/字号完全共享，切换主题不做布局改动
+# 浅色：参考 Apple / Linear 极简中性灰白层级，行高/圆角/字号完全共享
 LIGHT = {
-    "window": "#f3f6fb",
+    "window": "#f5f7fb",
     "panel": "#ffffff",
     "card": "#ffffff",
-    "card_border": "#e2e8f2",
-    "border": "#e3e8f1",
-    "sidebar_bg": "#eef2f9",
+    "card_border": "#e4e9f2",
+    "border": "#e6ebf3",
+    "sidebar_bg": "#eff3f9",
     "control_bg": "#ffffff",
-    "control_border": "#d7dee9",
-    "control_bg_hover": "#eef3fb",
-    "control_bg_press": "#e3eaf6",
-    "control_border_hover": "#b9c4d6",
+    "control_border": "#d8e0ec",
+    "control_bg_hover": "#f2f6fc",
+    "control_bg_press": "#e6eef9",
+    "control_border_hover": "#bcc7da",
     "accent": "#2563eb",
     "accent_hover": "#3b82f6",
     "accent_soft": "#2563eb",
@@ -86,36 +86,36 @@ LIGHT = {
     "danger_bg_hover": "#fee4e2",
     "danger_bg_press": "#fecdca",
     "danger_border": "#fecdca",
-    "input_bg_deep": "#ffffff",
+    "input_bg_deep": "#f9fafc",
     "input_bg": "#ffffff",
-    "input_border": "#d7dee9",
-    "input_border_hover": "#b9c4d6",
+    "input_border": "#d8e0ec",
+    "input_border_hover": "#bcc7da",
     "selection": "#dbeafe",
     "text_strong": "#0f172a",
-    "text": "#1f2937",
+    "text": "#1e293b",
     "text_control": "#334155",
-    "section_title": "#475569",
-    "nav_text": "#5b6779",
+    "section_title": "#334155",
+    "nav_text": "#586578",
     "nav_text_hover": "#0f172a",
     "nav_text_checked": "#0b1220",
-    "nav_checked_bg": "#dbe7fb",
+    "nav_checked_bg": "#dfe9fb",
     "text_muted": "#64748b",
-    "text_dim": "#7d879c",
+    "text_dim": "#78849b",
     "text_placeholder": "#94a3b8",
     "text_disabled": "#a3adbe",
-    "disabled_bg": "#eef1f6",
-    "disabled_border": "#dde3ec",
-    "scroll_handle": "#c8d1e0",
-    "scroll_handle_hover": "#aab6c9",
+    "disabled_bg": "#f1f4f9",
+    "disabled_border": "#e0e6ef",
+    "scroll_handle": "#cbd4e3",
+    "scroll_handle_hover": "#aebacf",
     "tooltip_bg": "#0f172a",
     "tooltip_text": "#f8fafc",
     "on_accent": "#ffffff",
     "on_selection": "#0f172a",
-    "overlay_subtle": "rgba(15, 23, 42, 0.04)",
-    "overlay_nav": "rgba(15, 23, 42, 0.05)",
-    "overlay_hover": "rgba(15, 23, 42, 0.06)",
+    "overlay_subtle": "rgba(15, 23, 42, 0.036)",
+    "overlay_nav": "rgba(15, 23, 42, 0.048)",
+    "overlay_hover": "rgba(15, 23, 42, 0.065)",
     # 浅色主题的白卡上要更深的灰才看得见（#8b97ad / #7f8aa3 只有 2.95 / 3.46）
-    "icon": "#5b6779",
+    "icon": "#586578",
     "icon_subtle": "#64748b",
 }
 
@@ -275,59 +275,83 @@ def is_default_project_color(key, value):
 BUTTONS = {
     "dark": {
         "default": {
-            "bg": "#1a2130", "bg_hover": "#243048", "bg_press": "#151c2a",
-            "border": "#2a3547", "border_hover": "#3f5173", "text": "#ccd6ea",
-            "ripple": "#7fb0ff", "radius": 9.0, "gradient": 0.0,
+            "bg": "#171d2b", "bg_hover": "#212a3e", "bg_press": "#121723",
+            "border": "#263044", "border_hover": "#3a4a69", "text": "#d0daec",
+            "ripple": "#85b4ff", "radius": 8.0, "gradient": 0.03,
         },
         "primary": {
-            "bg": "#3d7dfa", "bg_hover": "#5594ff", "bg_press": "#2e6ae6",
-            "border": "#3d7dfa", "border_hover": "#5594ff", "text": "#ffffff",
-            "ripple": "#ffffff", "radius": 9.0, "gradient": 0.07,
+            "bg": "#4f86f7", "bg_hover": "#6698ff", "bg_press": "#3b73e6",
+            "border": "#4f86f7", "border_hover": "#6698ff", "text": "#ffffff",
+            "ripple": "#ffffff", "radius": 8.0, "gradient": 0.06,
         },
         "danger": {
-            "bg": "#251821", "bg_hover": "#33212c", "bg_press": "#1e1319",
-            "border": "#48242f", "border_hover": "#5e2f3d", "text": "#ff92a2",
-            "ripple": "#ff92a2", "radius": 9.0, "gradient": 0.0,
+            "bg": "#24161f", "bg_hover": "#321e2b", "bg_press": "#1c1118",
+            "border": "#46222d", "border_hover": "#5f2e3d", "text": "#ff92a2",
+            "ripple": "#ff92a2", "radius": 8.0, "gradient": 0.0,
         },
         "mini": {
-            "bg": "#1a2130", "bg_hover": "#243048", "bg_press": "#151c2a",
-            "border": "#2a3547", "border_hover": "#3f5173", "text": "#ccd6ea",
-            "ripple": "#7fb0ff", "radius": 7.0, "gradient": 0.0,
+            "bg": "#171d2b", "bg_hover": "#212a3e", "bg_press": "#121723",
+            "border": "#263044", "border_hover": "#3a4a69", "text": "#d0daec",
+            "ripple": "#85b4ff", "radius": 6.5, "gradient": 0.0,
         },
         "parallel": {
-            "bg": "#1b2740", "bg_hover": "#25355a", "bg_press": "#16203a",
-            "border": "#2f4a7a", "border_hover": "#436699", "text": "#8fc0ff",
-            "ripple": "#8fc0ff", "radius": 7.0, "gradient": 0.0,
+            "bg": "#18243b", "bg_hover": "#223354", "bg_press": "#141e33",
+            "border": "#2c4673", "border_hover": "#416499", "text": "#93c2ff",
+            "ripple": "#93c2ff", "radius": 6.5, "gradient": 0.0,
         },
     },
     "light": {
         "default": {
-            "bg": "#ffffff", "bg_hover": "#f1f6fd", "bg_press": "#e6edf9",
-            "border": "#d7dee9", "border_hover": "#b9c4d6", "text": "#334155",
-            "ripple": "#93c5fd", "radius": 9.0, "gradient": 0.0,
+            "bg": "#ffffff", "bg_hover": "#f3f7fd", "bg_press": "#e8effa",
+            "border": "#d8e0ec", "border_hover": "#bcc7da", "text": "#334155",
+            "ripple": "#93c5fd", "radius": 8.0, "gradient": 0.02,
         },
         "primary": {
             "bg": "#2563eb", "bg_hover": "#3b82f6", "bg_press": "#1d4ed8",
             "border": "#2563eb", "border_hover": "#3b82f6", "text": "#ffffff",
-            "ripple": "#ffffff", "radius": 9.0, "gradient": 0.05,
+            "ripple": "#ffffff", "radius": 8.0, "gradient": 0.05,
         },
         "danger": {
             "bg": "#fef3f2", "bg_hover": "#fee4e2", "bg_press": "#fecdca",
             "border": "#fecdca", "border_hover": "#fda29b", "text": "#d92d20",
-            "ripple": "#f97066", "radius": 9.0, "gradient": 0.0,
+            "ripple": "#f97066", "radius": 8.0, "gradient": 0.0,
         },
         "mini": {
-            "bg": "#ffffff", "bg_hover": "#f1f6fd", "bg_press": "#e6edf9",
-            "border": "#d7dee9", "border_hover": "#b9c4d6", "text": "#334155",
-            "ripple": "#93c5fd", "radius": 7.0, "gradient": 0.0,
+            "bg": "#ffffff", "bg_hover": "#f3f7fd", "bg_press": "#e8effa",
+            "border": "#d8e0ec", "border_hover": "#bcc7da", "text": "#334155",
+            "ripple": "#93c5fd", "radius": 6.5, "gradient": 0.0,
         },
         "parallel": {
-            "bg": "#eaf2ff", "bg_hover": "#dbe9ff", "bg_press": "#cadcfc",
-            "border": "#b6d0f7", "border_hover": "#8db6ef", "text": "#1d4ed8",
-            "ripple": "#93c5fd", "radius": 7.0, "gradient": 0.0,
+            "bg": "#ebf3ff", "bg_hover": "#dceaff", "bg_press": "#ccdefc",
+            "border": "#b8d2f8", "border_hover": "#8eb7f0", "text": "#1d4ed8",
+            "ripple": "#93c5fd", "radius": 6.5, "gradient": 0.0,
         },
     },
 }
+
+
+# 预计算的派生色板缓存：避免 300ms 轮询与万行日志渲染重复做字符串归一与字典推导
+_CHAIN_COLOR_TABLES = {
+    t_name: {c_key: STATUS_PALETTE[t_name][s_key] for c_key, s_key in CHAIN_STATES.items()}
+    for t_name in THEMES
+}
+_LEVEL_COLOR_TABLES = {
+    t_name: {
+        "error": STATUS_PALETTE[t_name]["log_error"],
+        "warn": STATUS_PALETTE[t_name]["log_warn"],
+    }
+    for t_name in THEMES
+}
+
+
+def chain_color_table(theme):
+    """按主题返回预计算的链状态色字典（零分配只读复用）。"""
+    return _CHAIN_COLOR_TABLES.get(normalize_theme(theme), _CHAIN_COLOR_TABLES[DEFAULT_THEME])
+
+
+def level_color_table(theme):
+    """按主题返回预计算的日志级别色字典（零分配只读复用）。"""
+    return _LEVEL_COLOR_TABLES.get(normalize_theme(theme), _LEVEL_COLOR_TABLES[DEFAULT_THEME])
 
 
 def resolve(theme):

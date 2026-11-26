@@ -5,8 +5,9 @@
         .venv/Scripts/python.exe tools/ui_preview.py [输出目录]
 
 产出：
-    ui_preview_default.png    总览页默认状态
-    ui_preview_states.png     总览页动效状态（涟漪/按压/悬停/指示条中段）
+    ui_preview_default.png    总览页默认状态（上个/当前/下个舞台 + 多列实时日志）
+    ui_preview_order.png      运行顺序页
+    ui_preview_projects.png   项目配置页
     ui_preview_settings.png   设置页
 """
 
@@ -18,46 +19,59 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QTime, Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QTime, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
     QSplitter,
+    QStackedWidget,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from gui import main as gui_main
-from gui.modern import (
-    AnimatedButton,
-    AnimatedPill,
-    FlowHost,
-    add_shadow,
-    apply_theme,
-    enable_smooth_scroll,
-)
-from gui.nav_rail import NavRail
 from gui.advanced_panel import AdvancedPanel
-from gui.project_status_page import ProjectStatusPage
+from gui.cards import STATUS_TEXT, _theme_status_colors
+from gui.live_log_columns import CORE_KEY, CORE_TITLE, MultiColumnLogBoard
+from gui.modern import AnimatedButton, AnimatedPill, add_shadow, apply_theme
+from gui.nav_rail import NavRail
+from gui.project_status_page import ProjectConfigPage
+from gui.run_order_page import RunOrderPage
+from gui.run_stage import RunStageWidget
 from gui.settings_page import SettingsPage
 
 FAKE_RUNS = {
-    "March7thAssistant": {"status": "running", "pid": 22048, "last_message": "开始每日任务：清体力", "attempt": 1},
-    "BAAH": {"status": "success", "pid": 10492, "exit_code": 0, "attempt": 1},
+    "March7thAssistant": {
+        "status": "running",
+        "run_id": "demo-m7a-1",
+        "pid": 22048,
+        "started_at": time.time() - 92,
+        "last_message": "开始每日任务：清体力",
+        "attempt": 1,
+    },
+    "BAAH": {
+        "status": "success",
+        "run_id": "demo-baah-1",
+        "pid": 10492,
+        "exit_code": 0,
+        "finished_at": time.time() - 12,
+        "attempt": 1,
+    },
     "MaaEnd": {"status": "pending"},
     "ZenlessZoneZero-OneDragon": {"status": "pending"},
-    "BetterGI": {"status": "failed", "pid": 8802, "exit_code": 1, "last_message": "识别超时，等待修复引擎介入", "attempt": 2},
+    "BetterGI": {
+        "status": "failed",
+        "pid": 8802,
+        "exit_code": 1,
+        "last_message": "识别超时，等待修复引擎介入",
+        "attempt": 2,
+    },
 }
 
-# 必须和 configs/core/afk_projects.yaml 保持 5 个项目：预览图是拿来核对布局的，
-# 少一个项目就看不到 FlowLayout 在 1360 宽度下真实的 3+2 折行（曾漏掉绝区零）。
 FAKE_PROJECTS = {
     "March7thAssistant": {
         "display_name": "三月七小助手（崩坏：星穹铁道 / 云游戏）",
@@ -83,6 +97,7 @@ FAKE_PROJECTS = {
         "display_name": "MaaEnd（明日方舟：终末地 / 独占前台）",
         "gui": {"exe": "install\\mxu.exe"},
         "launch_type": "exe", "path": "MaaEnd", "exe": "install\\mxu.exe",
+        "instance": "全套日常",
         "retry": 1, "hang_timeout": 1800, "repo": "MaaEnd/MaaEnd",
         "version": "v3.3.0-beta.1-6-g9e260d506",
     },
@@ -91,7 +106,7 @@ FAKE_PROJECTS = {
         "gui": {"args": ["one_dragon.py"]},
         "launch_type": "python", "path": "ZenlessZoneZero-OneDragon",
         "python": ".venv\\Scripts\\python.exe",
-        "args": ["src\\zzz_od\\gui\\app.py"],
+        "args": ["src\\zzz_od\\application\\zzz_application_launcher.py"],
         "retry": 1, "hang_timeout": 1800,
         "repo": "OneDragon-Anything/ZenlessZoneZero-OneDragon",
         "version": "v2.6.1-11-g1d57ea8d",
@@ -106,6 +121,12 @@ FAKE_PROJECTS = {
 }
 
 FAKE_REGISTRY = {"projects": FAKE_PROJECTS, "groups": [], "reserved": []}
+FAKE_SETTINGS = {
+    "chain": {
+        "order": ["BAAH", "March7thAssistant", "MaaEnd", "ZenlessZoneZero-OneDragon", "BetterGI"],
+        "parallel_blocks": [["BAAH", "March7thAssistant"]],
+    }
+}
 
 FAKE_LOG = [
     ("core", "info", "启动更新：正在后台更新全部项目..."),
@@ -116,30 +137,31 @@ FAKE_LOG = [
     ("BAAH", "info", "结算完成，退出码 0"),
     ("BetterGI", "error", "识别超时，等待修复引擎介入"),
     ("core", "warn", "BetterGI 失败，尝试 2/3"),
-] * 12
+] * 8
 
 
-class FakeSupervisor:
-    def spawn_project_gui(self, key):
-        return None
-
-
-def _noop(*args, **kwargs):
+def _noop(*_args, **_kwargs):
     pass
 
 
 def _subtitle_text():
-    """副标题从假注册表算，和真实 MainWindow._subtitle_text 保持同一套逻辑。
+    names = [str(spec.get("display_name", k)).split("（")[0].strip() for k, spec in FAKE_PROJECTS.items()]
+    return "一键挂机 · {0} 统一编排".format(" + ".join(names)) if names else "一键挂机 · 统一编排"
 
-    写死成「三月七小助手 + BAAH + MaaEnd」会让预览图里的项目名单比实际能挂的
-    少两个（绝区零一龙、BetterGI），预览图和真实界面不一致就没法拿来核对了。
-    """
-    names = []
-    for _key, spec in FAKE_PROJECTS.items():
-        names.append(str(spec.get("display_name", _key)).split("（")[0].strip())
-    if not names:
-        return "一键挂机 · 统一编排"
-    return "一键挂机 · {0} 统一编排".format(" + ".join(names))
+
+def _name_of(key):
+    spec = FAKE_PROJECTS.get(key) or {}
+    return str(spec.get("display_name", key)).split("（")[0] or key
+
+
+def _config_of(key):
+    spec = FAKE_PROJECTS.get(key) or {}
+    return str(spec.get("instance") or spec.get("config_name") or "")
+
+
+def _status_of(status):
+    palette = _theme_status_colors()
+    return STATUS_TEXT.get(status, status), palette.get(status, palette["pending"])
 
 
 def build_overview():
@@ -152,30 +174,28 @@ def build_overview():
     header = QFrame()
     header.setObjectName("header")
     header_layout = QVBoxLayout(header)
-    header_layout.setContentsMargins(18, 14, 18, 12)
-    header_layout.setSpacing(10)
+    header_layout.setContentsMargins(18, 13, 18, 11)
+    header_layout.setSpacing(9)
 
     top = QHBoxLayout()
     top.setSpacing(12)
     logo = QLabel()
-    logo.setPixmap(gui_main.make_icon().pixmap(40, 40))
+    logo.setPixmap(gui_main.make_icon().pixmap(36, 36))
     title_box = QVBoxLayout()
-    title_box.setSpacing(0)
+    title_box.setSpacing(1)
     title = QLabel("Auto-AFK")
     title.setObjectName("title")
-    # 副标题从假注册表算，和真实 MainWindow._subtitle_text 保持一致：
-    # 写死旧文案会让预览图里的项目名单和实际能挂的项目不符（曾漏两个项目）。
     subtitle = QLabel(_subtitle_text())
     subtitle.setObjectName("subtitle")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
     top.addWidget(logo)
-    top.addLayout(title_box)
-    top.addStretch(1)
-    chain_pill = AnimatedPill("空闲", gui_main._theme_chain_colors()["idle"])
-    chain_btn = AnimatedButton("一键挂机", variant="primary")
+    top.addLayout(title_box, 1)
+    chain_pill = AnimatedPill("运行中", gui_main._theme_chain_colors()["running"])
+    chain_btn = AnimatedButton("挂机中…", variant="primary")
     chain_btn.setObjectName("primary")
-    add_shadow(chain_btn, alpha=120, blur=18, dy=3)
+    chain_btn.setEnabled(False)
+    add_shadow(chain_btn, alpha=105, blur=16, dy=2)
     stop_all_btn = AnimatedButton("全部停止", variant="danger")
     stop_all_btn.setObjectName("danger")
     top.addWidget(chain_pill)
@@ -183,10 +203,25 @@ def build_overview():
     top.addWidget(stop_all_btn)
     header_layout.addLayout(top)
 
+    def _divider():
+        line = QFrame()
+        line.setObjectName("toolbarDivider")
+        line.setFixedHeight(16)
+        return line
+
     controls = QHBoxLayout()
-    controls.setSpacing(8)
-    for text in ("环境自检", "校验补丁", "打开日志", "打开配置", "立即更新", "更新MuMu"):
-        controls.addWidget(AnimatedButton(text))
+    controls.setSpacing(6)
+    for item in (
+        AnimatedButton("环境自检"),
+        AnimatedButton("校验补丁"),
+        _divider(),
+        AnimatedButton("打开日志"),
+        AnimatedButton("打开配置"),
+        _divider(),
+        AnimatedButton("立即更新"),
+        AnimatedButton("更新MuMu"),
+    ):
+        controls.addWidget(item)
     controls.addStretch(1)
     pre_run_check = QCheckBox("运行前更新")
     pre_run_check.setChecked(True)
@@ -194,8 +229,6 @@ def build_overview():
     schedule_check.setChecked(True)
     schedule_time = QTimeEdit()
     schedule_time.setDisplayFormat("HH:mm")
-    # 假日志里写的是「定时启动: 开 04:00」，时间框也得是 04:00 才对得上；
-    # QTimeEdit 默认 00:00，预览图会出现「勾了定时启动但时间是 00:00」的假象。
     schedule_time.setTime(QTime(4, 0))
     controls.addWidget(pre_run_check)
     controls.addWidget(schedule_check)
@@ -203,110 +236,50 @@ def build_overview():
     header_layout.addLayout(controls)
     root.addWidget(header)
 
-    cards_title = QLabel("挂机项目")
-    cards_title.setObjectName("sectionTitle")
-    root.addWidget(cards_title)
-    # 和真实主窗口一样用 FlowHost 包一层：它按窗口宽度决定折成几行并钉住高度。
-    # 直接把 FlowLayout 塞进 QVBoxLayout 时预览图里第二行卡片会压在页签上，
-    # 那种重叠在真实界面里已经被修掉，预览工具不能继续画错的版本。
-    # 间距也要跟主窗口一致（横向 20 是给并行连线留的缝隙），否则预览图里的
-    # 连线会挤成一团，看起来像连错了。
-    cards_host = FlowHost(h_spacing=20, v_spacing=12)
-    cards_row = cards_host.flow()
-    cards = []
-    for key, spec in FAKE_PROJECTS.items():
-        card = gui_main.ProjectCard(
-            key, spec, gui_main._project_color_for(key),
-            _noop, _noop, _noop, on_gui=_noop, on_parallel=_noop, on_remove=_noop,
-        )
-        card.update_state(FAKE_RUNS.get(key))
-        cards.append(card)
-        cards_row.addWidget(card)
-    root.addWidget(cards_host)
+    stage_title = QLabel("运行状态")
+    stage_title.setObjectName("sectionTitle")
+    root.addWidget(stage_title)
+    run_stage = RunStageWidget()
+    run_stage.set_gui_probe(lambda k: bool((FAKE_PROJECTS.get(k) or {}).get("gui")))
+    run_stage.update_stage(
+        tasks=FAKE_SETTINGS["chain"]["order"],
+        runs=FAKE_RUNS,
+        queue=FAKE_SETTINGS["chain"]["order"],
+        chain_status="running",
+        name_of=_name_of,
+        config_of=_config_of,
+        color_of=gui_main._project_color_for,
+        status_of=_status_of,
+    )
+    root.addWidget(run_stage, 0)
 
     splitter = QSplitter(Qt.Vertical)
     splitter.setChildrenCollapsible(False)
-    # 页签栏已按用户要求移除：实时日志直接铺在总览页下半部分，错误报告 /
-    # 注册表 / 设置原文 / 修复规则 / 环境自检搬进了设置页的高级设置。
-    log_panel = QWidget()
-    log_layout = QVBoxLayout(log_panel)
-    log_layout.setContentsMargins(10, 10, 10, 10)
-    log_layout.setSpacing(8)
-    log_controls = QHBoxLayout()
-    log_controls.setSpacing(8)
-    filter_combo = QComboBox()
-    filter_combo.addItem("全部项目", "")
-    for key in FAKE_PROJECTS:
-        filter_combo.addItem(key, key)
-    filter_combo.addItem("core", "core")
-    autoscroll_check = QCheckBox("自动滚动")
-    autoscroll_check.setChecked(True)
-    clear_btn = AnimatedButton("清空显示")
-    log_controls.addWidget(QLabel("过滤:"))
-    log_controls.addWidget(filter_combo)
-    log_controls.addWidget(autoscroll_check)
-    log_controls.addWidget(clear_btn)
-    log_controls.addStretch(1)
-    log_view = QPlainTextEdit()
-    log_view.setReadOnly(True)
-    log_view.setFont(QFont("Consolas", 9))
-    enable_smooth_scroll(log_view)
-    log_layout.addLayout(log_controls)
-    log_layout.addWidget(log_view, 1)
-
-    splitter.addWidget(log_panel)
+    log_board = MultiColumnLogBoard(auto_open=True)
+    log_board.set_catalog([(k, _name_of(k)) for k in FAKE_PROJECTS])
+    log_board.open_column(CORE_KEY, CORE_TITLE, gui_main._project_color_for(CORE_KEY))
+    log_board.sync_running_projects(
+        FAKE_RUNS,
+        lambda k: (_name_of(k), gui_main._project_color_for(k)),
+        _status_of,
+    )
+    splitter.addWidget(log_board)
     root.addWidget(splitter, 1)
-    return overview, cards, chain_pill, log_view
+    return overview, chain_pill, log_board
 
 
-def populate_log(log_view):
-    for project, level, message in FAKE_LOG[:60]:
-        ts = time.strftime("%H:%M:%S")
-        project_color = gui_main._project_color_for(project)
-        level_colors = gui_main._theme_level_colors()
-        if level == "error":
-            message_color = level_colors["error"]
-        elif level == "warn":
-            message_color = level_colors["warn"]
-        else:
-            message_color = project_color
+def populate_log(log_board):
+    by_proj = {}
+    level_colors = gui_main._theme_level_colors()
+    ts = time.strftime("%H:%M:%S")
+    for project, level, message in FAKE_LOG[:48]:
+        pcol = gui_main._project_color_for(project)
+        mcol = level_colors.get(level, pcol)
         html = '<span style="color:{0}">[{1}] [{2}]</span> <span style="color:{3}">{4}</span>'.format(
-            project_color, ts, project, message_color, message
+            pcol, ts, project, mcol, message
         )
-        log_view.appendHtml(html)
-
-
-def apply_state_shots(cards, chain_pill):
-    for card in cards:
-        card._hover = 1.0
-        card.update()
-    for card in cards:
-        if card.dot._pulse:
-            card.dot._phase = 0.55
-            card.dot.update()
-    buttons = card.window().findChildren(AnimatedButton)
-    header_btns = [b for b in buttons if b.text() in ("一键挂机", "全部停止")]
-    chain_pill.set_state("运行中", gui_main._theme_chain_colors()["running"])
-    # 链在跑时真实界面会把这颗按钮置灰并换成「挂机中…」（MainWindow._sync_chain_controls）。
-    # 预览若只改胶囊，图上就是「运行中 + 可点的一键挂机」，与实际交互不符。
-    for b in header_btns:
-        if b.text() == "一键挂机":
-            b.setText("挂机中…")
-            b.setEnabled(False)
-            b.update()
-    if len(header_btns) > 1:
-        # 置灰之后「全部停止」才是这一屏里唯一可点的动作，给它画悬停态
-        d = header_btns[1]
-        d._hover = 1.0
-        d.update()
-    # 链在跑时真实界面会把这颗按钮置灰并换成「挂机中…」（MainWindow._sync_chain_controls）。
-    # 预览若只改胶囊，图上就是「运行中 + 可点的一键挂机」，与实际交互不符。
-    for b in header_btns:
-        if b.text() == "一键挂机":
-            b.setText("挂机中…")
-            b.setEnabled(False)
-            b._hover = 0.0
-            b.update()
+        by_proj.setdefault(project, []).append(html)
+    log_board.append_batch(by_proj)
 
 
 def build_shell():
@@ -318,30 +291,33 @@ def build_shell():
     root.setSpacing(0)
 
     nav = NavRail()
-    # 与真实 MainWindow._build_ui 一致：总览 / 项目状态 / 设置三项。项目界面不再
-    # 当作嵌入页挂进导航，点卡片上的「界面」是独立打开项目自己的窗口。
     nav.add_item("overview", "总览", icon="home")
-    nav.add_item("projects", "项目状态", icon="status")
+    nav.add_item("order", "运行顺序", icon="order")
+    nav.add_item("projects", "项目配置", icon="status")
     nav.add_item("settings", "设置", icon="settings")
     nav.finish()
-    # 真实 MainWindow 在 _build_ui 末尾会 set_active("overview")；预览若跳过这一步，
-    # 就没有任何导航项被选中，左侧高亮条也不会落位（此前正是这块未定位的
-    # 指示条在左上角画出一块蓝色，压在品牌 Logo 上）。
     nav.set_active("overview", animate=False)
     root.addWidget(nav)
-
-    from PySide6.QtWidgets import QStackedWidget
 
     stack = QStackedWidget()
     root.addWidget(stack, 1)
 
-    overview, cards, chain_pill, log_view = build_overview()
-    populate_log(log_view)
+    overview, chain_pill, log_board = build_overview()
+    populate_log(log_board)
     stack.addWidget(overview)
 
-    projects_page = ProjectStatusPage(
+    order_page = RunOrderPage(
         registry_getter=lambda: FAKE_REGISTRY,
-        color_getter=lambda k: gui_main._project_color_for(k),
+        settings_getter=lambda: FAKE_SETTINGS,
+        color_getter=gui_main._project_color_for,
+        log_fn=_noop,
+        runs_getter=lambda: FAKE_RUNS,
+    )
+    stack.addWidget(order_page)
+
+    projects_page = ProjectConfigPage(
+        registry_getter=lambda: FAKE_REGISTRY,
+        color_getter=gui_main._project_color_for,
         log_fn=_noop,
     )
     stack.addWidget(projects_page)
@@ -351,51 +327,42 @@ def build_shell():
     stack.addWidget(settings_page)
 
     nav.navigate.connect(lambda key: _navigate(stack, nav, key))
-    return central, stack, nav, cards, chain_pill, settings_page, projects_page, advanced
+    return central, stack, nav, chain_pill, order_page, projects_page, settings_page, advanced
 
 
 def _navigate(stack, nav, key):
-    if key == "overview":
-        page = stack.widget(0)
-    elif key == "projects":
-        page = stack.widget(1)
-    elif key == "settings":
-        page = stack.widget(stack.count() - 1)
-    else:
+    mapping = {"overview": 0, "order": 1, "projects": 2, "settings": 3}
+    idx = mapping.get(key)
+    if idx is None or idx >= stack.count():
         return
-    if page is None:
-        return
-    stack.setCurrentWidget(page)
+    stack.setCurrentIndex(idx)
     nav.set_active(key, animate=False)
 
 
 def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "logs"
-    # 第二个参数可选：主题名（dark / light）。浅色主题的状态色是另一套，
-    # 肉眼看对比度只能靠出图，所以留个开关。
     theme = sys.argv[2] if len(sys.argv) > 2 else "dark"
     out_dir.mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
-    # 与 gui.main.main() 一致：开窗前换肤，卡片/按钮按主题取色构造。
     apply_theme(app, theme)
 
-    window, stack, nav, cards, chain_pill, settings_page, projects_page, advanced = build_shell()
+    window, stack, nav, _pill, _order, _projects, _settings, _adv = build_shell()
     window.show()
 
     def shot_overview():
         window.grab().save(str(out_dir / "ui_preview_default.png"))
-        apply_state_shots(cards, chain_pill)
-        QTimer.singleShot(80, shot_states)
+        nav.navigate.emit("order")
+        QTimer.singleShot(100, shot_order)
 
-    def shot_states():
-        window.grab().save(str(out_dir / "ui_preview_states.png"))
+    def shot_order():
+        window.grab().save(str(out_dir / "ui_preview_order.png"))
         nav.navigate.emit("projects")
         QTimer.singleShot(120, shot_projects)
 
     def shot_projects():
         window.grab().save(str(out_dir / "ui_preview_projects.png"))
         nav.navigate.emit("settings")
-        QTimer.singleShot(80, shot_settings)
+        QTimer.singleShot(100, shot_settings)
 
     def shot_settings():
         window.grab().save(str(out_dir / "ui_preview_settings.png"))

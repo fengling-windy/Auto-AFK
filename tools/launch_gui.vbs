@@ -1,5 +1,5 @@
 Option Explicit
-Dim fso, sh, root, args, i
+Dim fso, sh, root, exePath, args, i
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
 root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
@@ -8,4 +8,9 @@ args = ""
 For i = 0 To WScript.Arguments.Count - 1
     args = args & " " & WScript.Arguments(i)
 Next
-sh.Run """" & root & "\.venv\Scripts\pythonw.exe"" """ & root & "\gui\main.py""" & args, 0, False
+exePath = root & "\Auto-AFK.exe"
+If fso.FileExists(exePath) Then
+    sh.Run """" & exePath & """" & args, 1, False
+Else
+    sh.Run """" & root & "\.venv\Scripts\pythonw.exe"" """ & root & "\gui\main.py""" & args, 0, False
+End If

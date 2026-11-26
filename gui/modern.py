@@ -16,7 +16,6 @@
 import logging
 import math
 import time
-import weakref
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -25,9 +24,11 @@ from PySide6.QtCore import (
     QObject,
     QPointF,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSize,
     Qt,
+    QTimer,
     QVariantAnimation,
 )
 from PySide6.QtGui import (
@@ -55,6 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import themes
+from gui.spring import spring_step
 
 
 class ElidedLabel(QLabel):
@@ -150,23 +152,25 @@ class FlowLayout(QLayout):
     # 两者都不裁字，取更接近 sizeHint 的那档。
     MAX_CELL_SCALE = 1.05
 
-    def __init__(self, parent=None, margin=0, h_spacing=12, v_spacing=12):
+    def __init__(self, parent=None, margin=0, h_spacing=12, v_spacing=12, vertical_center=False):
         super().__init__(parent)
         self._items = []
         self._h_spacing = int(h_spacing)
         self._v_spacing = int(v_spacing)
+        self._vertical_center = bool(vertical_center)
         self.setContentsMargins(margin, margin, margin, margin)
-        # 拖动排序时的位移补间：每张卡一个 geometry 动画，避免卡片「瞬移」。
-        # 用弱引用字典，控件被销毁（删卡/重建卡片）时条目自动消失，不会留下
-        # 指向已删除 C++ 对象的悬空动画。
-        self._anims = weakref.WeakKeyDictionary()
+        # 拖动排序时的弹簧物理状态：每张卡记录 (x, y, vx, vy, tx, ty, w, h)，
+        # 统一由 60fps 定时器步进并支持飞行途中无缝重定向（保留速度连续性）。
+        self._springs = {}
+        self._spring_timer = QTimer(self)
+        self._spring_timer.setInterval(16)
+        self._spring_timer.timeout.connect(self._tick_springs)
+        self._last_tick = 0.0
         self._anim_ms = 160
-        # 是否对「下一次布局」做补间。只有拖动/重排序才置位：窗口缩放、首轮
-        # 布局、主题切换重建卡片都必须瞬间到位，否则会出现卡片追着窗口跑。
         self._animate_next = False
-        # 拖动期间被「拿起来」的那张卡：布局不再管它的几何，由调用方按光标
-        # 位置 move()，它原来占的格子空出来让其他卡片滑动。
         self._floating = None
+        self._slot_rects = []
+        self._floating_slot_rect = None
         self._anim_step_hook = None
 
     # -- QLayout 要求的接口 ------------------------------------------------
@@ -240,87 +244,114 @@ class FlowLayout(QLayout):
     def floating(self):
         return self._floating
 
-    # -- 折行计算 ----------------------------------------------------------
+    # -- 折行计算与弹簧重排 -------------------------------------------------
+    def slot_rects(self):
+        return list(self._slot_rects)
+
+    def floating_slot_rect(self):
+        return self._floating_slot_rect
+
+    def set_anim_step_hook(self, hook):
+        self._anim_step_hook = hook
+
     def animate_next_layout(self, ms=None):
-        """让下一次布局用补间动画移动卡片（拖动排序时用）。
-
-        为什么需要：拖动排序原来是「移除 + 插入 + 立刻重排」，被拖的卡和
-        邻居瞬间跳到新位置，没有任何过渡——用户看到的是「拖了一下，卡片
-        一闪就换地方了」，判断不出到底落到哪一格。这里给每张卡一个
-        geometry 动画，邻居滑开让位、被拖的卡平滑归位。
-
-        只在拖动/重排序时置位：窗口缩放、首轮布局、切换主题重建卡片都必须
-        瞬间到位，否则卡片会追着窗口边缘跑。
-        """
+        """让下一次布局用弹簧动画平滑移动到目标槽位。"""
         self._animate_next = True
         if ms is not None:
             self._anim_ms = int(ms)
 
+    def inject_velocity(self, widget, vx, vy):
+        st = self._springs.get(widget)
+        if st is not None:
+            st["vx"] = float(vx)
+            st["vy"] = float(vy)
+
     def stop_animations(self):
-        """立刻把所有在跑的位移动画停掉并让卡片落到最终位置。"""
-        for anim in list(self._anims.values()):
+        """立刻把所有在跑的弹簧动画停掉并让卡片落到最终位置。"""
+        if self._spring_timer.isActive():
+            self._spring_timer.stop()
+        for widget, st in list(self._springs.items()):
+            rect = QRect(int(round(st["tx"])), int(round(st["ty"])), st["w"], st["h"])
             try:
-                anim.stop()
+                widget.setGeometry(rect)
             except RuntimeError:
                 pass
-        self._anims.clear()
+        self._springs.clear()
 
     def running_animations(self):
-        """在跑位移动画的卡片数（冒烟用它判断动画有没有真的起来）。"""
-        alive = 0
-        for anim in list(self._anims.values()):
-            try:
-                if anim.state() == QPropertyAnimation.Running:
-                    alive += 1
-            except RuntimeError:
+        """正在弹簧运动中的卡片数。"""
+        return len(self._springs)
+
+    def _tick_springs(self):
+        now = time.monotonic()
+        dt = (now - self._last_tick) if self._last_tick > 0 else 0.016
+        self._last_tick = now
+        finished = []
+        for widget, st in list(self._springs.items()):
+            if widget is self._floating:
+                finished.append(widget)
                 continue
-        return alive
+            x, vx, sx = spring_step(st["x"], st["vx"], st["tx"], dt)
+            y, vy, sy = spring_step(st["y"], st["vy"], st["ty"], dt)
+            if sx and sy:
+                rect = QRect(int(round(st["tx"])), int(round(st["ty"])), st["w"], st["h"])
+                finished.append(widget)
+            else:
+                st["x"], st["vx"] = x, vx
+                st["y"], st["vy"] = y, vy
+                rect = QRect(int(round(x)), int(round(y)), st["w"], st["h"])
+            try:
+                if widget.geometry() != rect:
+                    widget.setGeometry(rect)
+            except RuntimeError:
+                finished.append(widget)
+        for widget in finished:
+            self._springs.pop(widget, None)
+        hook = self._anim_step_hook
+        if hook is not None:
+            try:
+                hook()
+            except Exception as exc:
+                logging.getLogger("afk.gui").warning("spring hook failed: %s", exc)
+        if not self._springs and self._spring_timer.isActive():
+            self._spring_timer.stop()
 
     def _place(self, item, target):
-        """把 item 的控件放到 target；本次布局带补间时走动画。"""
+        """把 item 的控件放到 target；需要补间时走速度连续的弹簧动画。"""
         widget = item.widget()
         if widget is None:
             item.setGeometry(target)
             return
-        existing = self._anims.get(widget)
-        animating = False
-        if existing is not None:
-            try:
-                animating = existing.state() == QPropertyAnimation.Running
-            except RuntimeError:
-                animating = False
-        # 没有要求补间、也没有动画在跑：直接落位（窗口缩放/首轮布局/换主题）。
-        # 「有动画在跑」也要继续走动画：拖动中 sync_height / 宿主 resize 都会
-        # 顺手触发一次布局，如果这次直接 setGeometry，正在滑动的卡片会被瞬间
-        # 钉到终点、动画白做——那正是「拖动没有动画」的观感来源之一。
-        if not self._animate_next and not animating:
-            if existing is not None:
-                self._anims.pop(widget, None)
-                try:
-                    existing.stop()
-                except RuntimeError:
-                    pass
+        existing = self._springs.get(widget)
+        if not self._animate_next and existing is None:
             item.setGeometry(target)
             return
+        if existing is not None:
+            existing["tx"] = float(target.x())
+            existing["ty"] = float(target.y())
+            existing["w"] = target.width()
+            existing["h"] = target.height()
+            if not self._spring_timer.isActive():
+                self._last_tick = time.monotonic()
+                self._spring_timer.start()
+            return
         current = widget.geometry()
-        # 首次布局（尺寸还是 0）或位置本来就对：直接落位，别为了动画先画一帧
         if current.width() <= 0 or current.height() <= 0 or current == target:
             item.setGeometry(target)
             return
-        anim = existing
-        if anim is None:
-            anim = QPropertyAnimation(widget, b"geometry", widget)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            self._anims[widget] = anim
-        else:
-            try:
-                anim.stop()
-            except RuntimeError:
-                pass
-        anim.setDuration(max(0, self._anim_ms))
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.start()
+        self._springs[widget] = {
+            "x": float(current.x()),
+            "y": float(current.y()),
+            "vx": 0.0,
+            "vy": 0.0,
+            "tx": float(target.x()),
+            "ty": float(target.y()),
+            "w": target.width(),
+            "h": target.height(),
+        }
+        if not self._spring_timer.isActive():
+            self._last_tick = time.monotonic()
+            self._spring_timer.start()
 
     def _do_layout(self, rect, test_only):
         margins = self.contentsMargins()
@@ -331,30 +362,27 @@ class FlowLayout(QLayout):
         floating = self._floating if not test_only else None
         visible = []
         widest = 0
+        min_widest = 0
         for item in self._items:
             widget = item.widget()
             if widget is not None and widget.isHidden():
                 continue
-            # 拖动中被拿起来的那张卡：它现在跟着光标走，排版时整个跳过——
-            # 既不给它落位，也不占格子，于是原来的位置空出来、邻居滑过去。
-            if widget is not None and widget is floating:
-                continue
+            # 拖动中的卡片仍然保留在占位计算里，避免拖动期间剩余卡片行宽/居中位置
+            # 跳变、松手后与原位重排错位。
             hint = item.sizeHint()
-            # 卡片 minimumSizeHint 远大于 sizeHint 时用 minimum 兜底，
-            # 否则窄窗口里卡片会被压到画不全。
-            width = max(hint.width(), item.minimumSize().width())
-            height = max(hint.height(), item.minimumSize().height())
+            min_size = item.minimumSize()
+            width = max(hint.width(), min_size.width())
+            height = max(hint.height(), min_size.height())
             visible.append((item, width, height))
             widest = max(widest, width)
+            min_widest = max(min_widest, min_size.width())
 
         if not visible:
+            if not test_only:
+                self._slot_rects = []
+                self._floating_slot_rect = None
             return margins.top() + margins.bottom()
 
-        # 卡片一律保持「小巧」：cell 最多比 sizeHint 宽 15%（下限再给 24px），
-        # 宁可每行多放一张也不把卡片拉成长条。历史缺陷：原来只按 `widest`
-        # 算能放几张、再把整行宽度均分给它们，宽窗口下单张卡会被拉成
-        # sizeHint 的 1.5–2.5 倍（实测可用宽 838px 时一张卡就占满整行，
-        # 1600px 时四张各 391px），看着像横条而不是卡片。
         max_cell = max(float(widest) * self.MAX_CELL_SCALE, float(widest) + 24.0)
         per_row = max(
             1,
@@ -363,42 +391,63 @@ class FlowLayout(QLayout):
                 int((effective.width() + self._h_spacing) // (max_cell + self._h_spacing)),
             ),
         )
-        # 末尾那行只剩一张卡时（例如 5 张卡排成 4+1），把每行减一张换成
-        # 3+2 这种更均衡的分行，避免第二行孤零零一张。
         if per_row > 2 and len(visible) % per_row == 1:
             per_row -= 1
         cell = (effective.width() - (per_row - 1) * self._h_spacing) / per_row
-        cell = max(min(cell, max_cell), float(widest))
+        if per_row == 1 and effective.width() < widest:
+            floor_w = float(max(120, min_widest))
+            cell = max(floor_w, float(effective.width()))
+        else:
+            cell = max(min(cell, max_cell), float(widest))
 
-        y = effective.y()
-        row_height = 0
+        y_rel = 0.0
+        row_height = 0.0
         placed = 0
+        planned = []
         for item, _width, height in visible:
             column = placed % per_row
             if placed and column == 0:
-                y += row_height + self._v_spacing
-                row_height = 0
-            # 每行居中：被 max_cell 限宽后行右侧会空出一截，靠左对齐看起来
-            # 像「少画了一块」，居中才像正常留白。
+                y_rel += row_height + self._v_spacing
+                row_height = 0.0
             in_row = min(per_row, len(visible) - (placed - column))
             row_width = in_row * cell + max(0, in_row - 1) * self._h_spacing
             offset = max(0.0, (effective.width() - row_width) / 2.0)
             x = effective.x() + offset + column * (cell + self._h_spacing)
-            if not test_only:
-                self._place(item, QRectF(x, y, cell, height).toAlignedRect())
+            planned.append((item, x, y_rel, cell, height))
             row_height = max(row_height, height)
             placed += 1
 
+        total_h = y_rel + row_height
+        v_offset = (
+            (effective.height() - total_h) / 2.0
+            if (self._vertical_center and not test_only and effective.height() > total_h)
+            else 0.0
+        )
+
+        slot_rects = []
+        floating_slot = None
+        for item, x, item_y, cell, height in planned:
+            target = QRectF(x, effective.y() + v_offset + item_y, cell, height).toAlignedRect()
+            if not test_only:
+                slot_rects.append(target)
+                widget = item.widget()
+                if widget is not None and widget is floating:
+                    floating_slot = target
+                    self._springs.pop(widget, None)
+                else:
+                    self._place(item, target)
+
         if not test_only:
-            # 补间只作用于「这一次」布局，后续布局（窗口缩放等）立刻到位
+            self._slot_rects = slot_rects
+            self._floating_slot_rect = floating_slot
             self._animate_next = False
             hook = self._anim_step_hook
-            if hook is not None and self._anims:
+            if hook is not None and (self._springs or floating is not None):
                 try:
                     hook()
                 except Exception as exc:
                     logging.getLogger("afk.gui").warning("anim hook failed: %s", exc)
-        return y + row_height - rect.y() + margins.bottom()
+        return total_h + margins.top() + margins.bottom()
 
 
 class FlowHost(QWidget):
@@ -415,10 +464,13 @@ class FlowHost(QWidget):
     而不是让内容重叠）。
     """
 
-    def __init__(self, h_spacing=12, v_spacing=12, parent=None):
+    def __init__(self, h_spacing=12, v_spacing=12, vertical_center=False, parent=None):
         super().__init__(parent)
-        self._flow = FlowLayout(self, h_spacing=h_spacing, v_spacing=v_spacing)
+        self._flow = FlowLayout(
+            self, h_spacing=h_spacing, v_spacing=v_spacing, vertical_center=vertical_center
+        )
         self._syncing = False
+        self._min_height = 0
         # 尺寸变化后的回调（MainWindow 用它把浮在上面的并行连线层一起跟上）。
         # 为什么不能只靠父窗口手算：卡片区在 QScrollArea 里，滚动条出现/消失
         # 会让本控件宽度自己变（实测 1360x900 下从 1122 变到 1136），而这条
@@ -479,18 +531,18 @@ class FlowHost(QWidget):
         """给定容器宽度时该项目卡区域应有的高度（折成几行就有多高）。"""
         return self._rows_height(width)
 
-    def sync_height(self, width=None):
-        """按宽度钉住自身高度（折成几行就多高）。
-
-        由父窗口在窗口宽度变化时调用——必须在真正 resize 时算，而不是让 Qt
-        在布局求解阶段用未知宽度去猜。
-        """
-        target = self._rows_height(width)
+    def sync_height(self, width=None, min_height=None):
+        """按宽度钉住自身高度（折成几行就多高，且不低于可选的视口最小高度）。"""
+        if min_height is not None:
+            self._min_height = max(0, int(min_height))
+        rows_h = self._rows_height(width)
+        target = max(rows_h, self._min_height)
         if target <= 0:
             return 0
         if self.minimumHeight() != target or self.maximumHeight() != target:
             self.setFixedHeight(target)
             self.updateGeometry()
+            self.relayout(animate=False)
         return target
 
     def sizeHint(self):
@@ -551,24 +603,65 @@ class FlowHost(QWidget):
         self.updateGeometry()
         return index
 
-    # -- 拖动中的浮起与位移动画 ---------------------------------------------
+    # -- 拖动中的浮起、同步重排与落位占位槽 ---------------------------------
+    def slot_rects(self):
+        return self._flow.slot_rects()
+
+    def set_anim_step_hook(self, hook):
+        self._flow.set_anim_step_hook(hook)
+
+    def relayout(self, animate=False):
+        if animate:
+            self._flow.animate_next_layout()
+        self._flow.invalidate()
+        if self.width() > 0 and self.height() > 0:
+            self._flow.setGeometry(self.rect())
+        self._flow.activate()
+        self.updateGeometry()
+        self.update()
+
     def animate_next_layout(self, ms=None):
-        """让下一次布局用补间动画移动卡片（拖动排序时用）。"""
+        """让下一次布局用弹簧动画移动卡片（拖动排序时用）。"""
         self._flow.animate_next_layout(ms)
 
     def running_animations(self):
-        """在跑位移动画的卡片数。"""
+        """在跑弹簧动画的卡片数。"""
         return self._flow.running_animations()
 
     def set_floating(self, widget):
-        """拖动期间让某个卡片脱离排版、跟随光标（见 FlowLayout.set_floating）。"""
+        """拖动期间让某个卡片脱离排版、跟随光标，同时保留目标空槽。"""
         self._flow.set_floating(widget)
+        self.relayout(animate=False)
 
-    def clear_floating(self):
+    def clear_floating(self, animate=True):
+        """松手后恢复卡片归属，并同步触发一次带弹簧动画的重排。"""
         self._flow.clear_floating()
+        self.relayout(animate=animate)
 
     def floating(self):
         return self._flow.floating()
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self._flow.floating() is None:
+            return
+        slot = self._flow.floating_slot_rect()
+        if slot is None or not slot.isValid():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(slot).adjusted(1.5, 1.5, -1.5, -1.5)
+        col = QColor(accent_color())
+        fill = QColor(col)
+        fill.setAlpha(20)
+        border = QColor(col)
+        border.setAlpha(135)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 11.5, 11.5)
+        painter.fillPath(path, fill)
+        pen = QPen(border, 1.5, Qt.DashLine)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
     def index_of(self, widget):
         """控件在流式顺序里的序号（-1 表示不在里面）。"""
@@ -588,10 +681,7 @@ class FlowHost(QWidget):
         return out
 
     def set_order(self, widgets):
-        """按给定顺序重排控件（未列出的保持在尾部原顺序）。
-
-        只动内部列表顺序，不重建控件——重建会丢卡片的运行状态与信号连接。
-        """
+        """按给定顺序重排控件（未列出的保持在尾部原顺序）。"""
         wanted = [w for w in widgets if w is not None]
         pool = set(id(w) for w in wanted)
         rest = [w for w in self.ordered_widgets() if id(w) not in pool]
@@ -602,20 +692,13 @@ class FlowHost(QWidget):
             if item is not None and item.widget() is not None:
                 by_widget[id(item.widget())] = item
         rebuilt = [by_widget[id(w)] for w in order if id(w) in by_widget]
-        # 保险：万一有控件没在 order 里（理论上不会），补回尾部避免丢项
         for item in items:
             if item is not None and item not in rebuilt:
                 rebuilt.append(item)
         self._flow.clear_items()
         for item in rebuilt:
             self._flow.addItem(item)
-        # 只改内部列表顺序不会自己重排：_do_layout 要等下一次 setGeometry/
-        # heightForWidth 才跑，实测（logs/_p_anim.py）光 updateGeometry() 之后
-        # 四张卡的几何一动不动，得等到窗口 resize 才突然对上——用户看到的就是
-        # 「拖动松手没反应，过了一会儿才跳」。这里立刻让布局重算一次。
-        self._flow.invalidate()
-        self._flow.activate()
-        self.updateGeometry()
+        self.relayout(animate=False)
 
 
 class ParallelLinks(QWidget):
@@ -854,7 +937,7 @@ class ParallelLinks(QWidget):
 
 APP_QSS_TEMPLATE = """
 * {
-    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-family: "Inter", "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
     outline: none;
 }
 QMainWindow {
@@ -868,11 +951,24 @@ QWidget#central {
 QFrame#header {
     background: $panel;
     border: 1px solid $border;
-    border-radius: 16px;
+    border-radius: 14px;
+}
+QFrame#logCard {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QFrame#toolbarDivider {
+    background: $border;
+    min-width: 1px;
+    max-width: 1px;
+    margin-top: 4px;
+    margin-bottom: 4px;
 }
 QLabel#title {
-    font-size: 20px;
+    font-size: 18px;
     font-weight: 700;
+    letter-spacing: -0.3px;
     color: $text_strong;
 }
 QLabel#subtitle {
@@ -881,23 +977,25 @@ QLabel#subtitle {
 }
 QLabel#sectionTitle {
     color: $text_muted;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.4px;
     padding-left: 2px;
 }
 QFrame#card {
     background: $card;
     border: 1px solid $card_border;
-    border-radius: 14px;
+    border-radius: 12px;
 }
 QLabel#cardName {
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 600;
+    letter-spacing: -0.1px;
     color: $text_strong;
 }
 QLabel#cardStatus {
-    font-size: 13px;
-    font-weight: 700;
+    font-size: 12px;
+    font-weight: 600;
 }
 QLabel#cardDetail {
     color: $text_muted;
@@ -919,15 +1017,16 @@ QPushButton#cardClose {
 QPushButton#parallel {
     padding: 4px 9px;
     font-size: 11px;
-    border-radius: 7px;
+    border-radius: 6px;
 }
 QPushButton {
     background: $control_bg;
     color: $text_control;
     border: 1px solid $control_border;
-    border-radius: 9px;
-    padding: 6px 14px;
+    border-radius: 8px;
+    padding: 5px 12px;
     font-size: 12px;
+    font-weight: 500;
 }
 QPushButton:hover {
     background: $control_bg_hover;
@@ -944,8 +1043,8 @@ QPushButton#primary {
     background: $accent;
     border: 1px solid $accent;
     color: $on_accent;
-    font-weight: 700;
-    padding: 7px 20px;
+    font-weight: 600;
+    padding: 6px 18px;
 }
 QPushButton#primary:hover {
     background: $accent_hover;
@@ -955,6 +1054,7 @@ QPushButton#danger {
     background: $danger_bg;
     border: 1px solid $danger_border;
     color: $danger_text;
+    font-weight: 500;
 }
 QPushButton#danger:hover {
     background: $danger_bg_hover;
@@ -962,7 +1062,7 @@ QPushButton#danger:hover {
 QPushButton#mini {
     padding: 4px 8px;
     font-size: 11px;
-    border-radius: 7px;
+    border-radius: 6px;
 }
 /* 页签条那一行的底色不能用 QSS 给（Qt 的 QTabWidget 本体不画背景，QTabBar 也
    被设成透明的，写 background 全部无效）：设了自定义背景图后，页签之间的空隙与
@@ -980,7 +1080,7 @@ QTabBar {
 QTabBar::tab {
     background: transparent;
     color: $text_muted;
-    padding: 9px 16px;
+    padding: 8px 15px;
     margin-right: 4px;
     border-radius: 8px;
     font-size: 12px;
@@ -996,10 +1096,10 @@ QTabBar::tab:selected {
 QPlainTextEdit, QTextEdit {
     background: $input_bg_deep;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: 9px;
     color: $text;
     selection-background-color: $selection;
-    padding: 6px;
+    padding: 7px 9px;
 }
 QLineEdit {
     background: $input_bg;
@@ -1008,6 +1108,7 @@ QLineEdit {
     padding: 5px 10px;
     color: $text_control;
     selection-background-color: $selection;
+    font-size: 12px;
 }
 QLineEdit:hover {
     border-color: $input_border_hover;
@@ -1031,13 +1132,13 @@ QProgressBar::chunk {
 QListWidget {
     background: $input_bg_deep;
     border: 1px solid $border;
-    border-radius: 10px;
+    border-radius: 9px;
     color: $text_control;
     padding: 4px;
 }
 QListWidget::item {
-    padding: 7px 8px;
-    border-radius: 7px;
+    padding: 7px 10px;
+    border-radius: 6px;
 }
 QListWidget::item:hover {
     background: $overlay_subtle;
@@ -1050,9 +1151,10 @@ QComboBox, QTimeEdit {
     background: $input_bg;
     border: 1px solid $input_border;
     border-radius: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     color: $text_control;
-    min-width: 80px;
+    min-width: 76px;
+    font-size: 12px;
 }
 QComboBox:hover, QTimeEdit:hover {
     border-color: $input_border_hover;
@@ -1080,6 +1182,8 @@ QComboBox::down-arrow {
 QComboBox QAbstractItemView {
     background: $card;
     border: 1px solid $control_border;
+    border-radius: 8px;
+    padding: 4px;
     color: $text_control;
     selection-background-color: $selection;
     outline: none;
@@ -1097,7 +1201,7 @@ QCheckBox::indicator {
     background: $input_bg;
 }
 QCheckBox::indicator:hover {
-    border-color: $input_border_hover;
+    border-color: $accent_soft;
 }
 QCheckBox::indicator:checked {
     background: $accent;
@@ -1105,17 +1209,104 @@ QCheckBox::indicator:checked {
 }
 QSplitter::handle {
     background: transparent;
-    height: 8px;
+    height: 6px;
+}
+QSplitter::handle:horizontal {
+    width: 6px;
+    height: auto;
+}
+QSplitter::handle:horizontal:hover {
+    background: $control_border_hover;
+    border-radius: 3px;
+}
+/* 顶部子导航条（项目配置 / 设置共用）：胶囊标签 + 选中态实心填充 */
+QFrame#subNavBar {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QPushButton#subNavTab {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 13px;
+    color: $nav_text;
+    font-size: 12px;
+    font-weight: 500;
+}
+QPushButton#subNavTab:hover {
+    background: $overlay_nav;
+    color: $nav_text_hover;
+}
+QPushButton#subNavTab:checked {
+    background: $nav_checked_bg;
+    color: $nav_text_checked;
+    font-weight: 600;
+}
+/* 总览「上一个 / 当前 / 下一个」舞台 */
+QFrame#stageHeroCard {
+    background: $card;
+    border: 1px solid $card_border;
+    border-radius: 14px;
+}
+QFrame#stageSideCard {
+    background: $panel;
+    border: 1px solid $border;
+    border-radius: 12px;
+}
+QLabel#stageBadge {
+    color: $text_dim;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+QLabel#stageHeroTitle {
+    color: $text_strong;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+}
+QLabel#stageSideTitle {
+    color: $text_control;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#stageArrow {
+    color: $text_dim;
+    font-size: 18px;
+}
+QLabel#configPill {
+    color: $text_muted;
+    background: $overlay_subtle;
+    border-radius: 6px;
+    padding: 1px 7px;
+    font-size: 10px;
+}
+/* 多列实时日志 */
+QFrame#logColumn {
+    background: $input_bg_deep;
+    border: 1px solid $border;
+    border-radius: 10px;
+}
+QFrame#logColumnHeader {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid $border;
+}
+QFrame#logColumn QPlainTextEdit {
+    border: none;
+    border-radius: 0px;
+    background: transparent;
 }
 QScrollBar:vertical {
     background: transparent;
-    width: 11px;
+    width: 9px;
     margin: 2px;
 }
 QScrollBar::handle:vertical {
     background: $scroll_handle;
-    border-radius: 5px;
-    min-height: 30px;
+    border-radius: 4px;
+    min-height: 28px;
 }
 QScrollBar::handle:vertical:hover {
     background: $scroll_handle_hover;
@@ -1127,13 +1318,13 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 }
 QScrollBar:horizontal {
     background: transparent;
-    height: 11px;
+    height: 9px;
     margin: 2px;
 }
 QScrollBar::handle:horizontal {
     background: $scroll_handle;
-    border-radius: 5px;
-    min-width: 30px;
+    border-radius: 4px;
+    min-width: 28px;
 }
 QScrollBar::handle:horizontal:hover {
     background: $scroll_handle_hover;
@@ -1147,8 +1338,9 @@ QToolTip {
     background: $tooltip_bg;
     color: $tooltip_text;
     border: 1px solid $input_border_hover;
-    padding: 4px 8px;
+    padding: 5px 9px;
     border-radius: 6px;
+    font-size: 11px;
 }
 QDialog, QMessageBox {
     background: $panel;
@@ -1162,11 +1354,11 @@ QMenu {
     background: $card;
     border: 1px solid $control_border;
     border-radius: 10px;
-    padding: 6px;
+    padding: 5px;
 }
 QMenu::item {
     color: $text_control;
-    padding: 6px 22px 6px 14px;
+    padding: 6px 22px 6px 12px;
     border-radius: 6px;
     font-size: 12px;
 }
@@ -1179,25 +1371,32 @@ QWidget#sidebar {
     border-right: 1px solid $border;
 }
 QLabel#navBrand {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 700;
+    letter-spacing: -0.2px;
     color: $text_strong;
+}
+QLabel#navSubBrand {
+    font-size: 10px;
+    font-weight: 500;
+    color: $text_dim;
 }
 QLabel#navSection {
     color: $text_dim;
     font-size: 11px;
     font-weight: 600;
+    letter-spacing: 0.3px;
     padding-left: 8px;
 }
 QPushButton#navItem {
     background: transparent;
     border: none;
     border-radius: 8px;
-    padding: 9px 14px 9px 18px;
+    padding: 8px 12px 8px 16px;
     text-align: left;
     color: $nav_text;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QPushButton#navItem:hover {
     background: $overlay_nav;
@@ -1206,6 +1405,7 @@ QPushButton#navItem:hover {
 QPushButton#navItem:checked {
     background: $nav_checked_bg;
     color: $nav_text_checked;
+    font-weight: 600;
 }
 QWidget#pageBar {
     background: $panel;
@@ -1214,7 +1414,8 @@ QWidget#pageBar {
 }
 QLabel#pageTitle {
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 600;
+    letter-spacing: -0.2px;
     color: $text_strong;
 }
 QLabel#pageState {
@@ -1228,7 +1429,8 @@ QLabel#pagePlaceholder {
 QLabel#sectionTitleCard {
     color: $section_title;
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 600;
+    letter-spacing: -0.1px;
 }
 QLabel#hintLabel {
     color: $text_dim;
@@ -1238,9 +1440,10 @@ QSpinBox {
     background: $input_bg;
     border: 1px solid $input_border;
     border-radius: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     color: $text_control;
-    min-width: 90px;
+    min-width: 84px;
+    font-size: 12px;
 }
 QSpinBox:hover {
     border-color: $input_border_hover;
@@ -1288,22 +1491,25 @@ QSpinBox::down-arrow, QTimeEdit::down-arrow {
 # 且必须 as_posix：Windows 反斜杠在 QSS 里会被当成转义符。
 ASSET_DIR = (Path(__file__).resolve().parent / "assets").as_posix()
 
+# 按主题名缓存编译后的 QSS 字符串：避免切换主题或重复查询时对 40+ 个设计令牌
+# 反复排序并全量扫描 400 行模板。
+_QSS_CACHE = {}
+
 
 def build_qss(theme=None):
-    """按主题把令牌替换成真实颜色，返回可直接 setStyleSheet 的 QSS。
-
-    历史：整个界面原先只有一份硬编码深色的 APP_QSS，加浅色主题只能复制
-    400 行样式再逐色改。现在颜色都在 gui/themes.py 的令牌表里，模板只写
-    ``$token``；未知令牌原样保留（Qt 会把整条声明当无效丢掉，不会崩，
-    冒烟测试 check_theme() 会守住完整性）。
-    """
-    tokens = themes.resolve(theme)
+    """按主题把令牌替换成真实颜色，返回可直接 setStyleSheet 的 QSS。"""
+    norm = themes.normalize_theme(theme)
+    cached = _QSS_CACHE.get(norm)
+    if cached is not None:
+        return cached
+    tokens = themes.resolve(norm)
     text = APP_QSS_TEMPLATE.replace("__ASSET_DIR__", ASSET_DIR)
     # 必须按令牌名长度倒序替换：$control_bg 是 $control_bg_hover 的前缀，
     # 先换短的会把后者变成 "#242f42_hover"（Qt 报 Unknown color name，
     # 整条声明被丢掉，表现为按钮悬停色失效）。
     for name in sorted(tokens, key=len, reverse=True):
         text = text.replace("$" + name, tokens[name])
+    _QSS_CACHE[norm] = text
     return text
 
 
@@ -1341,7 +1547,20 @@ def _mix(a, b, t):
 
 
 def fade_in_widget(widget, duration=200, delay=0):
-    """淡入一个控件；动画结束后移除效果，避免常驻开销。"""
+    """淡入一个控件；动画结束后移除效果，避免常驻开销。
+
+    快速连续切页时先停掉控件上尚未收尾的旧动画，防止前一次 _cleanup 在半途把
+    新挂载的 QGraphicsOpacityEffect 卸掉导致闪烁或悬空引用。
+    """
+    prev = getattr(widget, "_afk_fade_anim", None)
+    if prev is not None:
+        try:
+            prev.stop()
+            prev.deleteLater()
+        except RuntimeError:
+            pass
+        widget._afk_fade_anim = None
+
     effect = QGraphicsOpacityEffect(widget)
     effect.setOpacity(0.0)
     widget.setGraphicsEffect(effect)
@@ -1350,10 +1569,13 @@ def fade_in_widget(widget, duration=200, delay=0):
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
     anim.setEasingCurve(QEasingCurve.OutCubic)
+    widget._afk_fade_anim = anim
 
     def _cleanup():
+        if getattr(widget, "_afk_fade_anim", None) is anim:
+            widget._afk_fade_anim = None
+            widget.setGraphicsEffect(None)
         anim.stop()
-        widget.setGraphicsEffect(None)
         anim.deleteLater()
 
     anim.finished.connect(_cleanup)
@@ -1465,6 +1687,7 @@ class AnimatedButton(QPushButton):
         super().__init__(text, parent)
         self._variant_name = variant
         self._variant = button_spec(variant)
+        self._colors = self._parse_spec_colors(self._variant)
         self._hover = 0.0
         self._press = 0.0
         self._ripple_center = QPointF()
@@ -1475,12 +1698,25 @@ class AnimatedButton(QPushButton):
         self._anim_press = self._make_anim(self.PRESS_IN_MS, self._set_press)
         self._anim_ripple = self._make_anim(self.RIPPLE_MS, self._set_ripple)
 
+    @staticmethod
+    def _parse_spec_colors(spec):
+        """预解析 QColor 对象，避免悬停/涟漪 60fps 动画每帧解析 6 次十六进制字符串。"""
+        return {
+            "bg": QColor(spec["bg"]),
+            "bg_hover": QColor(spec["bg_hover"]),
+            "bg_press": QColor(spec["bg_press"]),
+            "border": QColor(spec["border"]),
+            "border_hover": QColor(spec["border_hover"]),
+            "ripple": QColor(spec["ripple"]),
+        }
+
     def set_variant(self, variant):
         """换一套配色（主题切换后由界面调用，避免重建整个控件）。"""
         spec = button_spec(variant)
-        if spec is not self._variant:
+        if spec is not self._variant or variant != self._variant_name:
             self._variant = spec
             self._variant_name = variant
+            self._colors = self._parse_spec_colors(spec)
             self.update()
 
     @property
@@ -1561,11 +1797,12 @@ class AnimatedButton(QPushButton):
             bg = QColor(token["disabled_bg"])
             border = QColor(token["disabled_border"])
         else:
-            bg = _mix(QColor(spec["bg"]), QColor(spec["bg_hover"]), self._hover)
-            border = _mix(QColor(spec["border"]), QColor(spec["border_hover"]), self._hover)
+            colors = self._colors
+            bg = _mix(colors["bg"], colors["bg_hover"], self._hover)
+            border = _mix(colors["border"], colors["border_hover"], self._hover)
             if self._press > 0:
-                bg = _mix(bg, QColor(spec["bg_press"]), self._press)
-                border = _mix(border, QColor(spec["bg_press"]), self._press * 0.6)
+                bg = _mix(bg, colors["bg_press"], self._press)
+                border = _mix(border, colors["bg_press"], self._press * 0.6)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1583,6 +1820,13 @@ class AnimatedButton(QPushButton):
         painter.setPen(QPen(border, 1.0))
         painter.drawPath(path)
 
+        # Linear / Apple 风格微高光：上边缘一条极淡的内侧高光，让扁平控件具备细腻质感
+        if self.isEnabled() and self._press < 0.5 and h >= 20:
+            sheen = QColor(255, 255, 255, 36 if self._variant_name == "primary" else 14)
+            painter.setPen(QPen(sheen, 0.8))
+            inset_x = max(2.5, radius * 0.65)
+            painter.drawLine(QPointF(inset_x, 1.4), QPointF(max(inset_x, w - inset_x), 1.4))
+
         if self.hasFocus() and self.isEnabled():
             ring = QPainterPath()
             ring.addRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), radius, radius)
@@ -1595,9 +1839,9 @@ class AnimatedButton(QPushButton):
             p = self._ripple
             max_r = 0.75 * (w * w + h * h) ** 0.5
             radius_r = 4.0 + p * max_r
-            alpha = int(110 * (1.0 - p) ** 1.4)
+            alpha = int(95 * (1.0 - p) ** 1.5)
             if alpha > 0:
-                ripple_color = QColor(spec["ripple"])
+                ripple_color = QColor(self._colors["ripple"])
                 ripple_color.setAlpha(alpha)
                 painter.save()
                 painter.setClipPath(path)
@@ -1653,7 +1897,13 @@ class SmoothScroller(QObject):
             anim = QPropertyAnimation(bar, b"value", bar)
             anim.setEasingCurve(QEasingCurve.OutCubic)
             self._anims[bar] = anim
-        base = self._targets.get(bar, bar.value())
+        # 动画未在跑时以滚动条当前真实位置为起点（否则用户手拖滑块或程序切顶后，
+        # 下一次滚轮会跳回上一次滚轮留下的旧 _targets）；连续快速滚轮期间动画仍在
+        # Running，此时继续从 _targets 累加目标位置，手感顺滑不吞步长。
+        if anim.state() == QPropertyAnimation.Running:
+            base = self._targets.get(bar, bar.value())
+        else:
+            base = bar.value()
         target = int(round(base - (raw / 120.0) * step))
         target = max(bar.minimum(), min(bar.maximum(), target))
         self._targets[bar] = target
@@ -1849,7 +2099,7 @@ class StatusDot(QWidget):
             self._period = float(period)
         timer = self._ensure_timer()
         if self._pulse:
-            if changed or not timer.isActive():
+            if self.isVisible() and (changed or not timer.isActive()):
                 self._t0 = time.monotonic()
                 timer.start()
         else:
@@ -1860,6 +2110,19 @@ class StatusDot(QWidget):
         # 每轮一次无效重绘（实测空转 20 轮 100 次）。
         if changed:
             self.update()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self._pulse:
+            timer = self._ensure_timer()
+            if not timer.isActive():
+                self._t0 = time.monotonic()
+                timer.start()
+
+    def hideEvent(self, ev):
+        if self._timer is not None and self._timer.isActive():
+            self._timer.stop()
+        super().hideEvent(ev)
 
     def paintEvent(self, ev):
         painter = QPainter(self)
@@ -1970,10 +2233,112 @@ class AnimatedPill(QWidget):
 # 卡片：悬停边框过渡
 # ---------------------------------------------------------------------------
 
-class HoverGlowCard(QFrame):
-    """悬停时边框颜色平滑过渡的卡片容器（配合 QSS 背景 #card 使用）。"""
+class SubNavBar(QFrame):
+    """顶部子导航条：一排胶囊标签 + 右侧可放任意控件的尾部槽。
 
-    HOVER_MS = 160
+    「项目配置」页（每个项目一个标签 + 安装下拉）与「设置」页（分组标签）共用。
+    标签太多放不下时整条横向可滚动，不会把窗口最小宽度顶出去。
+    """
+
+    from PySide6.QtCore import Signal as _Signal
+
+    current_changed = _Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QScrollArea
+
+        self.setObjectName("subNavBar")
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(8)
+        self._scroll = QScrollArea()
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._scroll.setFixedHeight(34)
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        self._tabs_layout = QHBoxLayout(holder)
+        self._tabs_layout.setContentsMargins(0, 0, 0, 0)
+        self._tabs_layout.setSpacing(4)
+        self._tabs_layout.addStretch(1)
+        self._scroll.setWidget(holder)
+        outer.addWidget(self._scroll, 1)
+        self._trail = QHBoxLayout()
+        self._trail.setSpacing(8)
+        outer.addLayout(self._trail)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._tabs = {}
+        self._group.buttonClicked.connect(lambda btn: self.current_changed.emit(btn.property("tabKey")))
+        self._wheel = SmoothScroller(self._scroll, notches=2.0)
+        self._scroll.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        # 鼠标滚轮在这条横向栏上用来横向滚动
+        if obj is self._scroll.viewport() and ev.type() == QEvent.Wheel:
+            bar = self._scroll.horizontalScrollBar()
+            if bar.maximum() > 0:
+                bar.setValue(bar.value() - ev.angleDelta().y())
+                return True
+        return super().eventFilter(obj, ev)
+
+    def add_trailing(self, widget):
+        self._trail.addWidget(widget)
+
+    def clear_tabs(self):
+        for btn in list(self._tabs.values()):
+            self._group.removeButton(btn)
+            self._tabs_layout.removeWidget(btn)
+            btn.setParent(None)
+            btn.deleteLater()
+        self._tabs = {}
+
+    def add_tab(self, key, label, icon=None, tooltip=""):
+        btn = QPushButton(label)
+        btn.setObjectName("subNavTab")
+        btn.setCheckable(True)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setProperty("tabKey", key)
+        if tooltip:
+            btn.setToolTip(tooltip)
+        if icon is not None:
+            btn.setIcon(icon)
+        self._group.addButton(btn)
+        self._tabs_layout.insertWidget(self._tabs_layout.count() - 1, btn)
+        self._tabs[key] = btn
+        return btn
+
+    def tab_keys(self):
+        return list(self._tabs.keys())
+
+    def set_tab_icon(self, key, icon):
+        btn = self._tabs.get(key)
+        if btn is not None:
+            btn.setIcon(icon)
+
+    def current_key(self):
+        btn = self._group.checkedButton()
+        return btn.property("tabKey") if btn is not None else None
+
+    def set_current(self, key, emit=False):
+        btn = self._tabs.get(key)
+        if btn is None:
+            return False
+        btn.setChecked(True)
+        self._scroll.ensureWidgetVisible(btn, 24, 0)
+        if emit:
+            self.current_changed.emit(key)
+        return True
+
+
+class HoverGlowCard(QFrame):
+    """悬停时边框与表面微光平滑过渡的卡片容器（Linear / Apple 极简卡片质感）。"""
+
+    HOVER_MS = 170
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2009,17 +2374,22 @@ class HoverGlowCard(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
-        path.addRoundedRect(rect, 13.0, 13.0)
+        path.addRoundedRect(rect, 11.5, 11.5)
 
         token = themes.resolve(_current_theme)
-        border = _mix(QColor(token["card_border"]), QColor(accent_color()), self._hover * 0.75)
-        painter.setPen(QPen(border, 1.2))
+        # 极轻微的表面提亮叠层（模拟 Apple/Linear 悬停时的微妙层级抬升）
+        tint = QColor(accent_color())
+        tint.setAlpha(int(10 * self._hover))
+        painter.fillPath(path, tint)
+
+        border = _mix(QColor(token["card_border"]), QColor(accent_color()), self._hover * 0.68)
+        painter.setPen(QPen(border, 1.15))
         painter.drawPath(path)
 
         highlight = QColor(token["text_strong"])
-        highlight.setAlpha(int(9 * self._hover))
+        highlight.setAlpha(int(12 * self._hover))
         top = QPainterPath()
-        top.addRoundedRect(QRectF(rect.left() + 14.0, rect.top() + 0.5, rect.width() - 28.0, 1.6), 0.8, 0.8)
+        top.addRoundedRect(QRectF(rect.left() + 12.0, rect.top() + 0.5, max(0.0, rect.width() - 24.0), 1.2), 0.6, 0.6)
         painter.setPen(Qt.NoPen)
         painter.setBrush(highlight)
         painter.drawPath(top)
@@ -2028,12 +2398,8 @@ class HoverGlowCard(QFrame):
 class CardBackground(QWidget):
     """界面背景：纯色（QSS 的 $window）之上可选铺一张自定义背景图。
 
-    为什么不做成 central 的 paintEvent：central 上叠着导航栏、卡片、页签，
-    在它自己身上画图要先铺底再让子控件透明，Qt 的 QSS 背景与手绘混在一起
-    很容易出现「一半黑一半图」。改成在 central 里垫一层独立控件、放在最底层
-    （raise 之后再用 stackUnder），主题切换只改这一层的颜色。
-
-    ``opacity`` 是背景图的不透明度（0-100）：压得太实字就看不清了，所以要能调。
+    缓存按当前窗口尺寸等比缩放后的 QPixmap：避免每次子控件局部重绘（如 30fps
+    呼吸点、按钮悬停）都在 paintEvent 里对原图做一次 CPU 双线性 SmoothTransformation。
     """
 
     def __init__(self, parent=None):
@@ -2041,12 +2407,16 @@ class CardBackground(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._pixmap = None
+        self._scaled_pixmap = None
+        self._scaled_key = None
         self._opacity = 100
         self._fill = QColor(themes.DARK["window"])
 
     def set_image(self, path):
         """设置背景图路径；空/不存在/解码失败都按「没有背景图」处理。"""
         self._pixmap = None
+        self._scaled_pixmap = None
+        self._scaled_key = None
         text = str(path or "").strip()
         if text:
             candidate = Path(text)
@@ -2063,26 +2433,45 @@ class CardBackground(QWidget):
 
     def set_opacity(self, percent):
         try:
-            self._opacity = max(0, min(100, int(percent)))
+            val = max(0, min(100, int(percent)))
         except (TypeError, ValueError):
-            self._opacity = 100
-        self.update()
+            val = 100
+        if val != self._opacity:
+            self._opacity = val
+            self.update()
 
     def set_fill(self, color):
-        self._fill = QColor(color)
-        self.update()
+        target = QColor(color)
+        if target != self._fill:
+            self._fill = target
+            self.update()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._scaled_pixmap = None
+        self._scaled_key = None
+
+    def _ensure_scaled(self):
+        size = self.size()
+        if self._pixmap is None or size.width() <= 0 or size.height() <= 0:
+            return None
+        key = (self._pixmap.cacheKey(), size.width(), size.height())
+        if self._scaled_key != key or self._scaled_pixmap is None:
+            self._scaled_pixmap = self._pixmap.scaled(
+                size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            self._scaled_key = key
+        return self._scaled_pixmap
 
     def paintEvent(self, ev):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self._fill)
         if self._pixmap is None or self._opacity <= 0:
             return
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        scaled = self._ensure_scaled()
+        if scaled is None:
+            return
         painter.setOpacity(self._opacity / 100.0)
-        # 等比铺满（裁掉超出的部分），不拉伸变形
-        scaled = self._pixmap.scaled(
-            self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-        )
         x = (scaled.width() - self.width()) // 2
         y = (scaled.height() - self.height()) // 2
         painter.drawPixmap(-x, -y, scaled)

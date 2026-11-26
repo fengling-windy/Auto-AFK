@@ -333,6 +333,127 @@ def run_checks():
     return results
 
 
+def run_project_checks(key, spec=None):
+    """只针对单个项目的环境检测（项目配置页「环境检测」按钮用）。"""
+    registry_projects = config.registry().get("projects", {}) or {}
+    spec = spec or registry_projects.get(key)
+    results = []
+    if not spec:
+        return [{"group": "project", "name": key + ":registry", "status": "fail",
+                 "detail": "注册表里没有这个项目"}]
+    launch_type = spec.get("launch_type", "python")
+
+    if spec.get("require_admin"):
+        try:
+            from .supervisor import is_admin
+
+            elevated = is_admin()
+        except Exception:
+            elevated = False
+        results.append({
+            "group": "runtime", "name": "admin",
+            "status": "ok" if elevated else "warn",
+            "detail": "已提权" if elevated else "未提权：该项目需要管理员权限（请用 Auto-AFK-Admin.bat 启动）",
+        })
+
+    needed = ["git"]
+    if launch_type == "python" or key == "MaaEnd":
+        needed.append("uv")
+    if key == "MaaEnd":
+        needed += ["go", "pnpm"]
+    if key == "BAAH":
+        needed.append("adb")
+    tool_cmds = dict(TOOLS)
+    for name in needed:
+        cmd = tool_cmds.get(name)
+        if cmd is None:
+            continue
+        item = _tool_check(name, cmd)
+        item["group"] = "tools"
+        results.append(item)
+    if key == "BetterGI":
+        dotnet = _resolve_tool("dotnet", "dotnet")
+        results.append({
+            "group": "tools", "name": "dotnet",
+            "status": "ok" if dotnet else "warn",
+            "detail": dotnet or "未找到 dotnet（BetterGI 需要 .NET 8 桌面运行时）",
+        })
+
+    project_dir = config.project_dir(spec)
+    results.append({
+        "group": "project", "name": key + ":source",
+        "status": "ok" if project_dir.exists() else "fail",
+        "detail": str(project_dir) if project_dir.exists() else "missing: {0}".format(project_dir),
+    })
+    if launch_type == "python":
+        item = _venv_check(project_dir, spec.get("python", ".venv\\Scripts\\python.exe"))
+        item.update({"group": "project", "name": key + ":venv"})
+        results.append(item)
+    elif launch_type == "exe":
+        exe = project_dir / spec.get("exe", "")
+        results.append({
+            "group": "project", "name": key + ":exe",
+            "status": "ok" if exe.exists() else "fail", "detail": str(exe),
+        })
+    item = _patch_check(key)
+    item.update({"group": "project", "name": key + ":patches"})
+    results.append(item)
+    store = config.config_dir_for(key, spec)
+    results.append({
+        "group": "project", "name": key + ":config",
+        "status": "ok" if store.exists() else "warn", "detail": str(store),
+    })
+
+    if key == "BAAH":
+        adb = project_dir / "tools" / "adb" / "adb.exe"
+        aria = project_dir / "tools" / "aria2" / "aria2c.exe"
+        results.append({
+            "group": "project", "name": "BAAH:tools",
+            "status": "ok" if adb.exists() and aria.exists() else "fail",
+            "detail": "adb={0} aria2={1}".format(adb.exists(), aria.exists()),
+        })
+    if key == "MaaEnd":
+        mxu = project_dir / "install" / "mxu.exe"
+        results.append({
+            "group": "maaend", "name": "MaaEnd:install",
+            "status": "ok" if mxu.exists() else "fail", "detail": str(mxu),
+        })
+    if key == "BetterGI":
+        genshin = _find_genshin()
+        results.append({
+            "group": "runtime", "name": "genshin:install",
+            "status": "ok" if genshin else "warn",
+            "detail": genshin or "未找到原神客户端（请安装或在 BetterGI 里设置路径）",
+        })
+        tasks = 0
+        one_dragon = config.ROOT / "configs" / "BetterGI" / "User" / "OneDragon"
+        if one_dragon.exists():
+            import json as _json
+
+            for item_path in one_dragon.glob("*.json"):
+                try:
+                    data = _json.loads(item_path.read_text(encoding="utf-8-sig"))
+                    tasks = max(tasks, sum(1 for v in (data.get("TaskEnabledList") or {}).values() if v))
+                except Exception:
+                    continue
+        results.append({
+            "group": "project", "name": "BetterGI:tasks",
+            "status": "ok" if tasks > 0 else "warn",
+            "detail": "enabled one-dragon tasks: {0}".format(tasks),
+        })
+    if spec.get("manage_emulator"):
+        emu_cfg = ((config.settings().get("pre_run") or {}).get("emulator") or {})
+        device_exe = Path(str(emu_cfg.get("device_exe", "")))
+        manager_exe = Path(str(emu_cfg.get("manager_exe", "")))
+        ok = device_exe.exists() and manager_exe.exists()
+        results.append({
+            "group": "runtime", "name": "emulator:tools",
+            "status": "ok" if ok else "warn",
+            "detail": "device={0} manager={1}".format(device_exe.exists(), manager_exe.exists()),
+        })
+    return results
+
+
 def summary(results):
     ok = sum(1 for r in results if r["status"] == "ok")
     warn = sum(1 for r in results if r["status"] == "warn")
