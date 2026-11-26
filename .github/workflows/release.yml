@@ -95,10 +95,12 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath "packaging\output\Auto-AFK-v$env:APP_VERSION-win64-portable.zip" -CompressionLevel Optimal
           Remove-Item $stage -Recurse -Force
 
-          Get-ChildItem packaging\output -File | ForEach-Object {
+          $files = Get-ChildItem packaging\output -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }
+          $sums = $files | ForEach-Object {
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$h  $($_.Name)"
-          } | Out-File -FilePath packaging\output\SHA256SUMS.txt -Encoding utf8
+          }
+          $sums | Out-File -FilePath packaging\output\SHA256SUMS.txt -Encoding utf8
           Get-Content packaging\output\SHA256SUMS.txt
 
       - name: Upload installer & portable build artifacts
